@@ -1,4 +1,5 @@
-# Agent Framework
+# QVerisGen
+Automatic multi-agent workflow generation, fully integrated with QVeris unified data and tool layer
 
 基于 LangGraph 的多智能体框架，支持声明式配置、工作空间管理、三层验证机制和智能演化能力。
 
