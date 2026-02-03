@@ -1,35 +1,41 @@
 # QVerisGen
-Automatic multi-agent workflow generation, fully integrated with QVeris unified data and tool layer
 
-基于 LangGraph 的多智能体框架，支持声明式配置、工作空间管理、三层验证机制和智能演化能力。
+基于 LangGraph 的多智能体框架，支持对话式工作流构建、可视化画布编辑、智能 Agent 生成和实时执行监控。
 
 ## 核心特性
 
-- **文件系统优先** - 所有交互通过文件系统，便于调试和追踪
-- **标准核心循环** - `gather_context` → `take_action` → `verify_work` → `repeat`
-- **声明式配置** - 使用 YAML/JSON 定义 Agent、工具、工作流
-- **智能演化** - 支持动态创建、编辑、优化
-- **三层验证** - 规则验证 + LLM 评判 + 组合验证
-- **LangGraph 集成** - 基于 LangGraph 的状态管理和持久化
+- **对话式工作流构建** - 通过自然语言对话创建、修改、迭代工作流
+- **可视化 Web UI** - 现代化的 React 界面，支持画布拖拽、节点编辑、实时状态展示
+- **智能 Agent 生成** - Meta Agent 自动分析任务并生成最优 Agent 定义
+- **多模型支持** - 灵活配置多种 LLM（Qwen、DeepSeek、GPT、GLM 等）
+- **实时执行监控** - WebSocket 实时推送执行进度，支持暂停、恢复、干预
+- **QVeris 集成** - 无缝对接 QVeris 统一数据和工具层
+- **三层验证机制** - 规则验证 + LLM 评判 + 组合验证
 
 ## 架构概览
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         应用层                               │
-│                    (业务 Agent 实现)                         │
+│                       Web UI 层                              │
+│          React + ReactFlow + WebSocket + Zustand            │
 ├─────────────────────────────────────────────────────────────┤
-│                         编排层                               │
+│                       Web API 层                             │
+│              FastAPI + WebSocket Handlers                   │
+├─────────────────────────────────────────────────────────────┤
+│                       演化层 (Evolution)                     │
+│  DialogueAgent | MetaAgent | ConversationalBuilder          │
+├─────────────────────────────────────────────────────────────┤
+│                       编排层 (Orchestration)                 │
 │              SmartRouter | WorkflowEngine                   │
 ├─────────────────────────────────────────────────────────────┤
-│                         核心层                               │
+│                       核心层 (Core)                          │
 │        BaseAgent | AgentGraph | Verification                │
 ├─────────────────────────────────────────────────────────────┤
-│                         定义层                               │
+│                       定义层 (Definitions)                   │
 │   AgentDefinition | ToolDefinition | WorkflowDefinition     │
 ├─────────────────────────────────────────────────────────────┤
 │                      基础设施层                              │
-│        PostgreSQL | Redis | OSS | LangGraph                │
+│     PostgreSQL | Redis | QVeris API | Multi-LLM             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -38,316 +44,256 @@ Automatic multi-agent workflow generation, fully integrated with QVeris unified 
 ### 1. 安装依赖
 
 ```bash
-pip install langgraph langchain-core pydantic pyyaml
+# 使用 uv（推荐）
+uv sync
+
+# 或使用 pip
+pip install -e ".[web,dev]"
 ```
 
-可选依赖：
+### 2. 配置模型
+
+编辑 `config/app_config.yaml` 配置 LLM：
+
+```yaml
+models:
+  qwen-plus:
+    api_key: "your-api-key"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model_name: "qwen-plus"
+    max_tokens: 8000
+    temperature: 0.3
+
+model_selection:
+  default: "qwen-plus"
+```
+
+### 3. 启动 Web UI
+
 ```bash
-# OSS 支持
-pip install minio  # MinIO
-pip install oss2   # 阿里云 OSS
+# 启动后端服务
+uv run python -m src.web
 
-# 数据库支持
-pip install sqlalchemy asyncpg psycopg2-binary
-
-# Redis 支持
-pip install redis
+# 启动前端（新终端）
+cd web-ui && npm install && npm run dev
 ```
 
-### 2. 创建一个简单的 Agent
+访问 http://localhost:5173 开始构建工作流。
+
+## 使用方式
+
+### 方式一：Web UI 对话式构建（推荐）
+
+1. 打开 Web UI
+2. 在对话框中描述你的需求，例如：
+   - "帮我创建一个分析英伟达股票的工作流"
+   - "我需要一个多维度的投资分析系统"
+3. 系统会自动生成工作流规划
+4. 确认后自动生成 Agent 定义
+5. 在画布上查看和编辑工作流
+6. 点击执行，实时监控进度
+
+### 方式二：命令行交互式构建
+
+```bash
+uv run python examples/interactive_builder_test.py
+```
+
+### 方式三：代码定义
 
 ```python
-from etf_common.agent_framework import (
-    AgentDefinition,
-    BaseAgent,
-    AgentWorkspace,
-    WorkspaceConfig,
-)
+from src.definitions import AgentDefinition, WorkflowDefinition
+from src.orchestration import WorkflowEngine
 
-# 创建 Agent 定义
+# 定义 Agent
 agent_def = AgentDefinition(
-    agent_id="my_agent",
-    name="我的第一个 Agent",
-    description="一个简单的示例 Agent",
+    agent_id="data_collector",
+    name="数据收集器",
+    display_name="市场数据采集",
+    description="收集和整理市场数据",
     # ... 其他配置
 )
 
-# 创建工作空间
-workspace = AgentWorkspace(WorkspaceConfig(
-    base_path="./workspaces",
-    task_id="task_001"
-))
-
-# 创建并运行 Agent
-agent = BaseAgent(
-    definition=agent_def,
-    workspace=workspace,
-    llm_client=llm_client  # UnifiedLLMClient 实例
-)
-
-result = await agent.run(
-    task_description="分析股票价格",
-    input_data={"ticker": "600519.SH"}
-)
+# 执行工作流
+engine = WorkflowEngine()
+result = await engine.execute(workflow_definition)
 ```
 
-### 3. 注册工具
-
-```python
-from etf_common.agent_framework import tool, ToolCategory
-
-@tool(
-    tool_id="stock_price",
-    name="股票价格查询",
-    alias="股票价格",
-    description="查询股票实时价格",
-    category=ToolCategory.STOCK_DATA,
-    input_schema={"type": "object", "properties": {...}},
-    output_schema={"type": "object", "properties": {...}}
-)
-async def get_stock_price(ticker: str) -> dict:
-    # 实现工具逻辑
-    return {"ticker": ticker, "price": 1850.0}
-```
-
-### 4. 使用 YAML 定义 Agent
+### 方式四：YAML 配置
 
 ```yaml
 # agents/financial_analyst.yaml
 agent_id: financial_analyst
 name: 金融分析师
-description: 专业的金融分析 Agent
-version: 1.0.0
-
-execution_type: reasoning_executor
-domain_type: financial_analysis
+display_name: 专业金融分析师
+description: 分析股票并给出投资建议
 
 background_instruction:
   role_description: 你是一位资深金融分析师
-  core_capability: 分析股票价格数据并给出投资建议
-  task_context: 基于提供的信息进行专业分析
+  core_capability: 分析市场数据并给出专业建议
 
-output_instruction:
-  format_type: json
-  format_requirements:
-    - 输出格式为 JSON
-    - 包含必要字段
-
-user_instruction:
-  task_description: 请分析股票并给出建议
-  tool_references:
-    - "@股票价格"
-    - "@财务数据"
-
-model_config:
-  model_name: deepseek/deepseek-v3
+llm_config:
+  model_name: qwen-plus
   temperature: 0.3
-  max_tokens: 2048
-  max_iterations: 5
+  max_tokens: 4000
+
+tool_references:
+  - tool_id: qveris_search_tools
+  - tool_id: qveris_execute_tool
 ```
 
-加载并使用：
+## 核心模块
 
-```python
-from etf_common.agent_framework import AgentDefinition, BaseAgent
+### 演化层 (Evolution)
 
-# 从 YAML 加载
-agent_def = AgentDefinition.from_yaml_file("agents/financial_analyst.yaml")
+| 模块 | 说明 |
+|------|------|
+| `DialogueAgent` | 对话代理，理解用户意图并执行工作流操作 |
+| `MetaAgent` | 元代理，自动生成 Agent 定义和工作流 |
+| `ConversationalBuilder` | 对话式工作流构建器，管理构建状态 |
+| `WorkflowOperationTools` | 工作流操作工具集（创建、迭代、执行等）|
 
-# 创建 Agent
-agent = BaseAgent.from_yaml(
-    yaml_path="agents/financial_analyst.yaml",
-    workspace_config=workspace_config,
-    llm_client=llm_client
-)
+### 编排层 (Orchestration)
+
+| 模块 | 说明 |
+|------|------|
+| `WorkflowEngine` | 工作流执行引擎，支持流式执行和实时事件 |
+| `SmartRouter` | 智能路由，根据任务选择最佳 Agent |
+
+### 核心层 (Core)
+
+| 模块 | 说明 |
+|------|------|
+| `BaseAgent` | Agent 基类，封装 LangGraph 状态图 |
+| `AgentGraph` | Agent 执行图构建器 |
+| `ContextManager` | 上下文管理，自动收集和整理信息 |
+
+### Web 层
+
+| 模块 | 说明 |
+|------|------|
+| `WebSocketHandler` | WebSocket 消息处理和会话管理 |
+| `SessionManager` | 用户会话和状态持久化 |
+
+## 配置说明
+
+### 多模型配置
+
+支持同时配置多个 LLM 提供商：
+
+```yaml
+models:
+  qwen-plus:           # 通义千问
+  deepseek-v3:         # DeepSeek
+  gpt-5.2:             # OpenAI (via OpenRouter)
+  glm-4.7:             # 智谱 GLM
+  kimi-k2.5:           # Moonshot
+
+model_selection:
+  default: "qwen-plus"
+  complexity_mapping:
+    simple: "qwen-plus"
+    medium: "deepseek-v3"
+    complex: "deepseek-r1"
 ```
 
-## 核心组件
+### QVeris 集成
 
-### 1. 定义层 (Definitions)
-
-- **AgentDefinition** - Agent 的完整定义
-- **ToolDefinition** - 工具定义
-- **WorkflowDefinition** - 工作流定义
-- **Prompt 三层结构** - Background/Output/User Instructions
-
-### 2. 核心层 (Core)
-
-- **BaseAgent** - Agent 基类，封装 LangGraph 图
-- **AgentGraphBuilder** - 构建 LangGraph 状态图
-- **AgentState** - LangGraph 兼容的状态定义
-
-### 3. 工作空间 (Workspace)
-
-文件系统结构：
-```
-workspaces/
-└── task_001/
-    ├── input/          # 输入文件
-    │   ├── task.md     # 任务描述
-    │   └── input.json  # 输入数据
-    ├── output/         # 输出文件
-    │   └── result.json # 执行结果
-    ├── scratch/        # 草稿和临时文件
-    │   ├── draft_v1.md
-    │   └── draft_v2.md
-    ├── context/        # 收集的上下文
-    │   └── gathered_context.md
-    ├── logs/           # 日志文件
-    │   ├── actions.jsonl
-    │   └── errors.jsonl
-    └── state/          # 状态快照
-        └── checkpoint_*.json
+```yaml
+qveris:
+  enabled: true
+  api_key: ${QVERIS_API_KEY}
+  base_url: "https://qveris.ai/api/v1"
 ```
 
-### 4. 验证层 (Verification)
+## 项目结构
 
-```python
-from etf_common.agent_framework import (
-    RuleBasedVerifier,
-    JSONFormatRule,
-    RequiredFieldsRule,
-    CompositeVerifier
-)
-
-# 规则验证
-verifier = RuleBasedVerifier([
-    JSONFormatRule(),
-    RequiredFieldsRule(["company", "analysis"]),
-])
-
-# 组合验证
-composite = CompositeVerifier(
-    verifiers=[rule_verifier, llm_judge_verifier],
-    strategy="all"  # all, any, weighted
-)
 ```
-
-### 5. 工具系统 (Tools)
-
-```python
-from etf_common.agent_framework import ToolRegistry
-
-# 获取工具注册表
-registry = ToolRegistry()
-
-# 列出所有工具
-tools = registry.list_all()
-
-# 执行工具
-result = await registry.execute(
-    "stock_price",
-    {"ticker": "600519.SH"}
-)
-```
-
-### 6. 注册表 (Registry)
-
-```python
-from etf_common.agent_framework import AgentRegistry
-
-# 获取注册表
-registry = AgentRegistry()
-
-# 注册 Agent 定义
-registry.register_definition(agent_def)
-
-# 从 YAML 目录批量注册
-registry.register_from_yaml("agents/")
-
-# 查找 Agent
-agents = registry.find_by_domain(AgentDomainType.FINANCIAL_ANALYSIS)
-```
-
-### 7. 智能路由 (Smart Router)
-
-```python
-from etf_common.agent_framework import SmartRouter, RoutingStrategy
-
-router = SmartRouter(
-    agent_registry=agent_registry,
-    tool_registry=tool_registry
-)
-
-# 智能路由
-selected_agents = await router.route(
-    task_description="分析股票价格并给出投资建议",
-    domain=AgentDomainType.FINANCIAL_ANALYSIS,
-    strategy=RoutingStrategy.CAPABILITY_MATCH
-)
+agent_framework/
+├── config/              # 配置文件
+│   └── app_config.yaml  # 主配置（模型、QVeris等）
+├── src/
+│   ├── core/           # 核心 Agent 实现
+│   ├── definitions/    # 定义模型
+│   ├── evolution/      # 智能演化（对话构建、Meta Agent）
+│   ├── orchestration/  # 工作流编排
+│   ├── tools/          # 工具系统
+│   ├── verification/   # 验证层
+│   ├── web/            # Web API 和 WebSocket
+│   └── workspace/      # 工作空间管理
+├── web-ui/             # React 前端
+│   ├── src/
+│   │   ├── components/ # UI 组件
+│   │   ├── hooks/      # React Hooks
+│   │   ├── stores/     # Zustand 状态管理
+│   │   └── services/   # WebSocket 服务
+│   └── package.json
+├── examples/           # 示例代码
+├── tests/              # 测试用例
+└── docs/               # 文档
 ```
 
 ## 示例
 
-完整示例请参见：
-- `examples/agent_framework/simple_example.py` - 简单示例
-- `docs/agent_framework/08_examples.md` - 详细示例文档
+### 运行已有工作流
+
+```bash
+uv run python examples/run_workflow.py \
+  workspaces/demo/workflow.json \
+  workspaces/demo/checkpoint.json
+```
+
+### Meta Agent 自动生成
+
+```bash
+uv run python examples/meta_agent_full_test.py
+```
+
+### Web UI 测试
+
+```bash
+uv run python examples/web_ui_test.py
+```
 
 ## 文档
 
-详细文档位于 `docs/agent_framework/` 目录：
+详细文档位于 `docs/` 目录：
 
-- `00_overview.md` - 框架概览
-- `01_core_agent.md` - 核心 Agent 设计
-- `02_definitions.md` - 定义模型
-- `03_workspace.md` - 工作空间
-- `04_verification.md` - 验证机制
-- `05_tools.md` - 工具系统
-- `06_orchestration.md` - 工作流编排
-- `07_evolution.md` - 智能演化
-- `08_examples.md` - 使用示例
-- `09_data_persistence.md` - 数据持久化
-- `10_file_storage.md` - 文件存储
-- `11_storage_infrastructure.md` - 存储基础设施
+- `overall_design/00_overview.md` - 框架概览
+- `overall_design/01_core_agent.md` - 核心 Agent 设计
+- `overall_design/07_evolution.md` - 智能演化机制
+- `AGENT_FRAMEWORK_IMPLEMENTATION_SUMMARY.md` - 实现总结
 
-## 配置
+## 开发
 
-### LLM 配置
+```bash
+# 安装开发依赖
+uv sync --extra dev --extra test
 
-```python
-from etf_common.llm import UnifiedLLMClient
+# 运行测试
+uv run pytest
 
-llm_client = UnifiedLLMClient(
-    provider="openrouter",
-    model_name="deepseek/deepseek-v3",
-    client_type="langchain"
-)
+# 代码格式化
+uv run black src/ tests/
+uv run ruff check src/ tests/ --fix
 ```
 
-### 存储配置
+## 技术栈
 
-```python
-from etf_common.agent_framework import StorageConfig
+**后端**
+- Python 3.11+
+- LangGraph / LangChain
+- FastAPI + WebSocket
+- SQLAlchemy + PostgreSQL
+- Pydantic v2
 
-storage_config = StorageConfig(
-    postgres=PostgreSQLConfig(
-        host="localhost",
-        port=5432,
-        database="etf_agent_framework"
-    ),
-    oss=OSSConfig(
-        provider="minio",
-        endpoint="localhost:9000",
-        bucket_name="agent-framework"
-    ),
-    enable_postgres=True,
-    enable_oss=True
-)
-```
-
-## 最佳实践
-
-1. **使用 YAML 定义 Agent** - 便于版本控制和动态加载
-2. **充分利用工作空间** - 所有中间结果都保存在文件系统中
-3. **实现验证器** - 确保输出质量
-4. **使用工具装饰器** - 简化工具注册
-5. **启用检查点** - 支持错误恢复
-
-## 开发计划
-
-详细开发计划请参见：`.cursor/plans/agent_framework_implementation_*.plan.md`
+**前端**
+- React 18 + TypeScript
+- ReactFlow（工作流画布）
+- Zustand（状态管理）
+- Tailwind CSS
+- WebSocket 实时通信
 
 ## 许可证
-
-内部项目，未对外开源。
+Apache License 2.0
 
