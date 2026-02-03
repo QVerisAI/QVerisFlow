@@ -1159,3 +1159,496 @@ CREATE TABLE agent_checkpoints (
 CREATE INDEX idx_checkpoints_thread_id ON agent_checkpoints(thread_id);
 CREATE INDEX idx_checkpoints_created_at ON agent_checkpoints(created_at);
 ```
+
+---
+
+## 8. 上下文管理器 (ContextManager)
+
+### 8.1 设计目标
+
+上下文管理器负责控制 Agent 执行过程中的上下文大小，防止 Token 超限，同时保留关键信息。
+
+| 功能 | 描述 |
+|------|------|
+| **Token 计数** | 精确计算上下文 Token 数量 |
+| **智能压缩** | 自动压缩超限上下文 |
+| **优先级管理** | 按优先级保留重要信息 |
+| **摘要生成** | 使用 LLM 生成上下文摘要 |
+
+### 8.2 核心实现
+
+```python
+# src/core/context_manager.py
+
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Protocol
+from enum import Enum
+
+
+class TokenCounter(Protocol):
+    """Token 计数器协议"""
+    def count(self, text: str) -> int: ...
+
+
+class TiktokenCounter:
+    """基于 tiktoken 的 Token 计数器"""
+    
+    def __init__(self, model: str = "gpt-4"):
+        import tiktoken
+        self.encoding = tiktoken.encoding_for_model(model)
+    
+    def count(self, text: str) -> int:
+        return len(self.encoding.encode(text))
+
+
+class SimpleTokenCounter:
+    """简单 Token 计数器（按字符估算）"""
+    
+    def __init__(self, chars_per_token: int = 4):
+        self.chars_per_token = chars_per_token
+    
+    def count(self, text: str) -> int:
+        return len(text) // self.chars_per_token
+
+
+@dataclass
+class ContextChunk:
+    """上下文块"""
+    content: str
+    source: str  # 来源标识
+    priority: int = 1  # 优先级（越高越重要）
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    token_count: int = 0
+
+
+class ContextManager:
+    """
+    上下文管理器
+    
+    功能：
+    - Token 计数和限制
+    - 按优先级管理上下文块
+    - 智能压缩（截断或 LLM 摘要）
+    """
+    
+    def __init__(
+        self,
+        max_tokens: int = 8000,
+        token_counter: Optional[TokenCounter] = None,
+        llm_client: Any = None,  # 用于生成摘要
+    ):
+        self.max_tokens = max_tokens
+        self.token_counter = token_counter or SimpleTokenCounter()
+        self.llm_client = llm_client
+        self.chunks: List[ContextChunk] = []
+    
+    def add_chunk(
+        self,
+        content: str,
+        source: str,
+        priority: int = 1,
+        metadata: Dict[str, Any] = None,
+    ) -> ContextChunk:
+        """添加上下文块"""
+        chunk = ContextChunk(
+            content=content,
+            source=source,
+            priority=priority,
+            metadata=metadata or {},
+            token_count=self.token_counter.count(content),
+        )
+        self.chunks.append(chunk)
+        return chunk
+    
+    def get_total_tokens(self) -> int:
+        """获取总 Token 数"""
+        return sum(c.token_count for c in self.chunks)
+    
+    def needs_compression(self) -> bool:
+        """检查是否需要压缩"""
+        return self.get_total_tokens() > self.max_tokens
+    
+    async def compress(self, strategy: str = "priority") -> str:
+        """
+        压缩上下文
+        
+        Args:
+            strategy: 压缩策略
+                - "priority": 按优先级保留
+                - "summary": 使用 LLM 生成摘要
+                - "truncate": 简单截断
+        
+        Returns:
+            压缩后的上下文文本
+        """
+        if strategy == "priority":
+            return self._compress_by_priority()
+        elif strategy == "summary":
+            return await self._compress_by_summary()
+        else:
+            return self._compress_by_truncate()
+    
+    def _compress_by_priority(self) -> str:
+        """按优先级压缩"""
+        # 按优先级排序（高优先级在前）
+        sorted_chunks = sorted(
+            self.chunks, 
+            key=lambda c: c.priority, 
+            reverse=True
+        )
+        
+        result = []
+        current_tokens = 0
+        
+        for chunk in sorted_chunks:
+            if current_tokens + chunk.token_count <= self.max_tokens:
+                result.append(chunk.content)
+                current_tokens += chunk.token_count
+        
+        return "\n\n".join(result)
+    
+    async def _compress_by_summary(self) -> str:
+        """使用 LLM 生成摘要"""
+        if not self.llm_client:
+            return self._compress_by_priority()
+        
+        full_context = "\n\n".join(c.content for c in self.chunks)
+        
+        prompt = f"""请将以下内容压缩为不超过 {self.max_tokens // 2} 个 token 的摘要，保留关键信息：
+
+{full_context}
+
+摘要："""
+        
+        summary = await self.llm_client.generate(prompt)
+        return summary
+    
+    def _compress_by_truncate(self) -> str:
+        """简单截断"""
+        full_context = "\n\n".join(c.content for c in self.chunks)
+        # 估算字符数
+        max_chars = self.max_tokens * 4
+        if len(full_context) > max_chars:
+            return full_context[:max_chars] + "\n...(已截断)"
+        return full_context
+    
+    def build_context(self) -> str:
+        """构建最终上下文"""
+        if self.needs_compression():
+            # 同步使用优先级压缩
+            return self._compress_by_priority()
+        return "\n\n".join(c.content for c in self.chunks)
+    
+    def clear(self):
+        """清空上下文"""
+        self.chunks.clear()
+```
+
+### 8.3 使用示例
+
+```python
+from core.context_manager import ContextManager, TiktokenCounter
+
+# 创建上下文管理器
+ctx_manager = ContextManager(
+    max_tokens=8000,
+    token_counter=TiktokenCounter("claude-3-sonnet"),
+    llm_client=llm_client,
+)
+
+# 添加上下文块（高优先级的任务描述）
+ctx_manager.add_chunk(
+    content="分析贵州茅台的投资价值",
+    source="task",
+    priority=10,
+)
+
+# 添加收集的数据（中等优先级）
+ctx_manager.add_chunk(
+    content=financial_data,
+    source="financial_tool",
+    priority=5,
+)
+
+# 添加参考资料（低优先级）
+ctx_manager.add_chunk(
+    content=news_articles,
+    source="news_search",
+    priority=2,
+)
+
+# 检查是否需要压缩
+if ctx_manager.needs_compression():
+    context = await ctx_manager.compress(strategy="summary")
+else:
+    context = ctx_manager.build_context()
+```
+
+---
+
+## 9. 引用解析器 (ReferenceResolver)
+
+### 9.1 设计目标
+
+引用解析器支持在 Prompt 中使用特殊语法引用工具和上下文：
+
+| 语法 | 含义 | 示例 |
+|------|------|------|
+| `@工具名` | 引用工具 | `@公告搜索` → 注入工具描述和 Schema |
+| `#上下文名` | 引用上下文 | `#公司基本信息` → 注入上下文内容 |
+
+### 9.2 核心实现
+
+```python
+# src/core/reference_resolver.py
+
+import re
+from typing import Dict, Any, List, Optional, Callable
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ReferenceResolutionResult:
+    """引用解析结果"""
+    resolved_prompt: str
+    resolved_tools: List["ToolDefinition"]
+    resolved_context: Dict[str, str]
+    unresolved_tool_refs: List[str]
+    unresolved_context_refs: List[str]
+
+
+class ContextProvider:
+    """上下文提供者基类"""
+    
+    def get(self, key: str) -> Optional[str]:
+        """获取上下文内容"""
+        raise NotImplementedError
+
+
+class StaticContextProvider(ContextProvider):
+    """静态上下文提供者"""
+    
+    def __init__(self, context: Dict[str, str]):
+        self._context = context
+    
+    def get(self, key: str) -> Optional[str]:
+        return self._context.get(key)
+
+
+class DynamicContextProvider(ContextProvider):
+    """动态上下文提供者"""
+    
+    def __init__(self, resolver: Callable[[str], Optional[str]]):
+        self._resolver = resolver
+    
+    def get(self, key: str) -> Optional[str]:
+        return self._resolver(key)
+
+
+class WorkspaceContextProvider(ContextProvider):
+    """工作空间上下文提供者"""
+    
+    def __init__(self, workspace: "AgentWorkspace"):
+        self._workspace = workspace
+    
+    def get(self, key: str) -> Optional[str]:
+        # 从工作空间的 context 目录读取
+        path = f"context/{key}.md"
+        if self._workspace.exists(path):
+            return self._workspace.read_file(path)
+        return None
+
+
+class ReferenceResolver:
+    """
+    引用解析器
+    
+    支持：
+    - @工具名 → 工具定义和描述
+    - #上下文名 → 上下文内容
+    - 工具 Schema 注入
+    - 上下文提供者机制
+    """
+    
+    TOOL_PATTERN = re.compile(r'@(\S+)')
+    CONTEXT_PATTERN = re.compile(r'#(\S+)')
+    
+    def __init__(
+        self,
+        tool_registry: "ToolRegistry",
+        context_providers: List[ContextProvider] = None,
+    ):
+        self.tool_registry = tool_registry
+        self.context_providers = context_providers or []
+    
+    def add_context_provider(self, provider: ContextProvider):
+        """添加上下文提供者"""
+        self.context_providers.append(provider)
+    
+    def resolve(
+        self,
+        prompt: str,
+        allowed_tools: List[str] = None,
+        inject_tool_schemas: bool = True,
+    ) -> ReferenceResolutionResult:
+        """
+        解析 Prompt 中的引用
+        
+        Args:
+            prompt: 原始 Prompt
+            allowed_tools: 允许使用的工具别名列表
+            inject_tool_schemas: 是否注入工具 Schema
+            
+        Returns:
+            解析结果
+        """
+        # 解析工具引用
+        resolved_tools = []
+        unresolved_tool_refs = []
+        
+        tool_refs = self.TOOL_PATTERN.findall(prompt)
+        for alias in tool_refs:
+            tool_def = self.tool_registry.get_by_alias(alias)
+            if tool_def:
+                if allowed_tools is None or alias in allowed_tools:
+                    if tool_def not in resolved_tools:
+                        resolved_tools.append(tool_def)
+                else:
+                    unresolved_tool_refs.append(alias)
+            else:
+                unresolved_tool_refs.append(alias)
+        
+        # 解析上下文引用
+        resolved_context = {}
+        unresolved_context_refs = []
+        
+        context_refs = self.CONTEXT_PATTERN.findall(prompt)
+        for ref_name in context_refs:
+            content = self._resolve_context(ref_name)
+            if content:
+                resolved_context[f"#{ref_name}"] = content
+            else:
+                unresolved_context_refs.append(ref_name)
+        
+        # 构建解析后的 Prompt
+        resolved_prompt = prompt
+        
+        # 注入上下文内容
+        for ref, content in resolved_context.items():
+            ref_name = ref.replace("#", "")
+            # 在 prompt 中将 #xxx 替换为实际内容，或在末尾添加
+            if ref in resolved_prompt:
+                section = f"\n## {ref_name}\n{content}\n"
+                resolved_prompt = resolved_prompt.replace(ref, section)
+        
+        # 注入工具描述
+        if inject_tool_schemas and resolved_tools:
+            tool_section = self._build_tool_section(resolved_tools)
+            resolved_prompt += f"\n\n{tool_section}"
+        
+        return ReferenceResolutionResult(
+            resolved_prompt=resolved_prompt,
+            resolved_tools=resolved_tools,
+            resolved_context=resolved_context,
+            unresolved_tool_refs=unresolved_tool_refs,
+            unresolved_context_refs=unresolved_context_refs,
+        )
+    
+    def _resolve_context(self, key: str) -> Optional[str]:
+        """从提供者中解析上下文"""
+        for provider in self.context_providers:
+            content = provider.get(key)
+            if content:
+                return content
+        return None
+    
+    def _build_tool_section(self, tools: List["ToolDefinition"]) -> str:
+        """构建工具描述部分"""
+        sections = ["## 可用工具"]
+        
+        for tool in tools:
+            sections.append(f"""
+### @{tool.alias}
+**{tool.name}**
+
+{tool.description}
+
+**参数：**
+```json
+{json.dumps(tool.input_schema, indent=2, ensure_ascii=False)}
+```
+""")
+        
+        return "\n".join(sections)
+```
+
+### 9.3 使用示例
+
+```python
+from core.reference_resolver import (
+    ReferenceResolver,
+    StaticContextProvider,
+    WorkspaceContextProvider,
+)
+
+# 创建解析器
+resolver = ReferenceResolver(tool_registry)
+
+# 添加静态上下文提供者
+resolver.add_context_provider(StaticContextProvider({
+    "公司基本信息": "贵州茅台是中国最大的白酒企业...",
+    "历史财务数据": "2023年营收1505亿元...",
+}))
+
+# 添加工作空间上下文提供者
+resolver.add_context_provider(WorkspaceContextProvider(workspace))
+
+# 解析 Prompt
+prompt = """
+请使用 @公告搜索 和 @新闻搜索 工具收集信息。
+
+参考 #公司基本信息 和 #历史财务数据 进行分析。
+"""
+
+result = resolver.resolve(
+    prompt=prompt,
+    allowed_tools=["公告搜索", "新闻搜索", "财务数据"],
+    inject_tool_schemas=True,
+)
+
+print(f"解析后的 Prompt: {result.resolved_prompt}")
+print(f"解析的工具: {[t.alias for t in result.resolved_tools]}")
+print(f"解析的上下文: {list(result.resolved_context.keys())}")
+```
+
+### 9.4 与 Agent 图的集成
+
+引用解析器在 `AgentGraphBuilder` 中自动使用：
+
+```python
+class AgentGraphBuilder:
+    def __init__(self, ...):
+        # 创建引用解析器
+        self.reference_resolver = ReferenceResolver(
+            tool_registry=tool_registry,
+            context_providers=[
+                WorkspaceContextProvider(workspace),
+                StaticContextProvider(definition.get_context_refs()),
+            ],
+        )
+    
+    async def _gather_context_node(self, state: AgentState) -> Dict[str, Any]:
+        # 解析 Prompt 中的引用
+        resolution = self.reference_resolver.resolve(
+            prompt=self.definition.user_instruction.to_prompt(),
+            allowed_tools=[t.alias for t in self.definition.get_enabled_tools()],
+        )
+        
+        # 使用解析后的 Prompt
+        messages = [
+            SystemMessage(content=self.definition.build_system_prompt()),
+            HumanMessage(content=resolution.resolved_prompt),
+        ]
+        
+        # ...
+```

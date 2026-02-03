@@ -1316,6 +1316,274 @@ result = await agent.run(
 
 ---
 
-**版本**: v2.1.0  
-**更新日期**: 2026-01-23  
-**维护者**: agent_framework 团队
+## 12. 当前实现状态
+
+### 12.1 已实现功能
+
+| 模块 | 功能 | 状态 | 说明 |
+|------|------|------|------|
+| **ClaudeNativeAgent** | 原生 SDK 执行 | ✅ 已实现 | `src/core/claude_agent.py` |
+| | MCP 工具集成 | ✅ 已实现 | 支持 MCP 协议工具 |
+| | Hooks 机制 | ✅ 已实现 | 执行控制钩子 |
+| | 流式输出 | ✅ 已实现 | 实时响应流 |
+| **ClaudeClient** | API 客户端 | ✅ 已实现 | `src/utils/claude_client.py` |
+| | 消息 API | ✅ 已实现 | Messages API 封装 |
+| | 工具调用 | ✅ 已实现 | Tool Use 支持 |
+| | 错误处理 | ✅ 已实现 | 重试和超时处理 |
+| **工具适配** | MCPToolAdapter | ✅ 已实现 | `src/tools/adapters.py` |
+| | Qveris 工具适配 | ✅ 已实现 | `src/tools/qveris_adapter.py` |
+| | 重试/熔断 | ✅ 已实现 | `src/tools/retry.py` |
+
+### 12.2 ClaudeNativeAgent 实现
+
+```python
+# src/core/claude_agent.py (当前实现)
+
+from typing import Dict, Any, List, Optional, AsyncGenerator
+from anthropic import Anthropic
+from ..definitions import AgentDefinition
+from ..workspace import AgentWorkspace
+from ..tools import ToolRegistry
+
+
+class ClaudeNativeAgent:
+    """
+    Claude 原生 Agent
+    
+    直接使用 Anthropic SDK 进行 Agent 执行，
+    支持 MCP 工具和 Hooks 机制。
+    """
+    
+    def __init__(
+        self,
+        definition: AgentDefinition,
+        workspace: AgentWorkspace,
+        client: Anthropic = None,
+        tool_registry: ToolRegistry = None,
+        mcp_servers: List[str] = None,
+        hooks: "Hooks" = None,
+    ):
+        self.definition = definition
+        self.workspace = workspace
+        self.client = client or Anthropic()
+        self.tool_registry = tool_registry
+        self.mcp_servers = mcp_servers or []
+        self.hooks = hooks
+    
+    async def run(
+        self,
+        task_description: str = None,
+        input_data: Dict[str, Any] = None,
+        max_iterations: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        运行 Agent
+        
+        Args:
+            task_description: 任务描述（覆盖定义中的 UserInstruction）
+            input_data: 输入数据
+            max_iterations: 最大迭代次数
+            
+        Returns:
+            执行结果
+        """
+        # 构建 Prompt
+        system_prompt = self.definition.build_system_prompt()
+        user_prompt = task_description or self.definition.user_instruction.to_prompt()
+        
+        if input_data:
+            user_prompt = f"{user_prompt}\n\n输入数据:\n{json.dumps(input_data, ensure_ascii=False)}"
+        
+        # 获取工具
+        tools = self._prepare_tools()
+        
+        # 执行循环
+        messages = [{"role": "user", "content": user_prompt}]
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            # 调用 before_model_call hook
+            if self.hooks:
+                await self.hooks.before_model_call(messages)
+            
+            # 调用 Claude
+            response = self.client.messages.create(
+                model=self.definition.model_config.model_name,
+                max_tokens=self.definition.model_config.max_tokens,
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+            )
+            
+            # 调用 after_model_call hook
+            if self.hooks:
+                await self.hooks.after_model_call(response)
+            
+            # 处理响应
+            if response.stop_reason == "end_turn":
+                # 任务完成
+                return self._extract_result(response)
+            
+            elif response.stop_reason == "tool_use":
+                # 处理工具调用
+                tool_results = await self._execute_tools(response.content)
+                
+                # 添加到消息历史
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": tool_results})
+        
+        return {"status": "max_iterations_reached", "iterations": iteration}
+    
+    async def run_stream(
+        self,
+        task_description: str = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """流式执行"""
+        # ... 实现流式响应 ...
+        pass
+    
+    def _prepare_tools(self) -> List[Dict]:
+        """准备工具定义"""
+        tools = []
+        
+        # 从 ToolRegistry 获取工具
+        if self.tool_registry:
+            for tool_ref in self.definition.tool_references or []:
+                if tool_ref.enabled:
+                    tool_def = self.tool_registry.get(tool_ref.tool_id)
+                    if tool_def:
+                        tools.append({
+                            "name": tool_def.name,
+                            "description": tool_def.description,
+                            "input_schema": tool_def.input_schema,
+                        })
+        
+        return tools
+    
+    async def _execute_tools(
+        self,
+        content: List[Dict],
+    ) -> List[Dict]:
+        """执行工具调用"""
+        results = []
+        
+        for block in content:
+            if block.get("type") == "tool_use":
+                tool_name = block["name"]
+                tool_input = block["input"]
+                
+                # 调用 before_tool_call hook
+                if self.hooks:
+                    await self.hooks.before_tool_call(tool_name, tool_input)
+                
+                # 执行工具
+                result = await self.tool_registry.execute(
+                    tool_name,
+                    tool_input,
+                )
+                
+                # 调用 after_tool_call hook
+                if self.hooks:
+                    await self.hooks.after_tool_call(tool_name, result)
+                
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block["id"],
+                    "content": str(result),
+                })
+        
+        return results
+```
+
+### 12.3 Hooks 机制
+
+```python
+# src/orchestration/hooks.py (当前实现)
+
+from typing import Any, Callable, Awaitable, Optional
+
+
+class Hooks:
+    """
+    Hooks 机制
+    
+    提供执行过程中的控制点：
+    - before_model_call: 模型调用前
+    - after_model_call: 模型调用后
+    - before_tool_call: 工具调用前
+    - after_tool_call: 工具调用后
+    """
+    
+    def __init__(
+        self,
+        before_model_call: Optional[Callable[[list], Awaitable[None]]] = None,
+        after_model_call: Optional[Callable[[Any], Awaitable[None]]] = None,
+        before_tool_call: Optional[Callable[[str, dict], Awaitable[None]]] = None,
+        after_tool_call: Optional[Callable[[str, Any], Awaitable[None]]] = None,
+    ):
+        self._before_model_call = before_model_call
+        self._after_model_call = after_model_call
+        self._before_tool_call = before_tool_call
+        self._after_tool_call = after_tool_call
+    
+    async def before_model_call(self, messages: list):
+        if self._before_model_call:
+            await self._before_model_call(messages)
+    
+    async def after_model_call(self, response: Any):
+        if self._after_model_call:
+            await self._after_model_call(response)
+    
+    async def before_tool_call(self, tool_name: str, params: dict):
+        if self._before_tool_call:
+            await self._before_tool_call(tool_name, params)
+    
+    async def after_tool_call(self, tool_name: str, result: Any):
+        if self._after_tool_call:
+            await self._after_tool_call(tool_name, result)
+```
+
+### 12.4 使用示例
+
+```python
+from core.claude_agent import ClaudeNativeAgent
+from orchestration.hooks import Hooks
+from tools import ToolRegistry
+
+# 创建 Hooks
+hooks = Hooks(
+    before_tool_call=lambda name, params: print(f"调用工具: {name}"),
+    after_tool_call=lambda name, result: print(f"工具结果: {result}"),
+)
+
+# 创建 Agent
+agent = ClaudeNativeAgent(
+    definition=agent_def,
+    workspace=workspace,
+    tool_registry=tool_registry,
+    hooks=hooks,
+)
+
+# 执行任务
+result = await agent.run(
+    task_description="分析贵州茅台最近的财务数据",
+    input_data={"stock_code": "600519"},
+)
+```
+
+### 12.5 后续规划
+
+| 功能 | 优先级 | 状态 |
+|------|--------|------|
+| Computer Use 支持 | 中 | 🔄 计划中 |
+| MCP Server 管理 | 中 | 🔄 计划中 |
+| 多模型切换 | 低 | 📋 待定 |
+| 成本优化 | 低 | 📋 待定 |
+
+---
+
+**版本**: v2.2.0  
+**更新日期**: 2026-02-03  
+**维护者**: QVeris AI 团队

@@ -14,6 +14,8 @@
 3. 📝 **声明式配置** - YAML/JSON 定义 Agent、工具、工作流
 4. 🧠 **智能演化** - 支持动态创建、编辑、优化 Agent 和工作流
 5. ✅ **三层验证** - 规则验证 + 视觉验证 + LLM 评判
+6. 💬 **对话式构建** - 通过自然语言对话构建和调整工作流
+7. 🖥️ **可视化 Web UI** - 实时工作流可视化、配置编辑、执行监控
 
 ---
 
@@ -51,9 +53,31 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                        智能 Agent 框架 (etf_common/agent_framework)      │
+│                        智能 Agent 框架 (agent_framework)                 │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                     Web UI 层 (Presentation)                     │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
+│  │  │ 对话面板      │  │ 工作流画布   │  │ 执行监控             │  │   │
+│  │  │ ChatPanel    │  │WorkflowCanvas│  │ExecutionMonitor      │  │   │
+│  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
+│  │  │ Agent 编辑器  │  │ 检查点管理   │  │ 执行历史             │  │   │
+│  │  │ AgentEditor  │  │ Checkpoints  │  │ExecutionHistory      │  │   │
+│  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                    │ WebSocket                          │
+│                                    ▼                                    │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                        Web 服务层 (API)                          │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
+│  │  │ WebSocket    │  │ REST API     │  │ 会话管理             │  │   │
+│  │  │ Handlers     │  │ Routers      │  │ SessionManager       │  │   │
+│  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
+│  └─────────────────────────────────────────────────────────────────┘   │
+│                                    │                                    │
+│                                    ▼                                    │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                        应用层 (Applications)                     │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
@@ -68,18 +92,22 @@
 │  │  │ 工作流引擎   │  │ 智能路由器   │  │ 子 Agent 管理器        │  │   │
 │  │  │ WorkflowEng │  │ SmartRouter │  │ SubAgentManager        │  │   │
 │  │  └─────────────┘  └─────────────┘  └────────────────────────┘  │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌────────────────────────┐  │   │
+│  │  │ 流式执行     │  │ 运行时干预   │  │ Hooks 管理器           │  │   │
+│  │  │ Streaming   │  │ Intervention │  │ HooksManager           │  │   │
+│  │  └─────────────┘  └─────────────┘  └────────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                    │                                    │
 │                                    ▼                                    │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                       核心层 (Core)                              │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
-│  │  │ Agent 基类    │  │ 执行循环     │  │ 验证器               │  │   │
-│  │  │ BaseAgent    │  │ CoreLoop     │  │ Verifier            │  │   │
+│  │  │ Agent 基类    │  │ Claude Agent │  │ 验证器               │  │   │
+│  │  │ BaseAgent    │  │ClaudeNative  │  │ Verifier            │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
-│  │  │ 工作空间      │  │ 状态管理     │  │ 上下文压缩           │  │   │
-│  │  │ Workspace    │  │ StateManager │  │ Compaction          │  │   │
+│  │  │ 工作空间      │  │ 上下文管理   │  │ 引用解析器           │  │   │
+│  │  │ Workspace    │  │ContextMgr   │  │ RefResolver          │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                    │                                    │
@@ -91,8 +119,8 @@
 │  │  │ AgentDef     │  │ ToolDef      │  │ WorkflowDef         │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
-│  │  │ Prompt 构建   │  │ 引用解析器   │  │ Schema 定义          │  │   │
-│  │  │ PromptBuilder│  │ RefResolver  │  │ SchemaValidator     │  │   │
+│  │  │ Prompt 结构   │  │ 引用解析器   │  │ Schema 验证          │  │   │
+│  │  │ PromptStruct │  │ RefResolver  │  │ SchemaValidator     │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                    │                                    │
@@ -104,8 +132,8 @@
 │  │  │ FileTools    │  │ BashTools    │  │ BusinessTools       │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
-│  │  │ 工具注册表    │  │ 工具分类     │  │ MCP 工具             │  │   │
-│  │  │ ToolRegistry │  │ Categories   │  │ MCPTools            │  │   │
+│  │  │ 工具注册表    │  │ 重试/熔断    │  │ MCP 适配器           │  │   │
+│  │  │ ToolRegistry │  │ Retry/CB    │  │ MCPAdapter          │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                    │                                    │
@@ -113,12 +141,12 @@
 │  ┌─────────────────────────────────────────────────────────────────┐   │
 │  │                     智能演化层 (Evolution)                       │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
-│  │  │ Meta Agent   │  │ 反馈学习     │  │ 版本管理             │  │   │
-│  │  │ AgentCreator │  │ FeedbackLoop │  │ VersionControl      │  │   │
+│  │  │ 对话式构建器  │  │ Dialogue     │  │ 版本管理             │  │   │
+│  │  │ ConvBuilder  │  │ Agent        │  │ VersionControl      │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │   │
-│  │  │ Prompt 优化   │  │ A/B 测试     │  │ 性能监控             │  │   │
-│  │  │ PromptOptim  │  │ ABTesting    │  │ Monitoring          │  │   │
+│  │  │ Meta Agent   │  │ Prompt 优化   │  │ 性能监控             │  │   │
+│  │  │ AgentCreator │  │ PromptOptim  │  │ Monitoring          │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────────────┘  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
@@ -126,7 +154,8 @@
 │                        基础设施层 (Infrastructure)                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐  │
 │  │ LLM 客户端    │  │ 链路追踪     │  │ 日志/指标                    │  │
-│  │ UnifiedLLM   │  │ Tracing      │  │ Logging/Metrics             │  │
+│  │ClaudeClient  │  │ Tracing      │  │ Logging/Metrics             │  │
+│  │UnifiedLLM    │  │              │  │                              │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────────────┘  │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                          存储层 (Storage)                                │
@@ -135,6 +164,7 @@
 │  │ 结构化数据    │  │  文件存储    │  │       缓存层                  │  │
 │  │ Agent/Tool   │  │  Workspace   │  │    LLM 响应缓存               │  │
 │  │ Workflow 定义 │  │  归档/共享    │  │    会话状态                  │  │
+│  │ 检查点存储    │  │              │  │    检查点存储                 │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -144,107 +174,147 @@
 ## 目录结构
 
 ```
-etf_common/agent_framework/
-├── __init__.py
-│
-├── core/                           # 核心层
+agent_framework/
+├── src/                            # 后端源代码
 │   ├── __init__.py
-│   ├── base_agent.py              # Agent 基类（核心循环实现）
-│   ├── agent_loop.py              # 核心循环：gather → action → verify → repeat
-│   ├── agent_state.py             # Agent 状态管理
-│   ├── context_manager.py         # 上下文管理（支持 Compaction）
-│   └── error_recovery.py          # 错误恢复机制
+│   ├── config.py                  # 框架配置
+│   │
+│   ├── core/                      # 核心层
+│   │   ├── __init__.py
+│   │   ├── base_agent.py          # Agent 基类（LangGraph 执行）
+│   │   ├── claude_agent.py        # Claude 原生 Agent（SDK 执行）
+│   │   ├── agent_graph.py         # LangGraph 图构建器
+│   │   ├── agent_state.py         # Agent 状态管理
+│   │   ├── context_manager.py     # 上下文管理（Token 计数、智能压缩）
+│   │   └── reference_resolver.py  # @工具名 和 #上下文名 解析器
+│   │
+│   ├── definitions/               # 定义层
+│   │   ├── __init__.py
+│   │   ├── agent_definition.py    # Agent 定义模型
+│   │   ├── tool_definition.py     # 工具定义模型
+│   │   ├── workflow_definition.py # 工作流定义模型
+│   │   └── prompt_structure.py    # 三层 Prompt 结构
+│   │
+│   ├── workspace/                 # 工作空间（文件系统交互）
+│   │   ├── __init__.py
+│   │   ├── workspace.py           # 工作空间管理
+│   │   └── isolation.py           # 子工作空间隔离机制
+│   │
+│   ├── verification/              # 验证层
+│   │   ├── __init__.py
+│   │   ├── base.py                # 验证器基类
+│   │   ├── rule_verifier.py       # 规则验证器
+│   │   ├── llm_judge.py           # LLM 评判验证器
+│   │   └── schema_verifier.py     # Schema 验证器
+│   │
+│   ├── tools/                     # 工具层
+│   │   ├── __init__.py
+│   │   ├── registry.py            # 工具注册表（含重试、熔断器）
+│   │   ├── validation.py          # 工具参数验证
+│   │   ├── retry.py               # 重试策略和熔断器
+│   │   ├── adapters.py            # 工具适配器
+│   │   ├── qveris_adapter.py      # Qveris 工具适配器
+│   │   ├── qveris_client.py       # Qveris API 客户端
+│   │   └── builtin/               # 内置工具
+│   │       ├── __init__.py
+│   │       ├── file_tools.py      # 文件系统工具
+│   │       └── bash_tools.py      # Bash 执行工具
+│   │
+│   ├── orchestration/             # 编排层
+│   │   ├── __init__.py
+│   │   ├── workflow_engine.py     # 工作流引擎（含流式执行、运行时干预）
+│   │   ├── smart_router.py        # 智能路由器
+│   │   ├── sub_agent_manager.py   # 子 Agent 管理器
+│   │   └── hooks.py               # Hooks 管理器
+│   │
+│   ├── registry/                  # 注册表
+│   │   ├── __init__.py
+│   │   └── agent_registry.py      # Agent 注册表
+│   │
+│   ├── evolution/                 # 智能演化层
+│   │   ├── __init__.py
+│   │   ├── conversational_builder.py  # 对话式工作流构建器
+│   │   ├── dialogue_agent.py      # 对话 Agent（LLM 驱动）
+│   │   ├── workflow_operations.py # 工作流操作工具
+│   │   ├── meta_agent.py          # Meta Agent
+│   │   ├── nl_intent_processor.py # 自然语言意图处理
+│   │   ├── result_extractor.py    # 结果提取器
+│   │   ├── interactive_builder.py # 交互式构建器
+│   │   ├── prompt_optimizer.py    # Prompt 自动优化
+│   │   ├── feedback_loop.py       # 反馈学习
+│   │   ├── version_control.py     # 版本控制
+│   │   ├── ab_testing.py          # A/B 测试
+│   │   └── performance_monitor.py # 性能监控
+│   │
+│   ├── observability/             # 可观测性
+│   │   ├── __init__.py
+│   │   ├── tracing.py             # 链路追踪
+│   │   ├── metrics.py             # 性能指标
+│   │   ├── structured_logging.py  # 结构化日志
+│   │   └── exporters.py           # 指标导出器
+│   │
+│   ├── persistence/               # 数据持久化
+│   │   ├── __init__.py
+│   │   ├── models.py              # 追踪数据模型
+│   │   └── trace_storage.py       # 追踪存储
+│   │
+│   ├── utils/                     # 工具类
+│   │   ├── __init__.py
+│   │   ├── claude_client.py       # Claude API 客户端
+│   │   ├── llm_client.py          # 通用 LLM 客户端
+│   │   ├── logger.py              # 日志工具
+│   │   ├── proxy_utils.py         # 代理工具
+│   │   ├── resilience.py          # 弹性机制
+│   │   ├── safe_eval.py           # 安全表达式求值
+│   │   ├── timestamp.py           # 时间戳工具
+│   │   └── token_usage_tracker.py # Token 使用追踪
+│   │
+│   ├── web/                       # Web 服务层
+│   │   ├── __init__.py
+│   │   ├── app.py                 # FastAPI 应用入口
+│   │   ├── models/
+│   │   │   ├── __init__.py
+│   │   │   └── api_models.py      # API 数据模型
+│   │   ├── routers/               # API 路由
+│   │   │   ├── __init__.py
+│   │   │   ├── sessions.py        # 会话 API
+│   │   │   ├── workflows.py       # 工作流 API
+│   │   │   └── execution.py       # 执行 API
+│   │   └── websocket/             # WebSocket
+│   │       ├── __init__.py
+│   │       ├── handlers.py        # 消息处理器
+│   │       └── manager.py         # 连接管理器
+│   │
+│   ├── interfaces/                # 接口定义
+│   │   ├── __init__.py
+│   │   ├── agent.py
+│   │   ├── tool.py
+│   │   ├── verification.py
+│   │   ├── workflow.py
+│   │   └── workspace.py
+│   │
+│   └── exceptions.py              # 异常定义
 │
-├── definitions/                    # 定义层
-│   ├── __init__.py
-│   ├── agent_definition.py        # Agent 定义模型
-│   ├── tool_definition.py         # 工具定义模型
-│   ├── workflow_definition.py     # 工作流定义模型
-│   ├── prompt_structure.py        # 三层 Prompt 结构
-│   ├── schema_validator.py        # Schema 验证器
-│   └── reference_resolver.py      # @工具名 和 #上下文名 解析器
+├── web-ui/                        # 前端（React + TypeScript）
+│   ├── src/
+│   │   ├── App.tsx                # 应用入口
+│   │   ├── main.tsx               # React 入口
+│   │   ├── components/            # UI 组件
+│   │   │   ├── ChatPanel/         # 对话面板
+│   │   │   ├── WorkflowCanvas/    # 工作流画布
+│   │   │   └── ExecutionSelector.tsx  # 执行选择器
+│   │   ├── hooks/
+│   │   │   └── useWebSocket.ts    # WebSocket Hook
+│   │   ├── services/
+│   │   │   └── websocket.ts       # WebSocket 服务
+│   │   ├── stores/
+│   │   │   └── appStore.ts        # Zustand 状态管理
+│   │   └── types/
+│   │       └── index.ts           # 类型定义
+│   └── package.json
 │
-├── workspace/                      # 工作空间（文件系统交互）
-│   ├── __init__.py
-│   ├── workspace.py               # 工作空间管理
-│   ├── file_manager.py            # 文件管理器
-│   ├── draft_manager.py           # 草稿迭代管理
-│   └── artifact_store.py          # 产出物存储
-│
-├── verification/                   # 验证层
-│   ├── __init__.py
-│   ├── verifier.py                # 验证器基类
-│   ├── rule_verifier.py           # 规则验证器
-│   ├── llm_judge.py               # LLM 评判验证器
-│   ├── visual_verifier.py         # 视觉验证器
-│   └── composite_verifier.py      # 组合验证器
-│
-├── tools/                          # 工具层
-│   ├── __init__.py
-│   ├── tool_registry.py           # 工具注册表
-│   ├── tool_categories.py         # 工具分类
-│   ├── file_tools.py              # 文件系统工具
-│   ├── bash_tools.py              # Bash 执行工具
-│   ├── builtin/                   # 内置业务工具
-│   │   ├── search_tools.py
-│   │   ├── financial_tools.py
-│   │   └── mcp_tools.py
-│   └── tool_decorator.py          # 工具装饰器
-│
-├── orchestration/                  # 编排层
-│   ├── __init__.py
-│   ├── workflow_engine.py         # 工作流引擎
-│   ├── smart_router.py            # 智能路由器
-│   ├── sub_agent_manager.py       # 子 Agent 管理器
-│   ├── parallel_executor.py       # 并行执行器
-│   └── data_pipeline.py           # 数据管道
-│
-├── registry/                       # 注册表
-│   ├── __init__.py
-│   ├── agent_registry.py          # Agent 注册表
-│   ├── workflow_registry.py       # 工作流注册表
-│   └── yaml_loader.py             # YAML 配置加载器
-│
-├── evolution/                      # 智能演化层
-│   ├── __init__.py
-│   ├── meta_agent.py              # Meta Agent（创建/优化 Agent）
-│   ├── feedback_loop.py           # 反馈学习
-│   ├── prompt_optimizer.py        # Prompt 自动优化
-│   ├── version_control.py         # 版本控制
-│   └── ab_testing.py              # A/B 测试
-│
-├── observability/                  # 可观测性
-│   ├── __init__.py
-│   ├── tracing.py                 # 链路追踪
-│   ├── metrics.py                 # 性能指标
-│   └── logging.py                 # 日志增强
-│
-├── storage/                        # 存储层
-│   ├── __init__.py
-│   ├── storage_service.py         # 统一存储服务
-│   ├── oss_client.py              # OSS 客户端抽象 (MinIO/阿里云)
-│   ├── models/
-│   │   └── db_models.py           # SQLAlchemy ORM 模型
-│   ├── repositories/              # CRUD Repository
-│   │   ├── base.py
-│   │   ├── agent_repository.py    # Agent 定义 CRUD
-│   │   ├── tool_repository.py     # Tool 定义 CRUD
-│   │   ├── workflow_repository.py # Workflow 定义 CRUD
-│   │   ├── task_repository.py     # Task CRUD
-│   │   └── trace_repository.py    # Trace CRUD
-│   └── migrations/                 # Alembic 数据库迁移
-│
-├── persistence/                    # 数据持久化
-│   ├── __init__.py
-│   ├── models.py                  # 追踪数据模型
-│   ├── trace_collector.py         # 追踪收集器
-│   ├── trace_storage.py           # 追踪存储
-│   └── langgraph_integration.py   # LangGraph 检查点集成
-│
-└── config/                         # 配置
-    ├── __init__.py
-    ├── framework_config.py        # 框架配置
-    └── defaults.py                # 默认值
+└── docs/                          # 文档
+    └── overall_design/            # 总体设计文档
 ```
 
 ---
@@ -258,13 +328,14 @@ etf_common/agent_framework/
 | [03_workspace.md](./03_workspace.md) | 工作空间与文件系统交互 |
 | [04_verification.md](./04_verification.md) | 三层验证机制 |
 | [05_tools.md](./05_tools.md) | 工具系统设计 |
-| [06_orchestration.md](./06_orchestration.md) | 工作流编排与智能路由 |
-| [07_evolution.md](./07_evolution.md) | 智能演化与持续优化 |
+| [06_orchestration.md](./06_orchestration.md) | 工作流编排与智能路由（含流式执行、运行时干预） |
+| [07_evolution.md](./07_evolution.md) | 智能演化与对话式工作流构建 |
 | [08_examples.md](./08_examples.md) | 完整使用示例 |
 | [09_data_persistence.md](./09_data_persistence.md) | 全流程数据持久化（执行追踪） |
 | [10_file_storage.md](./10_file_storage.md) | 任务文件持久化存储 |
 | [11_storage_infrastructure.md](./11_storage_infrastructure.md) | 存储基础设施（PostgreSQL + OSS + Redis） |
-| [12_claude_sdk_integration.md](./12_claude_sdk_integration.md) | **Claude Agent SDK 深度集成方案** |
+| [12_claude_sdk_integration.md](./12_claude_sdk_integration.md) | Claude Agent SDK 深度集成方案 |
+| [13_web_ui.md](./13_web_ui.md) | **Web UI 与 WebSocket 通信协议** |
 
 ---
 
@@ -284,4 +355,74 @@ etf_common/agent_framework/
 | 上下文管理 | 无 | Compaction | ✅ 自动压缩 + 摘要 |
 | 工具可靠性 | 无 | 无 | ✅ 重试机制 + 熔断器模式 |
 | Claude SDK | 无 | 原生集成 | ✅ 双模式支持（LangGraph + Claude 原生）|
+| 用户界面 | 无 | 无 | ✅ 可视化 Web UI + WebSocket 实时通信 |
+| 对话式构建 | 无 | 无 | ✅ 自然语言驱动的工作流构建 |
+| 流式执行 | 无 | 无 | ✅ 实时事件推送 + 进度追踪 |
+| 运行时干预 | 无 | 无 | ✅ 暂停/恢复/跳过/修改输入 |
+
+---
+
+## 当前实现状态
+
+### 已实现的核心功能
+
+| 模块 | 功能 | 状态 |
+|------|------|------|
+| **核心层** | BaseAgent（LangGraph）| ✅ 已实现 |
+| | ClaudeAgent（SDK 原生）| ✅ 已实现 |
+| | 上下文管理器 | ✅ 已实现 |
+| | 引用解析器 | ✅ 已实现 |
+| **工具层** | 工具注册表 | ✅ 已实现 |
+| | 重试/熔断器 | ✅ 已实现 |
+| | 文件系统工具 | ✅ 已实现 |
+| | Qveris 适配器 | ✅ 已实现 |
+| **编排层** | 工作流引擎 | ✅ 已实现 |
+| | 流式执行 | ✅ 已实现 |
+| | 运行时干预 | ✅ 已实现 |
+| | 智能路由器 | ✅ 已实现 |
+| **演化层** | 对话式构建器 | ✅ 已实现 |
+| | DialogueAgent | ✅ 已实现 |
+| | Meta Agent | ✅ 已实现 |
+| | Prompt 优化器 | ✅ 已实现 |
+| **Web 层** | FastAPI 服务 | ✅ 已实现 |
+| | WebSocket 通信 | ✅ 已实现 |
+| | 会话管理 | ✅ 已实现 |
+| **前端** | 对话面板 | ✅ 已实现 |
+| | 工作流画布 | ✅ 已实现 |
+| | Agent 编辑器 | ✅ 已实现 |
+| | 执行历史 | ✅ 已实现 |
+
+### 新增特性说明
+
+#### 1. 对话式工作流构建
+
+通过自然语言对话构建和调整工作流，支持：
+- 自然语言理解和意图识别
+- Agent 自动生成和配置
+- 规划迭代和优化
+- 检查点保存和回滚
+
+#### 2. 可视化 Web UI
+
+提供完整的 Web 界面：
+- 左侧对话面板：与 DialogueAgent 交互
+- 右侧工作流画布：实时可视化 DAG 布局
+- 节点详情面板：Agent 配置编辑
+- 执行历史查看：历史执行记录和结果
+
+#### 3. WebSocket 实时通信
+
+支持 27 种消息类型的双向实时通信：
+- 工作流状态更新
+- 节点执行事件
+- Agent 生成进度
+- 检查点创建通知
+
+#### 4. 运行时干预机制
+
+在工作流执行过程中支持：
+- 暂停和恢复执行
+- 跳过特定节点
+- 动态修改节点输入
+- 注入上下文数据
 

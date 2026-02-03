@@ -1783,3 +1783,740 @@ optimized = await meta_agent.auto_optimize_if_needed(
 if optimized:
     print(f"已自动优化 Agent: {optimized.agent_id}")
 ```
+
+---
+
+## 9. 对话式工作流构建 (Conversational Workflow Building)
+
+### 9.1 设计目标
+
+通过自然语言对话的方式构建和调整工作流，降低使用门槛，提升用户体验。
+
+| 功能 | 描述 |
+|------|------|
+| **自然语言理解** | 理解用户的构建意图 |
+| **Agent 自动生成** | 根据需求生成 Agent 定义 |
+| **规划迭代** | 支持对规划进行多轮调整 |
+| **检查点管理** | 保存和回滚到历史状态 |
+| **实时反馈** | 实时显示构建进度和结果 |
+
+### 9.2 核心组件
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│               对话式工作流构建架构                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │           ConversationalWorkflowBuilder               │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │   │
+│  │  │ 会话管理     │  │ 状态管理     │  │ 事件回调    │   │   │
+│  │  │ Session     │  │ State       │  │ Callbacks   │   │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘   │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                            │                                 │
+│                            ▼                                 │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                  DialogueAgent                        │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │   │
+│  │  │ 意图理解     │  │ 工具调用     │  │ 响应生成    │   │   │
+│  │  │ Intent      │  │ Tool Call   │  │ Response    │   │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘   │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                            │                                 │
+│                            ▼                                 │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │              WorkflowOperationTools                   │   │
+│  │  ┌───────────┐ ┌───────────┐ ┌───────────────────┐   │   │
+│  │  │create_plan│ │add_agent │ │iterate_plan       │   │   │
+│  │  │approve    │ │execute   │ │save/rollback      │   │   │
+│  │  └───────────┘ └───────────┘ └───────────────────┘   │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 9.3 ConversationalWorkflowBuilder
+
+```python
+# src/evolution/conversational_builder.py
+
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional, Callable, Awaitable
+from enum import Enum
+from datetime import datetime
+
+
+class ConversationState(str, Enum):
+    """会话状态"""
+    IDLE = "idle"              # 空闲
+    BUILDING = "building"      # 构建中
+    EXECUTING = "executing"    # 执行中
+    COMPLETED = "completed"    # 已完成
+
+
+@dataclass
+class Message:
+    """对话消息"""
+    role: str  # user, assistant, system
+    content: str
+    timestamp: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ConversationResponse:
+    """对话响应"""
+    message: str
+    suggested_actions: List[str] = field(default_factory=list)
+    workflow_updated: bool = False
+    execution_started: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+# 事件回调类型
+WorkflowUpdateCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+ExecutionEventCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+GenerationProgressCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+class ConversationalWorkflowBuilder:
+    """
+    对话式工作流构建器
+    
+    功能：
+    - 自然语言驱动的工作流构建
+    - 会话状态管理
+    - 对话历史持久化
+    - 实时事件推送
+    """
+    
+    def __init__(
+        self,
+        dialogue_agent: "DialogueAgent",
+        workflow_tools: "WorkflowOperationTools",
+        on_workflow_update: Optional[WorkflowUpdateCallback] = None,
+        on_execution_event: Optional[ExecutionEventCallback] = None,
+        on_generation_progress: Optional[GenerationProgressCallback] = None,
+    ):
+        self.dialogue_agent = dialogue_agent
+        self.workflow_tools = workflow_tools
+        
+        # 回调
+        self.on_workflow_update = on_workflow_update
+        self.on_execution_event = on_execution_event
+        self.on_generation_progress = on_generation_progress
+        
+        # 状态
+        self.state = ConversationState.IDLE
+        self.conversation_history: List[Message] = []
+        self.current_plan: Optional[Dict[str, Any]] = None
+        self.checkpoints: List[Dict[str, Any]] = []
+    
+    async def process_message(
+        self,
+        user_message: str,
+    ) -> ConversationResponse:
+        """
+        处理用户消息
+        
+        Args:
+            user_message: 用户输入
+            
+        Returns:
+            对话响应
+        """
+        # 记录用户消息
+        self.conversation_history.append(Message(
+            role="user",
+            content=user_message,
+        ))
+        
+        # 检查直接命令
+        if self._is_direct_command(user_message):
+            return await self._handle_direct_command(user_message)
+        
+        # 使用 DialogueAgent 处理
+        response = await self.dialogue_agent.process(
+            user_message=user_message,
+            conversation_history=self.conversation_history,
+            current_plan=self.current_plan,
+        )
+        
+        # 处理工具调用
+        if response.tool_calls:
+            for tool_call in response.tool_calls:
+                await self._execute_tool_call(tool_call)
+        
+        # 记录助手消息
+        self.conversation_history.append(Message(
+            role="assistant",
+            content=response.message,
+            metadata={"tool_calls": response.tool_calls},
+        ))
+        
+        # 构建响应
+        return ConversationResponse(
+            message=response.message,
+            suggested_actions=self._get_suggested_actions(),
+            workflow_updated=response.workflow_updated,
+            execution_started=response.execution_started,
+        )
+    
+    def _is_direct_command(self, message: str) -> bool:
+        """检查是否是直接命令"""
+        direct_commands = [
+            "approve", "批准", "确认",
+            "execute", "执行", "运行",
+            "save", "保存",
+            "rollback", "回滚",
+            "reset", "重置",
+        ]
+        return any(cmd in message.lower() for cmd in direct_commands)
+    
+    async def _handle_direct_command(
+        self,
+        command: str,
+    ) -> ConversationResponse:
+        """处理直接命令"""
+        command_lower = command.lower()
+        
+        if "approve" in command_lower or "批准" in command_lower:
+            return await self._approve_plan()
+        elif "execute" in command_lower or "执行" in command_lower:
+            return await self._execute_workflow()
+        elif "save" in command_lower or "保存" in command_lower:
+            return await self._save_checkpoint()
+        elif "rollback" in command_lower or "回滚" in command_lower:
+            return await self._rollback_checkpoint()
+        elif "reset" in command_lower or "重置" in command_lower:
+            return await self._reset()
+        
+        return ConversationResponse(
+            message="未识别的命令。",
+            suggested_actions=self._get_suggested_actions(),
+        )
+    
+    async def _execute_tool_call(
+        self,
+        tool_call: Dict[str, Any],
+    ):
+        """执行工具调用"""
+        tool_name = tool_call.get("name")
+        args = tool_call.get("arguments", {})
+        
+        if tool_name == "create_workflow_plan":
+            self.current_plan = await self.workflow_tools.create_plan(
+                task_description=args.get("task_description"),
+                available_tools=args.get("available_tools"),
+            )
+            if self.on_workflow_update:
+                await self.on_workflow_update(self.current_plan)
+                
+        elif tool_name == "add_agent_to_plan":
+            self.current_plan = await self.workflow_tools.add_agent(
+                plan=self.current_plan,
+                agent_name=args.get("agent_name"),
+                agent_config=args.get("agent_config"),
+            )
+            if self.on_workflow_update:
+                await self.on_workflow_update(self.current_plan)
+                
+        elif tool_name == "iterate_plan":
+            self.current_plan = await self.workflow_tools.iterate_plan(
+                plan=self.current_plan,
+                feedback=args.get("feedback"),
+            )
+            if self.on_workflow_update:
+                await self.on_workflow_update(self.current_plan)
+    
+    def _get_suggested_actions(self) -> List[str]:
+        """获取建议操作"""
+        if self.state == ConversationState.IDLE:
+            return ["描述您想要构建的工作流"]
+        elif self.state == ConversationState.BUILDING:
+            if self.current_plan:
+                return ["批准当前规划", "继续调整", "执行工作流", "保存检查点"]
+            return ["继续描述需求"]
+        elif self.state == ConversationState.EXECUTING:
+            return ["查看执行进度", "暂停执行"]
+        return []
+```
+
+### 9.4 DialogueAgent
+
+```python
+# src/evolution/dialogue_agent.py
+
+from dataclasses import dataclass, field
+from typing import Dict, Any, List, Optional
+import json
+import re
+
+
+@dataclass
+class DialogueResponse:
+    """对话响应"""
+    message: str
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    workflow_updated: bool = False
+    execution_started: bool = False
+
+
+class DialogueAgent:
+    """
+    对话 Agent
+    
+    功能：
+    - 理解用户意图
+    - 调用工作流操作工具
+    - 生成自然语言响应
+    - 支持多种工具调用格式解析
+    """
+    
+    TOOLS = [
+        {
+            "name": "create_workflow_plan",
+            "description": "创建新的工作流规划",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_description": {
+                        "type": "string",
+                        "description": "任务描述"
+                    },
+                    "available_tools": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "可用工具列表"
+                    }
+                },
+                "required": ["task_description"]
+            }
+        },
+        {
+            "name": "add_agent_to_plan",
+            "description": "向规划中添加 Agent",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "agent_name": {
+                        "type": "string",
+                        "description": "Agent 名称"
+                    },
+                    "agent_config": {
+                        "type": "object",
+                        "description": "Agent 配置"
+                    }
+                },
+                "required": ["agent_name"]
+            }
+        },
+        {
+            "name": "iterate_plan",
+            "description": "根据反馈迭代优化规划",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "feedback": {
+                        "type": "string",
+                        "description": "用户反馈"
+                    }
+                },
+                "required": ["feedback"]
+            }
+        },
+        {
+            "name": "approve_current_state",
+            "description": "批准当前状态",
+            "parameters": {"type": "object", "properties": {}}
+        },
+        {
+            "name": "execute_workflow",
+            "description": "执行工作流",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input_data": {
+                        "type": "object",
+                        "description": "执行输入数据"
+                    }
+                }
+            }
+        },
+        # ... 更多工具定义
+    ]
+    
+    def __init__(
+        self,
+        llm_client: Any,
+        system_prompt: str = None,
+    ):
+        self.llm_client = llm_client
+        self.system_prompt = system_prompt or self._default_system_prompt()
+    
+    def _default_system_prompt(self) -> str:
+        return """你是一个智能工作流构建助手。你的任务是帮助用户通过自然语言对话构建和调整工作流。
+
+你可以使用以下工具：
+- create_workflow_plan: 创建工作流规划
+- add_agent_to_plan: 添加 Agent 到规划
+- iterate_plan: 根据反馈迭代规划
+- approve_current_state: 批准当前状态
+- execute_workflow: 执行工作流
+
+规则：
+1. 理解用户意图，选择合适的工具
+2. 如果用户描述不清楚，主动询问澄清
+3. 在修改规划前，先解释你的理解
+4. 使用 JSON 格式调用工具
+"""
+    
+    async def process(
+        self,
+        user_message: str,
+        conversation_history: List[Message],
+        current_plan: Optional[Dict[str, Any]] = None,
+    ) -> DialogueResponse:
+        """
+        处理用户消息
+        
+        Args:
+            user_message: 用户输入
+            conversation_history: 对话历史
+            current_plan: 当前规划
+            
+        Returns:
+            对话响应
+        """
+        # 构建上下文
+        context = self._build_context(
+            conversation_history=conversation_history,
+            current_plan=current_plan,
+        )
+        
+        # 调用 LLM
+        messages = [
+            {"role": "system", "content": self.system_prompt + context},
+            *[{"role": m.role, "content": m.content} for m in conversation_history[-10:]],
+            {"role": "user", "content": user_message},
+        ]
+        
+        response = await self.llm_client.generate(
+            messages=messages,
+            tools=self.TOOLS,
+        )
+        
+        # 解析工具调用
+        tool_calls = self._parse_tool_calls(response)
+        
+        # 提取消息文本
+        message = self._extract_message(response, tool_calls)
+        
+        return DialogueResponse(
+            message=message,
+            tool_calls=tool_calls,
+            workflow_updated=any(
+                tc["name"] in ["create_workflow_plan", "add_agent_to_plan", "iterate_plan"]
+                for tc in tool_calls
+            ),
+            execution_started=any(
+                tc["name"] == "execute_workflow"
+                for tc in tool_calls
+            ),
+        )
+    
+    def _build_context(
+        self,
+        conversation_history: List[Message],
+        current_plan: Optional[Dict[str, Any]],
+    ) -> str:
+        """构建上下文"""
+        context_parts = []
+        
+        if current_plan:
+            context_parts.append(f"""
+## 当前规划
+```json
+{json.dumps(current_plan, indent=2, ensure_ascii=False)}
+```
+""")
+        
+        return "\n".join(context_parts)
+    
+    def _parse_tool_calls(
+        self,
+        response: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        解析工具调用
+        
+        支持多种格式：
+        - <tool_call>...</tool_call> 标签
+        - 纯 JSON 对象
+        - Markdown 代码块
+        """
+        tool_calls = []
+        
+        # 尝试解析 <tool_call> 标签
+        tool_call_pattern = r'<tool_call>(.*?)</tool_call>'
+        matches = re.findall(tool_call_pattern, response, re.DOTALL)
+        
+        for match in matches:
+            try:
+                tool_call = json.loads(match.strip())
+                tool_calls.append(tool_call)
+            except json.JSONDecodeError:
+                continue
+        
+        # 如果没有找到，尝试解析 JSON 代码块
+        if not tool_calls:
+            json_pattern = r'```json\s*(.*?)\s*```'
+            matches = re.findall(json_pattern, response, re.DOTALL)
+            
+            for match in matches:
+                try:
+                    data = json.loads(match)
+                    if "name" in data or "tool" in data:
+                        tool_calls.append(data)
+                except json.JSONDecodeError:
+                    continue
+        
+        return tool_calls
+    
+    def _extract_message(
+        self,
+        response: str,
+        tool_calls: List[Dict],
+    ) -> str:
+        """提取消息文本（去除工具调用部分）"""
+        message = response
+        
+        # 移除 <tool_call> 标签
+        message = re.sub(r'<tool_call>.*?</tool_call>', '', message, flags=re.DOTALL)
+        
+        # 移除 JSON 代码块
+        message = re.sub(r'```json.*?```', '', message, flags=re.DOTALL)
+        
+        return message.strip()
+```
+
+### 9.5 WorkflowOperationTools
+
+```python
+# src/evolution/workflow_operations.py
+
+from typing import Dict, Any, List, Optional
+
+
+class WorkflowOperationTools:
+    """
+    工作流操作工具集
+    
+    提供对话式构建器调用的工具实现
+    """
+    
+    def __init__(
+        self,
+        meta_agent: "MetaAgent",
+        workflow_engine: "WorkflowEngine",
+        tool_registry: "ToolRegistry",
+    ):
+        self.meta_agent = meta_agent
+        self.workflow_engine = workflow_engine
+        self.tool_registry = tool_registry
+    
+    async def create_plan(
+        self,
+        task_description: str,
+        available_tools: List[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        创建工作流规划
+        
+        Args:
+            task_description: 任务描述
+            available_tools: 可用工具列表
+            
+        Returns:
+            规划数据
+        """
+        # 使用 MetaAgent 生成规划
+        agents_info = await self.meta_agent.analyze_task(task_description)
+        
+        plan = {
+            "task_description": task_description,
+            "mode": "planning",
+            "phase": "initial",
+            "agents": agents_info["agents"],
+            "nodes": self._build_nodes(agents_info["agents"]),
+            "edges": self._build_edges(agents_info["agents"]),
+        }
+        
+        return plan
+    
+    async def add_agent(
+        self,
+        plan: Dict[str, Any],
+        agent_name: str,
+        agent_config: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
+        """添加 Agent 到规划"""
+        # 生成 Agent 定义
+        agent_def = await self.meta_agent.create_agent(
+            requirement=agent_config.get("description", agent_name),
+            domain=agent_config.get("domain"),
+        )
+        
+        # 添加到规划
+        plan["agents"].append({
+            "name": agent_name,
+            "definition": agent_def.model_dump(),
+        })
+        
+        # 更新节点
+        plan["nodes"] = self._build_nodes(plan["agents"])
+        plan["edges"] = self._build_edges(plan["agents"])
+        
+        return plan
+    
+    async def iterate_plan(
+        self,
+        plan: Dict[str, Any],
+        feedback: str,
+    ) -> Dict[str, Any]:
+        """根据反馈迭代规划"""
+        # 使用 MetaAgent 优化规划
+        optimized_plan = await self.meta_agent.optimize_workflow(
+            current_plan=plan,
+            feedback=feedback,
+        )
+        
+        return optimized_plan
+    
+    async def execute_plan(
+        self,
+        plan: Dict[str, Any],
+        input_data: Dict[str, Any] = None,
+    ):
+        """执行规划"""
+        # 构建工作流定义
+        workflow_def = self._plan_to_workflow(plan)
+        
+        # 执行
+        async for event in self.workflow_engine.execute_with_streaming(
+            workflow=workflow_def,
+            initial_input=input_data,
+        ):
+            yield event
+    
+    def _build_nodes(self, agents: List[Dict]) -> List[Dict]:
+        """构建节点列表"""
+        nodes = [{"node_id": "start", "node_type": "start", "name": "开始"}]
+        
+        for i, agent in enumerate(agents):
+            nodes.append({
+                "node_id": f"agent_{i}",
+                "node_type": "agent",
+                "name": agent.get("name"),
+                "agent_id": agent.get("name"),
+            })
+        
+        nodes.append({"node_id": "end", "node_type": "end", "name": "结束"})
+        return nodes
+    
+    def _build_edges(self, agents: List[Dict]) -> List[Dict]:
+        """构建边列表"""
+        edges = []
+        
+        if not agents:
+            edges.append({"from_node": "start", "to_node": "end"})
+        else:
+            edges.append({"from_node": "start", "to_node": "agent_0"})
+            
+            for i in range(len(agents) - 1):
+                edges.append({"from_node": f"agent_{i}", "to_node": f"agent_{i+1}"})
+            
+            edges.append({"from_node": f"agent_{len(agents)-1}", "to_node": "end"})
+        
+        return edges
+```
+
+### 9.6 使用示例
+
+```python
+from evolution import ConversationalWorkflowBuilder, DialogueAgent, WorkflowOperationTools
+
+# 创建组件
+dialogue_agent = DialogueAgent(llm_client)
+workflow_tools = WorkflowOperationTools(meta_agent, workflow_engine, tool_registry)
+
+# 创建对话式构建器
+builder = ConversationalWorkflowBuilder(
+    dialogue_agent=dialogue_agent,
+    workflow_tools=workflow_tools,
+    on_workflow_update=lambda plan: print(f"规划更新: {plan}"),
+    on_execution_event=lambda event: print(f"执行事件: {event}"),
+)
+
+# 对话式构建
+response = await builder.process_message(
+    "我想要一个分析贵州茅台投资价值的工作流，需要收集财务数据、新闻和研报"
+)
+print(response.message)
+# 输出: 好的，我来帮您创建一个投资分析工作流。这个工作流将包含以下 Agent：
+#       1. 数据收集 Agent - 收集财务数据
+#       2. 新闻分析 Agent - 分析相关新闻
+#       3. 研报解读 Agent - 解读研究报告
+#       4. 综合分析 Agent - 整合分析结论
+
+# 调整规划
+response = await builder.process_message(
+    "增加一个风险评估的步骤"
+)
+
+# 批准并执行
+response = await builder.process_message("批准并执行")
+```
+
+### 9.7 与 Web UI 的集成
+
+对话式构建器通过 WebSocket 与前端 Web UI 集成：
+
+```python
+# src/web/websocket/handlers.py
+
+class WebSocketHandler:
+    """WebSocket 消息处理器"""
+    
+    async def handle_message(
+        self,
+        session_id: str,
+        message: WSMessage,
+    ):
+        """处理 WebSocket 消息"""
+        if message.type == WSMessageType.CHAT_MESSAGE:
+            # 获取会话的对话构建器
+            builder = self.session_manager.get_builder(session_id)
+            
+            # 处理消息
+            response = await builder.process_message(
+                user_message=message.payload.get("content"),
+            )
+            
+            # 发送响应
+            await self.send_message(session_id, {
+                "type": "CHAT_MESSAGE",
+                "payload": {
+                    "role": "assistant",
+                    "content": response.message,
+                },
+            })
+            
+            # 如果工作流更新，发送更新消息
+            if response.workflow_updated:
+                await self.send_message(session_id, {
+                    "type": "WORKFLOW_UPDATE",
+                    "payload": builder.current_plan,
+                })
+```
