@@ -1,0 +1,117 @@
+# 数据收集器 Agent 定义
+# 用于工作流中的数据收集阶段
+
+agent_id: data_collector
+name: 数据收集器
+description: 负责收集和整理各类数据的 Agent
+version: 1.0.0
+
+execution_type: executor
+domain_type: general
+
+background_instruction:
+  role_description: |
+    你是一个专业的数据收集器，负责从多个来源收集和整理数据。
+  
+  core_capability: |
+    你的核心能力包括：
+    - 数据采集和清洗
+    - 多源数据整合
+    - 数据格式化输出
+  
+  task_context: |
+    在当前任务中，你需要收集指定的数据并整理成结构化格式。
+
+output_instruction:
+  format_type: json
+  format_requirements:
+    - "输出 JSON 格式"
+    - "包含数据来源和时间戳"
+  style_requirements:
+    - "数据准确完整"
+    - "格式统一规范"
+  output_schema:
+    type: object
+    required:
+      - status
+      - data
+      - metadata
+    properties:
+      status:
+        type: string
+        enum: [success, partial, failed]
+      data:
+        type: object
+      metadata:
+        type: object
+        properties:
+          source:
+            type: string
+          timestamp:
+            type: string
+          records_count:
+            type: integer
+
+user_instruction:
+  task_description: |
+    请收集指定的数据：
+    1. 从可用工具获取原始数据
+    2. 清洗和验证数据
+    3. 整理成结构化格式输出
+  
+  tool_references:
+    - "@financial_data"
+    - "@stock_price"
+  
+  context_references: []
+
+llm_config:
+  model_name: deepseek/deepseek-v3
+  temperature: 0.1
+  max_tokens: 4096
+  max_iterations: 5
+
+# 工具引用 - 包含本地工具和 QVeris 远程工具
+tool_references:
+  # 本地内置工具
+  - tool_id: financial_data
+    alias: 财务数据
+    tool_type: builtin
+    enabled: true
+  - tool_id: stock_price
+    alias: 股票价格
+    tool_type: builtin
+    enabled: true
+  # QVeris 远程工具 - 允许 Agent 动态搜索和调用互联网工具
+  - tool_id: qveris_search_tools
+    alias: 搜索远程工具
+    tool_type: qveris
+    enabled: true
+    description: |
+      搜索 QVeris 平台上的可用工具。
+      使用自然语言描述所需工具的能力，如：
+      - "stock price API" - 股票价格接口
+      - "financial statements" - 财务报表数据
+      - "company news" - 公司新闻
+      - "market data" - 市场数据
+  - tool_id: qveris_execute_tool
+    alias: 执行远程工具
+    tool_type: qveris
+    enabled: true
+    description: |
+      执行搜索到的远程工具。
+      需要提供：
+      - tool_id: 从搜索结果获取的工具 ID
+      - search_id: 搜索时返回的 search_id
+      - params: 工具所需的参数（根据工具的 input_schema）
+  - tool_id: qveris_get_tool_info
+    alias: 获取工具详情
+    tool_type: qveris
+    enabled: true
+    description: 获取指定工具的详细信息，包括参数说明和使用示例
+
+tags:
+  - data
+  - collector
+  - workflow
+  - qveris-enabled

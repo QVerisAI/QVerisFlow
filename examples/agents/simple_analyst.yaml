@@ -1,0 +1,105 @@
+# 简单分析师 Agent 定义
+# 这是最基础的 Agent 示例
+
+agent_id: simple_analyst
+name: 简单分析师
+description: 一个简单的金融分析 Agent，用于演示基本功能
+version: 1.0.0
+
+execution_type: executor
+domain_type: financial_analysis
+
+background_instruction:
+  role_description: |
+    你是一位专业的金融分析师。
+    你的分析风格客观、专业，善于从多维度评估公司价值。
+  
+  core_capability: |
+    你的核心能力包括：
+    - 基础财务分析
+    - 估值评估
+    - 风险识别
+  
+  task_context: |
+    在本任务中，你需要根据提供的信息，
+    对目标公司进行简要的投资价值评估。
+
+output_instruction:
+  format_type: json
+  format_requirements:
+    - "输出标准 JSON 格式"
+    - "不要使用 markdown 代码块包裹"
+  style_requirements:
+    - "语言简洁、专业"
+    - "结论明确"
+  output_schema:
+    type: object
+    required:
+      - company_name
+      - summary
+      - recommendation
+    properties:
+      company_name:
+        type: string
+        description: 公司名称
+      summary:
+        type: string
+        description: 分析摘要
+      recommendation:
+        type: string
+        enum: [买入, 持有, 卖出]
+        description: 投资建议
+
+user_instruction:
+  task_description: |
+    请对目标公司进行简要的投资分析，并给出投资建议。
+    
+    分析要点：
+    1. 公司基本情况
+    2. 主要优势和风险
+    3. 投资建议
+    
+    你可以使用以下工具来获取更多信息：
+    - 使用 qveris_search_tools 搜索相关的数据查询工具
+    - 使用 qveris_execute_tool 执行找到的工具获取数据
+    - 使用 file_read 读取工作空间中的文件
+    - 使用 file_write 保存分析结果
+  
+  tool_references:
+    - "@file_read"
+    - "@file_write"
+    - "@qveris_search_tools"
+    - "@qveris_execute_tool"
+  context_references: []
+
+# 工具引用配置 - 与 user_instruction.tool_references 对应
+tool_references:
+  # 文件系统工具
+  - tool_id: file_read
+    alias: 读取文件
+    tool_type: builtin
+    enabled: true
+  - tool_id: file_write
+    alias: 写入文件
+    tool_type: builtin
+    enabled: true
+  # QVeris 远程工具
+  - tool_id: qveris_search_tools
+    alias: 搜索远程工具
+    tool_type: qveris
+    enabled: true
+  - tool_id: qveris_execute_tool
+    alias: 执行远程工具
+    tool_type: qveris
+    enabled: true
+
+llm_config:
+  model_name: deepseek/deepseek-v3
+  temperature: 0.3
+  max_tokens: 2048
+  max_iterations: 3
+
+tags:
+  - simple
+  - example
+  - financial

@@ -1,0 +1,186 @@
+# 金融分析师 Agent 定义
+# 完整的金融分析 Agent，包含工具引用和验证规则
+
+agent_id: financial_analyst_v1
+name: 金融分析师
+description: 专业的公司投资价值分析 Agent
+version: 1.0.0
+
+execution_type: reasoning_executor
+domain_type: financial_analysis
+
+background_instruction:
+  role_description: |
+    你是一位资深的金融分析师，拥有超过 10 年的 A 股市场研究经验。
+    你的分析风格客观、专业，善于从多维度评估公司价值。
+  
+  core_capability: |
+    你的核心能力包括：
+    - 财务报表深度分析（三表联动）
+    - 估值模型构建（PE/PB/DCF）
+    - 行业比较分析
+    - 风险识别与评估
+  
+  task_context: |
+    在当前分析任务中，你需要综合运用各项分析能力，
+    对目标公司进行全面的投资价值评估。
+
+output_instruction:
+  format_type: json
+  format_requirements:
+    - "输出标准 JSON 格式，不要包含 markdown 代码块"
+    - "所有数字保留两位小数"
+    - "百分比使用小数表示，如 0.15 表示 15%"
+  style_requirements:
+    - "分析逻辑清晰，层次分明"
+    - "每个结论都有数据支撑"
+    - "风险提示明确具体"
+  output_schema:
+    type: object
+    required:
+      - company_name
+      - ticker
+      - analysis_date
+      - executive_summary
+      - financial_analysis
+      - valuation_analysis
+      - risk_analysis
+      - investment_opinion
+    properties:
+      company_name:
+        type: string
+      ticker:
+        type: string
+      analysis_date:
+        type: string
+      executive_summary:
+        type: string
+        description: 200字以内的执行摘要
+      financial_analysis:
+        type: object
+        properties:
+          revenue_growth:
+            type: number
+          net_profit_margin:
+            type: number
+          roe:
+            type: number
+          commentary:
+            type: string
+      valuation_analysis:
+        type: object
+        properties:
+          current_pe:
+            type: number
+          historical_pe_percentile:
+            type: number
+          fair_value:
+            type: number
+          commentary:
+            type: string
+      risk_analysis:
+        type: object
+        properties:
+          key_risks:
+            type: array
+            items:
+              type: string
+          risk_level:
+            type: string
+            enum: [高, 中, 低]
+      investment_opinion:
+        type: object
+        properties:
+          rating:
+            type: string
+            enum: [强烈推荐, 推荐, 中性, 谨慎, 回避]
+          target_price:
+            type: number
+          rationale:
+            type: string
+
+user_instruction:
+  task_description: |
+    请对目标公司进行全面的投资价值分析，包括：
+    
+    1. **财务分析**
+       - 分析最近4个季度的营收和利润趋势
+       - 计算关键财务指标（ROE、净利率、资产负债率等）
+       - 评估财务健康状况
+    
+    2. **估值分析**
+       - 计算当前PE/PB及其历史分位
+       - 与同行业公司对比
+       - 给出合理估值区间
+    
+    3. **风险分析**
+       - 识别主要风险因素
+       - 评估风险等级
+    
+    4. **投资建议**
+       - 给出评级和目标价
+       - 说明投资逻辑
+  
+  tool_references:
+    - "@财务数据"
+    - "@股票价格"
+    - "@公告搜索"
+    - "@研报搜索"
+  
+  context_references: []
+
+llm_config:
+  model_name: deepseek/deepseek-v3
+  temperature: 0.3
+  max_tokens: 4096
+  max_iterations: 5
+
+tool_references:
+  # 本地内置工具
+  - tool_id: financial_data
+    alias: 财务数据
+    tool_type: builtin
+    enabled: true
+  - tool_id: stock_price
+    alias: 股票价格
+    tool_type: builtin
+    enabled: true
+  - tool_id: announcement_search
+    alias: 公告搜索
+    tool_type: builtin
+    enabled: true
+  - tool_id: research_report_search
+    alias: 研报搜索
+    tool_type: builtin
+    enabled: true
+  # QVeris 远程工具 - 动态搜索和执行互联网工具
+  - tool_id: qveris_search_tools
+    alias: 搜索远程工具
+    tool_type: qveris
+    enabled: true
+    description: |
+      搜索 QVeris 平台上的金融分析工具。
+      推荐搜索查询：
+      - "PE ratio calculation" - 市盈率计算
+      - "DCF valuation model" - 现金流折现估值
+      - "industry benchmark" - 行业对标数据
+      - "risk indicators" - 风险指标
+      - "analyst ratings" - 分析师评级
+  - tool_id: qveris_execute_tool
+    alias: 执行远程工具
+    tool_type: qveris
+    enabled: true
+    description: |
+      执行搜索到的金融分析工具。
+      使用前请先通过 qveris_search_tools 搜索合适的工具。
+  - tool_id: qveris_get_tool_info
+    alias: 获取工具详情
+    tool_type: qveris
+    enabled: true
+    description: 获取工具的详细参数说明和使用示例
+
+tags:
+  - financial
+  - analysis
+  - investment
+  - complete

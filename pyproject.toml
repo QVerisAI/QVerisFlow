@@ -1,0 +1,157 @@
+[project]
+name = "agent-framework"
+version = "1.0.0"
+description = "基于 LangGraph 的多智能体框架，支持声明式配置、工作空间管理、三层验证机制和智能演化能力"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "YSWX", email = "" }]
+
+dependencies = [
+    # ===== 核心框架 =====
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "pyyaml>=6.0",
+    
+    # ===== LangGraph / LangChain =====
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.3.0",
+    
+    # ===== 异步支持 =====
+    "asyncio-throttle>=1.0.2",
+    "aiofiles>=23.2.1",
+    "aiohttp>=3.9.0",
+    
+    # ===== HTTP 客户端 =====
+    "httpx>=0.25.0",
+    "requests>=2.31.0",
+    
+    # ===== 数据库 =====
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    
+    # ===== 缓存 =====
+    "redis>=5.0.0",
+    
+    # ===== 日志和监控 =====
+    "loguru>=0.7.0",
+    "structlog>=23.0.0",
+    
+    # ===== 数据验证 =====
+    "jsonschema>=4.20.0",
+    
+    # ===== Token 计数 =====
+    "tiktoken>=0.5.0",
+    
+    # ===== LLM 客户端 =====
+    "openai>=1.0.0",
+    "anthropic>=0.18.0",
+]
+
+[project.optional-dependencies]
+# 开发依赖
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+    "black>=23.0.0",
+    "ruff>=0.1.9",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+]
+
+# 测试依赖
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+    "pytest-timeout>=2.2.0",
+    "faker>=20.0.0",
+]
+
+# 云存储支持
+oss = [
+    "oss2>=2.18.0",
+    "minio>=7.2.0",
+]
+
+# Web UI 依赖
+web = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+    "python-multipart>=0.0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+# uv 配置
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+# pytest 配置
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "--strict-markers",
+    "-v",
+    "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+# Black 配置
+[tool.black]
+line-length = 88
+target-version = ['py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  \.eggs
+  | \.git
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+# Ruff 配置
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+select = ["E", "F", "W", "I", "N", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.isort]
+known-first-party = ["src"]
+
+# MyPy 配置
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

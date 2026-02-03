@@ -1,0 +1,156 @@
+# 分析工作流定义
+# 多 Agent 协作完成公司综合分析
+
+workflow_id: analysis_workflow_v1
+name: 综合分析工作流
+description: 多 Agent 协作完成公司综合分析
+version: 1.0.0
+
+# 入口和出口节点
+entry_node: start
+exit_nodes:
+  - end
+
+nodes:
+  - node_id: start
+    name: 开始
+    node_type: start
+
+  - node_id: collect_data
+    name: 数据收集
+    node_type: agent
+    agent_id: data_collector
+    dependencies: []
+    user_override: |
+      收集目标公司的基础数据，包括：
+      - 财务数据（财报、资产负债表、现金流量表）
+      - 市场数据（股价、成交量、市值）
+      - 公告数据（最新公告、重大事项）
+      - 新闻数据（相关新闻、行业动态）
+      
+      请使用以下步骤：
+      1. 使用 qveris_search_tools 搜索可用的数据工具，例如：
+         - 搜索 "stock price API" 获取股价工具
+         - 搜索 "financial data API" 获取财务数据工具
+         - 搜索 "company news API" 获取新闻工具
+      2. 使用 qveris_execute_tool 执行搜索到的工具获取实际数据
+      3. 整理数据并输出结构化结果
+    timeout: 180
+    # QVeris 远程工具配置
+    tool_references:
+      - tool_id: qveris_search_tools
+        alias: 搜索远程工具
+        tool_type: qveris
+        enabled: true
+        description: "搜索 QVeris 平台上的可用工具，使用自然语言描述所需能力"
+      - tool_id: qveris_execute_tool
+        alias: 执行远程工具
+        tool_type: qveris
+        enabled: true
+        description: "执行搜索到的远程工具并获取结果"
+      - tool_id: qveris_get_tool_info
+        alias: 获取工具详情
+        tool_type: qveris
+        enabled: true
+        description: "获取指定工具的详细信息和使用说明"
+    # 推荐的搜索查询示例
+    qveris_queries:
+      - "stock price real-time quote"
+      - "financial statements API"
+      - "company announcements"
+      - "market news feed"
+
+  - node_id: financial_analysis
+    name: 财务分析
+    node_type: agent
+    agent_id: financial_analyst_v1
+    dependencies:
+      - collect_data
+    input_mappings:
+      - source_node: collect_data
+        source_field: output.data
+        target_field: input.financial_data
+    context_refs:
+      - "#collect_data"
+    user_override: |
+      基于收集到的数据，对目标公司进行深度财务分析：
+      
+      1. 财务健康度分析
+         - 分析资产负债结构
+         - 评估盈利能力和增长趋势
+         - 检查现金流状况
+      
+      2. 估值分析
+         - 计算 PE、PB、PS 等估值指标
+         - 与行业平均和历史水平对比
+      
+      3. 风险识别
+         - 识别财务风险信号
+         - 评估经营风险
+      
+      如需要更多数据，可以使用 QVeris 工具搜索和获取：
+      - 使用 qveris_search_tools 搜索 "valuation metrics API" 获取估值数据
+      - 使用 qveris_search_tools 搜索 "industry comparison data" 获取行业对比数据
+      - 使用 qveris_search_tools 搜索 "risk indicators" 获取风险指标
+    timeout: 240
+    # QVeris 远程工具配置
+    tool_references:
+      - tool_id: qveris_search_tools
+        alias: 搜索远程工具
+        tool_type: qveris
+        enabled: true
+        description: "搜索 QVeris 平台上的分析工具"
+      - tool_id: qveris_execute_tool
+        alias: 执行远程工具
+        tool_type: qveris
+        enabled: true
+        description: "执行分析工具获取深度数据"
+      - tool_id: qveris_get_tool_info
+        alias: 获取工具详情
+        tool_type: qveris
+        enabled: true
+        description: "查看工具的详细参数和用法"
+    # 推荐的搜索查询示例
+    qveris_queries:
+      - "PE ratio calculator"
+      - "industry benchmark data"
+      - "financial risk assessment"
+      - "DCF valuation model"
+
+  - node_id: generate_report
+    name: 生成报告
+    node_type: agent
+    agent_id: report_generator
+    dependencies:
+      - financial_analysis
+    input_mappings:
+      - source_node: financial_analysis
+        source_field: output
+        target_field: input.analysis
+    context_refs:
+      - "#financial_analysis"
+    timeout: 180
+
+  - node_id: end
+    name: 结束
+    node_type: end
+    dependencies:
+      - generate_report
+
+edges:
+  - from_node: start
+    to_node: collect_data
+
+  - from_node: collect_data
+    to_node: financial_analysis
+
+  - from_node: financial_analysis
+    to_node: generate_report
+
+  - from_node: generate_report
+    to_node: end
+
+global_context:
+  default_model: deepseek/deepseek-v3
+
+workspace_path: ./workspaces/workflow

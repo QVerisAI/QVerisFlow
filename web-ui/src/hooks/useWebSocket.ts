@@ -1,0 +1,463 @@
+import { useEffect, useCallback, useState, useRef } from 'react';
+import { wsService } from '../services/websocket';
+import { useAppStore } from '../stores/appStore';
+import { WSMessageType, type Message, type WorkflowState, type GenerationProgressEvent, type ExecutionRecord } from '../types';
+
+export function useWebSocket() {
+  const [isConnected, setIsConnected] = useState(false);
+  const currentExecutionRef = useRef<ExecutionRecord | null>(null);
+  const {
+    addMessage,
+    updateOrAddProgressMessage,
+    setWorkflowState,
+    setHighlightedNodes,
+    setSuggestedActions,
+    setExecutionProgress,
+    updateNodeState,
+    setIsLoading,
+    setCheckpoints,
+    setGenerationProgress,
+    updateAgentInWorkflow,
+    addExecutionRecord,
+    updateExecutionRecord,
+    setWorkflowNodeIdMap,
+  } = useAppStore();
+
+  // 连接
+  const connect = useCallback(async (sessionId: string) => {
+    try {
+      await wsService.connect(sessionId);
+      setIsConnected(true);
+    } catch (error) {
+      console.error('Failed to connect:', error);
+      setIsConnected(false);
+    }
+  }, []);
+
+  // 断开
+  const disconnect = useCallback(() => {
+    wsService.disconnect();
+    setIsConnected(false);
+  }, []);
+
+  // 发送消息
+  const sendMessage = useCallback((content: string) => {
+    // 添加用户消息到列表
+    addMessage({
+      role: 'user',
+      content,
+      timestamp: new Date().toISOString(),
+      messageType: 'text',
+    });
+    
+    setIsLoading(true);
+    wsService.sendChatMessage(content);
+  }, [addMessage, setIsLoading]);
+
+  // 发送快捷操作
+  const sendAction = useCallback((action: string, params?: Record<string, unknown>) => {
+    wsService.sendUserAction(action, params);
+  }, []);
+
+  // 设置消息处理器（使用 handlerId 防止重复注册）
+  useEffect(() => {
+    // 连接成功
+    const unsubConnected = wsService.on(WSMessageType.CONNECTED, (msg) => {
+      console.log('Connected:', msg.payload);
+      addMessage({
+        role: 'system',
+        content: (msg.payload as { message: string }).message || '连接成功',
+        timestamp: new Date().toISOString(),
+        messageType: 'text',
+      });
+    }, 'hook_connected');
+
+    // 聊天消息
+    const unsubChat = wsService.on(WSMessageType.CHAT_MESSAGE, (msg) => {
+      setIsLoading(false);
+      const payload = msg.payload as { role: string; content: string; message_type?: string; data?: Record<string, unknown> };
+      
+      const message: Message = {
+        role: payload.role as 'user' | 'assistant' | 'system',
+        content: payload.content,
+        timestamp: msg.timestamp,
+        messageType: (payload.message_type || 'text') as Message['messageType'],
+        data: payload.data,
+      };
+      
+      // 如果是进度消息，使用更新逻辑（同一个 agent 只保留一条卡片）
+      if (payload.data?.type === 'agent_generation_progress') {
+        const agentName = (payload.data as { agent_name?: string }).agent_name;
+        if (agentName) {
+          updateOrAddProgressMessage(agentName, message);
+          return;
+        }
+      }
+      
+      // 其他消息正常添加
+      addMessage(message);
+    }, 'hook_chat');
+
+    // 工作流更新
+    const unsubWorkflow = wsService.on(WSMessageType.WORKFLOW_UPDATE, (msg) => {
+      const payload = msg.payload as unknown as WorkflowState;
+      
+      // 构建多重映射：workflowNodeId/name/agentId -> frontendNodeId
+      // 增加匹配成功率，因为执行事件的 node_id 可能来自不同的源
+      const nodeIdMap: Record<string, string> = {};
+      if (payload.nodes) {
+        payload.nodes.forEach(node => {
+          // 使用 workflowNodeId 作为主 key
+          if (node.workflowNodeId) {
+            nodeIdMap[node.workflowNodeId] = node.nodeId;
+          }
+          // 也用 name 作为备用 key
+          if (node.name) {
+            nodeIdMap[node.name] = node.nodeId;
+            nodeIdMap[node.name.replace(/ /g, '_')] = node.nodeId;
+          }
+          // 用 agentId 作为备用 key
+          if (node.agentId) {
+            nodeIdMap[node.agentId] = node.nodeId;
+          }
+          // 用 nodeId 本身作为 key（直接匹配的情况）
+          nodeIdMap[node.nodeId] = node.nodeId;
+        });
+      }
+      setWorkflowNodeIdMap(nodeIdMap);
+      
+      setWorkflowState({
+        mode: payload.mode,
+        stage: payload.stage,
+        agents: payload.agents || [],
+        nodes: payload.nodes || [],
+        edges: payload.edges || [],
+        checkpoints: payload.checkpoints || [],
+        agentDefinitions: payload.agentDefinitions,  // 完整的 AgentDefinition 数据
+        availableTools: payload.availableTools,       // 可用工具列表
+        availableModels: payload.availableModels,     // 可用模型列表
+      });
+    }, 'hook_workflow');
+
+    // 节点高亮
+    const unsubHighlight = wsService.on(WSMessageType.NODE_HIGHLIGHT, (msg) => {
+      const payload = msg.payload as { nodes: string[] };
+      setHighlightedNodes(payload.nodes);
+      
+      // 3秒后取消高亮
+      setTimeout(() => {
+        setHighlightedNodes([]);
+      }, 3000);
+    }, 'hook_highlight');
+
+    // 建议操作
+    const unsubSuggestions = wsService.on(WSMessageType.SUGGESTED_ACTIONS, (msg) => {
+      const payload = msg.payload as { actions: string[] };
+      setSuggestedActions(payload.actions);
+    }, 'hook_suggestions');
+
+    // 执行事件
+    const unsubExecution = wsService.on(WSMessageType.EXECUTION_EVENT, (msg) => {
+      const event = msg.payload as { 
+        event_type: string; 
+        workflow_id?: string;
+        node_id?: string; 
+        node_name?: string;
+        total_nodes?: number;
+        nodes_completed?: number;
+        nodes_failed?: number;
+        progress?: number;
+        duration_ms?: number;
+        total_duration_ms?: number;
+        error?: string;
+        status?: string;
+        data?: Record<string, unknown> 
+      };
+      
+      // 获取最新的 workflowNodeIdMap（用于将后端 node_id 映射到前端 nodeId）
+      const currentNodeIdMap = useAppStore.getState().workflowNodeIdMap;
+      
+      // 将后端 node_id 转换为前端 nodeId
+      // 尝试多种方式查找，以处理各种命名不一致的情况
+      const resolveNodeId = (nodeId: string | undefined, nodeName?: string): string | null => {
+        if (!nodeId && !nodeName) return null;
+        
+        // 尝试直接用 nodeId 查找
+        if (nodeId && currentNodeIdMap[nodeId]) {
+          return currentNodeIdMap[nodeId];
+        }
+        // 尝试用 nodeName 查找
+        if (nodeName && currentNodeIdMap[nodeName]) {
+          return currentNodeIdMap[nodeName];
+        }
+        // 尝试用处理过的 nodeName 查找
+        if (nodeName && currentNodeIdMap[nodeName.replace(/ /g, '_')]) {
+          return currentNodeIdMap[nodeName.replace(/ /g, '_')];
+        }
+        // 尝试直接返回 nodeId（如果它本身就是前端 nodeId）
+        if (nodeId && nodeId.startsWith('agent_')) {
+          return nodeId;
+        }
+        // 回退：添加 agent_ 前缀
+        if (nodeId) {
+          const prefixed = `agent_${nodeId}`;
+          if (currentNodeIdMap[prefixed]) {
+            return currentNodeIdMap[prefixed];
+          }
+          return prefixed;
+        }
+        return null;
+      };
+      
+      const frontendNodeId = resolveNodeId(event.node_id, event.node_name);
+      
+      // === 处理工作流级别的执行事件 ===
+      
+      // 执行开始：创建新的执行记录
+      if (event.event_type === 'execution_started' || event.event_type === 'workflow_started') {
+        const totalNodes = (event.data?.total_nodes as number) || event.total_nodes || 0;
+        const newRecord: ExecutionRecord = {
+          executionId: event.workflow_id || `exec_${Date.now()}`,
+          workflowId: event.workflow_id || '',
+          status: 'running',
+          startedAt: new Date().toISOString(),
+          nodesTotal: totalNodes,
+          nodesCompleted: 0,
+          nodesFailed: 0,
+        };
+        currentExecutionRef.current = newRecord;
+        addExecutionRecord(newRecord);
+      }
+      
+      // 执行完成：更新执行记录
+      if (event.event_type === 'execution_completed' || event.event_type === 'workflow_completed') {
+        const executionId = currentExecutionRef.current?.executionId || event.workflow_id;
+        if (executionId) {
+          updateExecutionRecord(executionId, {
+            status: event.status === 'completed' ? 'success' : 'failed',
+            completedAt: new Date().toISOString(),
+            totalDurationMs: event.total_duration_ms || (event.data?.total_duration_ms as number),
+            nodesCompleted: event.nodes_completed || (event.data?.nodes_completed as number) || 0,
+            nodesFailed: event.nodes_failed || (event.data?.nodes_failed as number) || 0,
+          });
+        }
+        currentExecutionRef.current = null;
+      }
+      
+      // 执行失败：更新执行记录
+      if (event.event_type === 'execution_failed' || event.event_type === 'workflow_failed') {
+        const executionId = currentExecutionRef.current?.executionId || event.workflow_id;
+        if (executionId) {
+          updateExecutionRecord(executionId, {
+            status: 'failed',
+            completedAt: new Date().toISOString(),
+          });
+        }
+        currentExecutionRef.current = null;
+      }
+      
+      // === 处理节点级别的执行事件 ===
+      
+      // 更新节点状态
+      if (frontendNodeId) {
+        let status = 'pending';
+        if (event.event_type === 'node_started') status = 'running';
+        else if (event.event_type === 'node_completed') status = 'completed';
+        else if (event.event_type === 'node_failed') status = 'failed';
+        else if (event.event_type === 'node_skipped') status = 'skipped';
+        
+        updateNodeState(frontendNodeId, { 
+          status,
+          duration: (event.data?.duration_ms as number) || (event.duration_ms as number) || undefined,
+        });
+        
+        // 更新当前执行节点和进度
+        if (event.event_type === 'node_started') {
+          setExecutionProgress({
+            nodesCompleted: (event.data?.nodes_completed as number) || event.nodes_completed || 0,
+            totalNodes: (event.data?.total_nodes as number) || event.total_nodes || 0,
+            currentNode: frontendNodeId,
+          });
+        }
+        
+        // 节点完成时更新当前执行记录的进度
+        if (event.event_type === 'node_completed' && currentExecutionRef.current) {
+          const completed = (event.data?.nodes_completed as number) || event.nodes_completed || 
+                           (currentExecutionRef.current.nodesCompleted + 1);
+          updateExecutionRecord(currentExecutionRef.current.executionId, {
+            nodesCompleted: completed,
+          });
+        }
+        
+        // 节点失败时更新失败计数
+        if (event.event_type === 'node_failed' && currentExecutionRef.current) {
+          updateExecutionRecord(currentExecutionRef.current.executionId, {
+            nodesFailed: currentExecutionRef.current.nodesFailed + 1,
+          });
+        }
+      }
+      
+      // 处理进度更新事件 - 从 event.data 中正确读取
+      if (event.event_type === 'progress_update') {
+        const completed = (event.data?.nodes_completed as number) || event.nodes_completed || 0;
+        const total = (event.data?.total_nodes as number) || event.total_nodes || 0;
+        setExecutionProgress({
+          nodesCompleted: completed,
+          totalNodes: total,
+          currentNode: resolveNodeId(event.node_id),
+        });
+        
+        // 同步更新执行记录
+        if (currentExecutionRef.current) {
+          updateExecutionRecord(currentExecutionRef.current.executionId, {
+            nodesCompleted: completed,
+          });
+        }
+      }
+
+      // 添加执行消息（过滤重复的 - 后端已通过 on_message 发送了格式化消息）
+      // 这里只处理节点级别的事件作为备份
+      if (['node_started', 'node_completed', 'node_failed', 'tool_call'].includes(event.event_type)) {
+        let content = '';
+        switch (event.event_type) {
+          case 'node_started':
+            content = `📊 [${event.node_name || event.node_id}] 开始执行...`;
+            break;
+          case 'node_completed':
+            content = `✅ [${event.node_name || event.node_id}] 完成! (${((event.data?.duration_ms as number || event.duration_ms || 0) / 1000).toFixed(1)}s)`;
+            break;
+          case 'node_failed':
+            content = `❌ [${event.node_name || event.node_id}] 失败: ${event.data?.error || event.error}`;
+            break;
+          case 'tool_call':
+            content = `   → 调用工具: ${event.data?.tool_id}`;
+            break;
+        }
+        
+        if (content) {
+          addMessage({
+            role: 'system',
+            content,
+            timestamp: msg.timestamp,
+            messageType: 'execution_event',
+            data: event.data,
+          });
+        }
+      }
+    }, 'hook_execution');
+
+    // 进度更新
+    const unsubProgress = wsService.on(WSMessageType.PROGRESS_UPDATE, (msg) => {
+      const payload = msg.payload as { 
+        nodes_completed: number; 
+        total_nodes: number; 
+        current_node?: string;
+        data?: { nodes_completed?: number; total_nodes?: number };
+      };
+      // 使用 workflowNodeIdMap 解析节点 ID
+      const currentNodeIdMap = useAppStore.getState().workflowNodeIdMap;
+      const resolveNodeId = (nodeId: string | undefined): string | null => {
+        if (!nodeId) return null;
+        if (currentNodeIdMap[nodeId]) return currentNodeIdMap[nodeId];
+        return nodeId.startsWith('agent_') ? nodeId : `agent_${nodeId}`;
+      };
+      setExecutionProgress({
+        nodesCompleted: payload.data?.nodes_completed ?? payload.nodes_completed ?? 0,
+        totalNodes: payload.data?.total_nodes ?? payload.total_nodes ?? 0,
+        currentNode: resolveNodeId(payload.current_node),
+      });
+    }, 'hook_progress');
+
+    // 错误
+    const unsubError = wsService.on(WSMessageType.ERROR, (msg) => {
+      setIsLoading(false);
+      const payload = msg.payload as { error: string };
+      addMessage({
+        role: 'system',
+        content: `❌ 错误: ${payload.error}`,
+        timestamp: msg.timestamp,
+        messageType: 'error',
+      });
+    }, 'hook_error');
+
+    // 检查点
+    const unsubCheckpoint = wsService.on(WSMessageType.CHECKPOINT_CREATED, (msg) => {
+      const payload = msg.payload as { checkpoints: Array<{ checkpoint_id: string; label: string; stage: string; timestamp: string }> };
+      setCheckpoints(payload.checkpoints.map(c => ({
+        checkpointId: c.checkpoint_id,
+        label: c.label,
+        stage: c.stage,
+        timestamp: c.timestamp,
+      })));
+    }, 'hook_checkpoint');
+
+    // Agent 生成进度
+    const unsubGenerationProgress = wsService.on(WSMessageType.AGENT_GENERATION_PROGRESS, (msg) => {
+      const payload = msg.payload as unknown as GenerationProgressEvent;
+      setGenerationProgress({
+        current: payload.current,
+        total: payload.total,
+        agentName: payload.agent_name,
+        displayName: payload.display_name,
+        status: payload.status,
+        message: payload.message,
+      });
+      
+      // 如果生成完成或失败，3秒后清除进度
+      if (payload.status === 'completed' && payload.current === payload.total) {
+        setTimeout(() => {
+          setGenerationProgress(null);
+        }, 3000);
+      }
+    }, 'hook_generation_progress');
+
+    // Agent 更新
+    const unsubAgentUpdated = wsService.on(WSMessageType.AGENT_UPDATED, (msg) => {
+      const payload = msg.payload as { agent_name: string; updates: Record<string, unknown> };
+      updateAgentInWorkflow(payload.agent_name, payload.updates);
+    }, 'hook_agent_updated');
+    
+    // 执行历史响应
+    const unsubExecutionHistory = wsService.on(WSMessageType.EXECUTION_HISTORY, (msg) => {
+      const payload = msg.payload as { history: ExecutionRecord[] };
+      useAppStore.getState().setExecutionHistory(payload.history || []);
+    }, 'hook_execution_history');
+    
+    // 执行详情响应
+    const unsubExecutionDetail = wsService.on(WSMessageType.EXECUTION_DETAIL, (msg) => {
+      const payload = msg.payload as { executionId: string; detail: ExecutionRecord };
+      useAppStore.getState().setCurrentExecutionDetail(payload.detail || null);
+    }, 'hook_execution_detail');
+    
+    // 心跳响应
+    const unsubPong = wsService.on(WSMessageType.PONG, () => {
+      wsService.handlePong();
+    }, 'hook_pong');
+
+    // 清理
+    return () => {
+      unsubConnected();
+      unsubChat();
+      unsubWorkflow();
+      unsubHighlight();
+      unsubSuggestions();
+      unsubExecution();
+      unsubProgress();
+      unsubError();
+      unsubCheckpoint();
+      unsubGenerationProgress();
+      unsubAgentUpdated();
+      unsubExecutionHistory();
+      unsubExecutionDetail();
+      unsubPong();
+    };
+  }, [addMessage, updateOrAddProgressMessage, setWorkflowState, setHighlightedNodes, setSuggestedActions, setExecutionProgress, updateNodeState, setIsLoading, setCheckpoints, setGenerationProgress, updateAgentInWorkflow]);
+
+  return {
+    isConnected,
+    connect,
+    disconnect,
+    sendMessage,
+    sendAction,
+  };
+}

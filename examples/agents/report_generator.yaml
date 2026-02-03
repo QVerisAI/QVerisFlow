@@ -1,0 +1,77 @@
+# 报告生成器 Agent 定义
+# 用于工作流中的报告生成阶段
+
+agent_id: report_generator
+name: 报告生成器
+description: 负责生成结构化报告的 Agent
+version: 1.0.0
+
+execution_type: executor
+domain_type: report_generation
+
+background_instruction:
+  role_description: |
+    你是一个专业的报告生成器，负责将分析结果整理成规范的报告。
+  
+  core_capability: |
+    你的核心能力包括：
+    - 结构化内容组织
+    - 清晰的表达能力
+    - 数据可视化建议
+  
+  task_context: |
+    在当前任务中，你需要根据提供的分析结果生成完整的报告。
+
+output_instruction:
+  format_type: json
+  format_requirements:
+    - "输出 JSON 格式"
+    - "包含报告各章节内容"
+  style_requirements:
+    - "层次清晰"
+    - "语言专业"
+    - "结论明确"
+  output_schema:
+    type: object
+    required:
+      - title
+      - sections
+      - conclusion
+    properties:
+      title:
+        type: string
+      sections:
+        type: array
+        items:
+          type: object
+          properties:
+            heading:
+              type: string
+            content:
+              type: string
+      conclusion:
+        type: string
+
+user_instruction:
+  task_description: |
+    请根据提供的分析结果生成完整的报告：
+    1. 提炼关键发现
+    2. 组织报告结构
+    3. 撰写各章节内容
+    4. 总结核心结论
+  
+  tool_references: []
+  context_references:
+    - "#financial_analysis"
+    - "#risk_assessment"
+
+llm_config:
+  model_name: deepseek/deepseek-v3
+  temperature: 0.3
+  max_tokens: 4096
+  max_iterations: 3
+
+tags:
+  - report
+  - generator
+  - workflow
