@@ -2,6 +2,7 @@
 .pytest_cache/
 .venv/
 storage/
+agent_versions/
 versions_example/
 workspaces/
 uv.lock
@@ -15,6 +16,7 @@ __pycache__/
 
 # C extensions
 *.so
+*.db
 
 # Distribution / packaging
 .Python

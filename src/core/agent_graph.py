@@ -19,26 +19,26 @@ logger = get_logger()
 def _normalize_tool_calls_args(response: Any) -> Any:
     """
     规范化 AI 响应中的 tool_calls.args 字段
-    
+
     某些 LLM 提供商（如 deepseek、kimi）可能返回 args 为 JSON 字符串而非字典，
     这会导致 langchain 的 AIMessage Pydantic 验证失败。
     此函数将字符串形式的 args 解析为字典。
-    
+
     Args:
         response: LLM 的响应对象
-        
+
     Returns:
         处理后的响应对象（如果需要修改则返回新的 AIMessage）
     """
     if not hasattr(response, "tool_calls") or not response.tool_calls:
         return response
-    
+
     needs_normalization = False
     normalized_tool_calls = []
-    
+
     for tool_call in response.tool_calls:
         args = tool_call.get("args", {})
-        
+
         # 如果 args 是字符串，尝试解析为字典
         if isinstance(args, str):
             needs_normalization = True
@@ -47,24 +47,102 @@ def _normalize_tool_calls_args(response: Any) -> Any:
             except json.JSONDecodeError:
                 logger.warning(f"无法解析 tool_call args 字符串: {args[:100]}...")
                 args = {"raw_args": args}
-        
-        normalized_tool_calls.append({
-            "id": tool_call.get("id", ""),
-            "name": tool_call.get("name", ""),
-            "args": args,
-        })
-    
+
+        normalized_tool_calls.append(
+            {
+                "id": tool_call.get("id", ""),
+                "name": tool_call.get("name", ""),
+                "args": args,
+            }
+        )
+
     if needs_normalization:
         # 创建新的 AIMessage，确保 tool_calls.args 是字典
         from langchain_core.messages import AIMessage
-        
+
         return AIMessage(
             content=response.content if hasattr(response, "content") else "",
             tool_calls=normalized_tool_calls,
             additional_kwargs=getattr(response, "additional_kwargs", {}),
         )
-    
+
     return response
+
+
+def _sanitize_message_for_kimi(message: Any, model_name: str = "") -> Any:
+    """
+    针对 Kimi/Moonshot 模型规范化消息格式
+
+    Kimi 的 thinking 模式要求：
+    - 当启用 thinking 时，assistant 消息必须包含 reasoning_content
+    - 如果 tool_calls 消息中缺少 reasoning_content，API 会返回 400 错误
+
+    解决方案：
+    - 对于 tool_calls 的 assistant 消息，确保 additional_kwargs 中不触发 thinking 验证
+    - 或者在 additional_kwargs 中添加空的 reasoning_content
+
+    Args:
+        message: LangChain 消息对象
+        model_name: 模型名称，用于判断是否为 Kimi 模型
+
+    Returns:
+        处理后的消息对象
+    """
+    # 检查是否为 Kimi/Moonshot 模型
+    model_lower = model_name.lower() if model_name else ""
+    is_kimi = "kimi" in model_lower or "moonshot" in model_lower
+
+    if not is_kimi:
+        return message
+
+    from langchain_core.messages import AIMessage
+
+    # 如果是 AIMessage 且有 tool_calls
+    if (
+        isinstance(message, AIMessage)
+        and hasattr(message, "tool_calls")
+        and message.tool_calls
+    ):
+        additional_kwargs = getattr(message, "additional_kwargs", {}) or {}
+
+        # 检查是否缺少 reasoning_content（Kimi thinking 模式要求）
+        # 如果原始响应没有 reasoning_content，我们添加一个空字符串
+        # 这样可以满足 API 的格式验证
+        if "reasoning_content" not in additional_kwargs:
+            # 创建新消息，添加空的 reasoning_content
+            new_kwargs = dict(additional_kwargs)
+            new_kwargs["reasoning_content"] = ""
+
+            return AIMessage(
+                content=message.content if hasattr(message, "content") else "",
+                tool_calls=message.tool_calls,
+                additional_kwargs=new_kwargs,
+            )
+
+    return message
+
+
+def _get_model_name_from_llm(llm_client: Any) -> str:
+    """
+    从 LLM 客户端获取模型名称
+
+    Args:
+        llm_client: LLM 客户端实例
+
+    Returns:
+        模型名称字符串
+    """
+    # 尝试多种方式获取模型名称
+    if hasattr(llm_client, "model_name"):
+        return llm_client.model_name
+    if hasattr(llm_client, "model"):
+        return llm_client.model
+    if hasattr(llm_client, "_model_name"):
+        return llm_client._model_name
+    # 检查是否是绑定了工具的 RunnableBinding
+    if hasattr(llm_client, "bound"):
+        return _get_model_name_from_llm(llm_client.bound)
+    return ""
 
 
 class AgentGraphBuilder:
@@ -108,9 +186,7 @@ class AgentGraphBuilder:
             tool_names = [
                 getattr(t, "name", getattr(t, "tool_id", str(t))) for t in self.tools
             ]
-            logger.info(
-                f"🔧 绑定 {len(self.tools)} 个工具到 LLM: {tool_names}"
-            )
+            logger.info(f"🔧 绑定 {len(self.tools)} 个工具到 LLM: {tool_names}")
             try:
                 self.langchain_llm = self.langchain_llm.bind_tools(self.tools)
                 logger.info("✅ 工具已成功绑定到 LLM，可进行 function calling")
@@ -297,7 +373,7 @@ class AgentGraphBuilder:
             llm_start_time = datetime.now()
 
             response = await self.langchain_llm.ainvoke(messages)
-            
+
             # 规范化 tool_calls.args（某些 LLM 可能返回字符串而非字典）
             response = _normalize_tool_calls_args(response)
 
@@ -404,7 +480,7 @@ class AgentGraphBuilder:
             llm_start_time = datetime.now()
 
             response = await self.langchain_llm.ainvoke(messages)
-            
+
             # 规范化 tool_calls.args（某些 LLM 可能返回字符串而非字典）
             response = _normalize_tool_calls_args(response)
 
@@ -600,7 +676,7 @@ class AgentGraphBuilder:
         prompt_parts.append(
             f"\n## 任务\n{self.definition.user_instruction.task_description}"
         )
-        
+
         prompt_parts.append(
             "\n## 执行要求\n"
             "请直接在回复中输出符合上述格式要求的结果内容。"
@@ -663,15 +739,17 @@ class AgentGraphBuilder:
                 tool_args = tool_call.get(
                     "args", tool_call.get("function", {}).get("arguments", {})
                 )
-                
+
                 # 确保 tool_args 是字典（某些 LLM 可能返回 JSON 字符串）
                 if isinstance(tool_args, str):
                     try:
                         tool_args = json.loads(tool_args)
                     except json.JSONDecodeError:
-                        logger.warning(f"无法解析 tool_args 字符串: {tool_args[:100]}...")
+                        logger.warning(
+                            f"无法解析 tool_args 字符串: {tool_args[:100]}..."
+                        )
                         tool_args = {"raw_args": tool_args}
-                
+
                 tool_call_id = tool_call.get("id", f"call_{tool_round}_{tool_name}")
 
                 logger.info(f"执行工具调用: {tool_name}({tool_args})")
@@ -705,7 +783,12 @@ class AgentGraphBuilder:
                     )
 
             # 将 AI 响应和工具结果添加到消息历史
-            current_messages.append(current_response)
+            # 针对 Kimi/Moonshot 模型，规范化消息格式以避免 thinking 模式的验证错误
+            model_name = _get_model_name_from_llm(self.langchain_llm)
+            sanitized_response = _sanitize_message_for_kimi(
+                current_response, model_name
+            )
+            current_messages.append(sanitized_response)
             current_messages.extend(tool_messages)
 
             # 记录 LLM 调用开始时间
@@ -715,7 +798,7 @@ class AgentGraphBuilder:
 
             # 调用 LLM 获取下一步响应
             current_response = await self.langchain_llm.ainvoke(current_messages)
-            
+
             # 规范化 tool_calls.args（某些 LLM 可能返回字符串而非字典）
             current_response = _normalize_tool_calls_args(current_response)
 
@@ -749,14 +832,14 @@ class AgentGraphBuilder:
             if hasattr(current_response, "content")
             else str(current_response)
         )
-        
+
         # 检查并警告空内容
         if not final_content.strip() and tool_round > 0:
             logger.warning(
                 f"工具调用循环执行了 {tool_round} 轮后，LLM 返回的内容为空。"
                 "这可能是因为 LLM 没有理解需要在回复中直接输出结果。"
             )
-        
+
         return final_content
 
     async def _execute_single_tool(

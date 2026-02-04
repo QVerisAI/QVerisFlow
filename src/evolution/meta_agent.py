@@ -304,25 +304,25 @@ class MetaAgent:
         examples_text = (
             "\n\n".join(reference_examples) if reference_examples else "无参考示例"
         )
-        
+
         # 获取真实可用的工具列表
         available_tools_info = self._get_available_tools_info()
-        
+
         # 用户指定的工具偏好（如果有）
         if tools:
             tools_preference = f"用户建议的工具: {', '.join(tools)}\n（请从下方实际可用工具中选择匹配的工具，如果建议的工具不存在，请使用 QVeris 工具动态发现）"
         else:
             tools_preference = "无特定工具偏好，请根据任务需求从可用工具中选择"
-        
+
         constraints_text = (
             json.dumps(constraints, ensure_ascii=False, indent=2)
             if constraints
             else "无特殊约束"
         )
-        
+
         # 获取可用模型信息
         available_models_info = self._get_available_models_info()
-        
+
         # 分析任务复杂度并推荐模型
         suggested_model = self._suggest_model_for_task(task_description, tools)
 
@@ -496,71 +496,77 @@ class MetaAgent:
     def _get_available_tools_info(self) -> str:
         """
         获取可用工具信息的格式化文本
-        
+
         Returns:
             工具信息的格式化字符串，包含工具 ID、名称和描述
         """
         if not self.tool_registry:
             return self._get_default_tools_info()
-        
+
         try:
             tools_list = self.tool_registry.list_all()
-            
+
             if not tools_list:
                 return self._get_default_tools_info()
-            
+
             lines = ["以下是 Framework 中实际可用的工具：\n"]
-            
+
             # 按类别分组显示工具
             builtin_tools = []
             qveris_tools = []
             other_tools = []
-            
+
             for tool in tools_list:
                 if not tool.get("is_active", True):
                     continue
-                    
+
                 tool_id = tool.get("tool_id", "")
                 name = tool.get("name", tool_id)
                 category = tool.get("category", "general")
-                
+
                 # 获取工具定义以获取描述
                 tool_def = self.tool_registry.get(tool_id)
                 description = tool_def.description if tool_def else ""
-                
+
                 tool_info = f"  - **{tool_id}** ({name}): {description}"
-                
+
                 if "qveris" in tool_id.lower() or category == "qveris":
                     qveris_tools.append(tool_info)
                 elif category in ["file", "shell", "builtin"]:
                     builtin_tools.append(tool_info)
                 else:
                     other_tools.append(tool_info)
-            
+
             if builtin_tools:
                 lines.append("### 内置工具 (builtin)")
                 lines.extend(builtin_tools)
                 lines.append("")
-            
+
             if qveris_tools:
                 lines.append("### QVeris 远程工具接口 (qveris)")
                 lines.extend(qveris_tools)
-                lines.append("\n**重要**: 对于需要外部数据（金融数据、新闻、API 调用等）的任务，")
-                lines.append("应使用 `qveris_search_tools` 搜索可用工具，然后用 `qveris_execute_tool` 执行。")
-                lines.append("不要虚构工具名称，而是通过 QVeris 动态发现和使用远程工具。")
+                lines.append(
+                    "\n**重要**: 对于需要外部数据（金融数据、新闻、API 调用等）的任务，"
+                )
+                lines.append(
+                    "应使用 `qveris_search_tools` 搜索可用工具，然后用 `qveris_execute_tool` 执行。"
+                )
+                lines.append(
+                    "不要虚构工具名称，而是通过 QVeris 动态发现和使用远程工具。"
+                )
                 lines.append("")
-            
+
             if other_tools:
                 lines.append("### 其他工具")
                 lines.extend(other_tools)
                 lines.append("")
-            
+
             return "\n".join(lines)
-            
+
         except Exception as e:
             logger.warning(f"获取工具信息失败: {e}")
             return self._get_default_tools_info()
-    
+
     def _get_default_tools_info(self) -> str:
         """返回默认的工具信息（当 tool_registry 不可用时）"""
         return """以下是 Framework 中常用的工具：
@@ -583,33 +589,32 @@ class MetaAgent:
 应使用 `qveris_search_tools` 搜索可用工具，然后用 `qveris_execute_tool` 执行。
 不要虚构工具名称（如 "Web Scraper"、"Financial API"），而是通过 QVeris 动态发现和使用远程工具。
 """
-    
+
     def _validate_tool_references(
-        self, 
-        tool_references: List[Dict[str, Any]]
+        self, tool_references: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
         验证并修正工具引用
-        
+
         检查 tool_references 中的工具是否真实存在于 ToolRegistry 中，
         对于不存在的工具给出警告并尝试修正。
         同时修正无效的 tool_type 值。
-        
+
         Args:
             tool_references: 原始的工具引用列表
-            
+
         Returns:
             验证/修正后的工具引用列表
         """
         if not tool_references:
             return []
-        
+
         validated_refs = []
         known_tool_ids = set()
-        
+
         # 有效的 tool_type 枚举值
         valid_tool_types = {"builtin", "custom", "mcp", "app", "external_api", "qveris"}
-        
+
         # tool_type 映射表，将常见的无效值映射为有效值
         tool_type_mapping = {
             "filesystem": "builtin",
@@ -622,7 +627,7 @@ class MetaAgent:
             "external": "external_api",
             "remote": "qveris",
         }
-        
+
         # 获取已知工具 ID
         if self.tool_registry:
             try:
@@ -630,26 +635,35 @@ class MetaAgent:
                 known_tool_ids = {t.get("tool_id") for t in tools_list}
             except Exception as e:
                 logger.warning(f"获取工具列表失败: {e}")
-        
+
         # 如果没有 tool_registry，使用默认工具列表
         if not known_tool_ids:
             known_tool_ids = {
-                "file_ls", "file_read", "file_write", "file_edit", "file_append",
-                "bash_execute", "bash_execute_safe",
-                "qveris_search_tools", "qveris_execute_tool", "qveris_get_tool_info"
+                "file_ls",
+                "file_read",
+                "file_write",
+                "file_edit",
+                "file_append",
+                "bash_execute",
+                "bash_execute_safe",
+                "qveris_search_tools",
+                "qveris_execute_tool",
+                "qveris_get_tool_info",
             }
-        
+
         for ref in tool_references:
             tool_id = ref.get("tool_id", "")
-            
+
             # 修正 tool_type
             tool_type = ref.get("tool_type", "builtin")
             if tool_type not in valid_tool_types:
                 # 尝试从映射表中获取正确的 tool_type
                 mapped_type = tool_type_mapping.get(tool_type.lower(), "builtin")
-                logger.info(f"修正工具 '{tool_id}' 的 tool_type: '{tool_type}' -> '{mapped_type}'")
+                logger.info(
+                    f"修正工具 '{tool_id}' 的 tool_type: '{tool_type}' -> '{mapped_type}'"
+                )
                 ref["tool_type"] = mapped_type
-            
+
             if tool_id in known_tool_ids:
                 # 工具存在，保留
                 validated_refs.append(ref)
@@ -666,7 +680,7 @@ class MetaAgent:
                         f"工具 '{tool_id}' 不存在于 ToolRegistry 中，已移除。"
                         f"建议使用 qveris_search_tools 搜索相关工具。"
                     )
-        
+
         # 如果移除了所有工具，至少添加 QVeris 工具以便动态发现
         if not validated_refs and tool_references:
             logger.info("所有指定工具均不存在，添加 QVeris 工具以支持动态工具发现")
@@ -675,26 +689,26 @@ class MetaAgent:
                     "tool_id": "qveris_search_tools",
                     "alias": "搜索工具",
                     "tool_type": "qveris",
-                    "enabled": True
+                    "enabled": True,
                 },
                 {
                     "tool_id": "qveris_execute_tool",
                     "alias": "执行工具",
                     "tool_type": "qveris",
-                    "enabled": True
-                }
+                    "enabled": True,
+                },
             ]
-        
+
         return validated_refs
-    
+
     def _map_unknown_tool(self, tool_id: str, alias: str) -> Optional[str]:
         """
         尝试将未知工具映射到已知工具
-        
+
         Args:
             tool_id: 工具 ID
             alias: 工具别名
-            
+
         Returns:
             映射后的工具 ID，如果无法映射则返回 None
         """
@@ -706,11 +720,11 @@ class MetaAgent:
                 f"QVerisToolAdapter.register_meta_tools(tool_registry)"
             )
             return None
-        
+
         tool_lower = tool_id.lower()
         alias_lower = alias.lower() if alias else ""
         combined = f"{tool_lower} {alias_lower}"
-        
+
         # 文件相关工具映射
         if any(kw in combined for kw in ["file", "read", "write", "edit"]):
             if "read" in combined:
@@ -721,39 +735,58 @@ class MetaAgent:
                 return "file_edit"
             elif "ls" in combined or "list" in combined:
                 return "file_ls"
-        
+
         # Shell 相关工具映射 (排除 qveris_execute_tool)
         if any(kw in combined for kw in ["bash", "shell", "command", "terminal"]):
             return "bash_execute_safe"
-        
+
         # 外部数据/API 相关 - 映射到 QVeris
-        if any(kw in combined for kw in [
-            "api", "web", "scraper", "crawler", "fetch", "http", "request",
-            "financial", "stock", "news", "data", "search", "query"
-        ]):
+        if any(
+            kw in combined
+            for kw in [
+                "api",
+                "web",
+                "scraper",
+                "crawler",
+                "fetch",
+                "http",
+                "request",
+                "financial",
+                "stock",
+                "news",
+                "data",
+                "search",
+                "query",
+            ]
+        ):
             # 这类工具应该通过 QVeris 动态发现
             return None  # 返回 None，让调用者决定添加 QVeris 工具
-        
+
         return None
 
     def _normalize_enum_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         规范化枚举字段值
-        
+
         将 LLM 生成的无效枚举值映射到有效值，避免 Pydantic 验证失败。
-        
+
         Args:
             data: Agent 定义数据字典
-            
+
         Returns:
             规范化后的数据字典
         """
         # 有效的 domain_type 枚举值
         valid_domain_types = {
-            "financial_analysis", "data_integration", "data_verification",
-            "risk_assessment", "signal_detection", "report_generation", "general"
+            "financial_analysis",
+            "data_integration",
+            "data_verification",
+            "risk_assessment",
+            "signal_detection",
+            "report_generation",
+            "general",
         }
-        
+
         # domain_type 映射表 - 将常见的无效值映射到有效值
         domain_mapping = {
             # 数据收集相关
@@ -779,12 +812,15 @@ class MetaAgent:
             "risk": "risk_assessment",
             "risk_analysis": "risk_assessment",
         }
-        
+
         # 有效的 execution_type 枚举值
         valid_execution_types = {
-            "executor", "reasoning_executor", "deep_search", "flow_agent"
+            "executor",
+            "reasoning_executor",
+            "deep_search",
+            "flow_agent",
         }
-        
+
         # execution_type 映射表
         execution_mapping = {
             "agent": "executor",
@@ -798,7 +834,7 @@ class MetaAgent:
             "workflow": "flow_agent",
             "orchestrator": "flow_agent",
         }
-        
+
         # 规范化 domain_type
         if "domain_type" in data:
             domain_type = data["domain_type"]
@@ -806,9 +842,7 @@ class MetaAgent:
                 # 尝试从映射表中获取正确的值
                 mapped_type = domain_mapping.get(domain_type.lower())
                 if mapped_type:
-                    logger.info(
-                        f"修正 domain_type: '{domain_type}' -> '{mapped_type}'"
-                    )
+                    logger.info(f"修正 domain_type: '{domain_type}' -> '{mapped_type}'")
                     data["domain_type"] = mapped_type
                 else:
                     # 无法映射，使用默认值
@@ -816,7 +850,7 @@ class MetaAgent:
                         f"无效的 domain_type '{domain_type}'，使用默认值 'general'"
                     )
                     data["domain_type"] = "general"
-        
+
         # 规范化 execution_type
         if "execution_type" in data:
             execution_type = data["execution_type"]
@@ -834,7 +868,7 @@ class MetaAgent:
                         f"无效的 execution_type '{execution_type}'，使用默认值 'executor'"
                     )
                     data["execution_type"] = "executor"
-        
+
         return data
 
     def _get_available_models_info(self) -> str:
@@ -842,10 +876,10 @@ class MetaAgent:
         try:
             model_registry = get_model_registry()
             models_info = model_registry.get_models_info()
-            
+
             if not models_info:
                 return "暂无可用模型配置"
-            
+
             lines = []
             for model in models_info:
                 caps = ", ".join(model.get("capabilities", []))
@@ -855,29 +889,27 @@ class MetaAgent:
                     f"- **{model['name']}** (类型: {model['type']}, 成本: {cost}, "
                     f"最大tokens: {max_tokens}, 能力: {caps})"
                 )
-            
+
             return "\n".join(lines)
         except Exception as e:
             logger.warning(f"获取模型信息失败: {e}")
             return "模型信息不可用，请使用默认模型 qwen-plus"
 
     def _suggest_model_for_task(
-        self, 
-        task_description: str, 
-        tools: List[str] = None
+        self, task_description: str, tools: List[str] = None
     ) -> str:
         """根据任务描述推荐合适的模型"""
         try:
             model_registry = get_model_registry()
-            
+
             # 分析任务复杂度
             complexity = self._analyze_task_complexity(task_description)
-            
+
             # 确定所需能力
             required_capabilities = self._determine_required_capabilities(
                 task_description, tools
             )
-            
+
             # 使用 ModelRegistry 的智能选择
             return model_registry.select_model(
                 task_complexity=complexity,
@@ -891,67 +923,99 @@ class MetaAgent:
     def _analyze_task_complexity(self, task_description: str) -> str:
         """
         分析任务复杂度
-        
+
         Returns:
             复杂度级别: "simple", "medium", "complex", "multimodal"
         """
         desc_lower = task_description.lower()
-        
+
         # 多模态任务
-        multimodal_keywords = ["图像", "图片", "视觉", "image", "vision", "看图", "识别图"]
+        multimodal_keywords = [
+            "图像",
+            "图片",
+            "视觉",
+            "image",
+            "vision",
+            "看图",
+            "识别图",
+        ]
         if any(kw in desc_lower for kw in multimodal_keywords):
             return "multimodal"
-        
+
         # 复杂任务关键词
         complex_keywords = [
-            "深度分析", "推理", "规划", "决策", "评估", "策略",
-            "comprehensive", "analysis", "reasoning", "planning",
-            "多步骤", "复杂", "深入", "全面评估"
+            "深度分析",
+            "推理",
+            "规划",
+            "决策",
+            "评估",
+            "策略",
+            "comprehensive",
+            "analysis",
+            "reasoning",
+            "planning",
+            "多步骤",
+            "复杂",
+            "深入",
+            "全面评估",
         ]
         if any(kw in desc_lower for kw in complex_keywords):
             return "complex"
-        
+
         # 简单任务关键词
         simple_keywords = [
-            "收集", "获取", "查询", "列出", "格式化", "转换",
-            "collect", "fetch", "query", "list", "format", "convert",
-            "简单", "基本"
+            "收集",
+            "获取",
+            "查询",
+            "列出",
+            "格式化",
+            "转换",
+            "collect",
+            "fetch",
+            "query",
+            "list",
+            "format",
+            "convert",
+            "简单",
+            "基本",
         ]
         if any(kw in desc_lower for kw in simple_keywords):
             return "simple"
-        
+
         # 默认为中等复杂度
         return "medium"
 
     def _determine_required_capabilities(
-        self, 
-        task_description: str, 
-        tools: List[str] = None
+        self, task_description: str, tools: List[str] = None
     ) -> List[str]:
         """确定任务所需的模型能力"""
         capabilities = []
         desc_lower = task_description.lower()
-        
+
         # 推理能力
         if any(kw in desc_lower for kw in ["分析", "推理", "判断", "评估", "analysis"]):
             capabilities.append("reasoning")
-        
+
         # 编码能力
-        if any(kw in desc_lower for kw in ["代码", "编程", "开发", "code", "programming"]):
+        if any(
+            kw in desc_lower for kw in ["代码", "编程", "开发", "code", "programming"]
+        ):
             capabilities.append("coding")
-        
+
         # 长上下文能力
-        if any(kw in desc_lower for kw in ["长文", "大量数据", "全面", "comprehensive"]):
+        if any(
+            kw in desc_lower for kw in ["长文", "大量数据", "全面", "comprehensive"]
+        ):
             capabilities.append("long_context")
-        
+
         # 视觉能力
         if any(kw in desc_lower for kw in ["图像", "图片", "视觉", "image", "vision"]):
             capabilities.append("vision")
-        
+
         # 如果没有特殊能力需求，默认需要推理
         if not capabilities:
             capabilities.append("reasoning")
-        
+
         return capabilities
 
     def _format_agent_example(self, agent: AgentDefinition) -> str:
@@ -1016,17 +1080,18 @@ class MetaAgent:
 
     async def _call_llm(self, prompt: str, expect_json: bool = False) -> str:
         """调用 LLM
-        
+
         Args:
             prompt: 提示词
             expect_json: 是否期望 JSON 响应（启用 UnifiedLLMClient 的自动优化和重试机制）
-        
+
         Returns:
             LLM 响应内容
         """
         # 优先使用 UnifiedLLMClient 的 call 方法（支持 JSON 优化和重试）
         if hasattr(self.llm_client, "call"):
             import inspect
+
             if inspect.iscoroutinefunction(self.llm_client.call):
                 messages = [{"role": "user", "content": prompt}]
                 # 传入 response_format 触发 JSON 优化和相关重试机制
@@ -1035,13 +1100,13 @@ class MetaAgent:
                     messages,
                     response_format=response_format,
                 )
-                
+
                 if isinstance(response, dict):
                     return response.get("content", response.get("text", str(response)))
                 if hasattr(response, "content"):
                     return response.content
                 return str(response)
-        
+
         # 回退：使用 LangChain 的 ainvoke 方法
         if hasattr(self.llm_client, "ainvoke"):
             try:
@@ -1055,7 +1120,7 @@ class MetaAgent:
                 return str(response)
             except ImportError:
                 pass  # 继续尝试其他方法
-        
+
         # 尝试使用 invoke 方法（同步版本）
         if hasattr(self.llm_client, "invoke"):
             try:
@@ -1186,7 +1251,7 @@ class MetaAgent:
                     ui["task_description"] = ui.pop("template")
                 if "task_description" not in ui:
                     ui["task_description"] = "请完成以下任务：{task}"
-                
+
                 # 处理 user_instruction.tool_references - 应为字符串列表
                 if "tool_references" in ui and isinstance(ui["tool_references"], list):
                     normalized_refs = []
@@ -1197,11 +1262,15 @@ class MetaAgent:
                             # LLM 可能生成字典，转换为工具别名字符串
                             alias = ref.get("alias", ref.get("tool_id", ""))
                             if alias:
-                                normalized_refs.append(f"@{alias}" if not alias.startswith("@") else alias)
+                                normalized_refs.append(
+                                    f"@{alias}" if not alias.startswith("@") else alias
+                                )
                     ui["tool_references"] = normalized_refs
-                
+
                 # 处理 user_instruction.context_references - 应为字符串列表
-                if "context_references" in ui and isinstance(ui["context_references"], list):
+                if "context_references" in ui and isinstance(
+                    ui["context_references"], list
+                ):
                     normalized_ctx = []
                     for ref in ui["context_references"]:
                         if isinstance(ref, str):
@@ -1210,7 +1279,11 @@ class MetaAgent:
                             # 转换为引用字符串
                             ref_id = ref.get("reference", ref.get("id", ""))
                             if ref_id:
-                                normalized_ctx.append(f"#{ref_id}" if not ref_id.startswith("#") else ref_id)
+                                normalized_ctx.append(
+                                    f"#{ref_id}"
+                                    if not ref_id.startswith("#")
+                                    else ref_id
+                                )
                     ui["context_references"] = normalized_ctx
 
             # 处理 tool_references 中缺失的字段并验证工具存在性
@@ -1220,7 +1293,7 @@ class MetaAgent:
                         tool_ref["alias"] = tool_ref.get("tool_id", f"tool_{i}")
                     if "tool_type" not in tool_ref:
                         tool_ref["tool_type"] = "builtin"
-                
+
                 # 验证并修正工具引用
                 data["tool_references"] = self._validate_tool_references(
                     data["tool_references"]
@@ -1494,10 +1567,18 @@ class MetaAgent:
         """从 Agent 定义中提取能力关键词"""
         capabilities = []
 
-        # 从工具引用提取
+        # 从工具引用提取（兼容 ToolReference 对象和 dict）
         for tool_ref in agent.tool_references:
-            if tool_ref.enabled:
-                capabilities.append(f"tool:{tool_ref.tool_id}")
+            # 处理 dict 和 ToolReference 对象两种情况
+            if isinstance(tool_ref, dict):
+                enabled = tool_ref.get("enabled", True)
+                tool_id = tool_ref.get("tool_id", "")
+            else:
+                enabled = getattr(tool_ref, "enabled", True)
+                tool_id = getattr(tool_ref, "tool_id", "")
+
+            if enabled and tool_id:
+                capabilities.append(f"tool:{tool_id}")
 
         # 从描述中提取关键词
         keywords = ["分析", "生成", "搜索", "计算", "转换", "验证", "聚合"]
@@ -1803,15 +1884,15 @@ class MetaAgent:
     ) -> "InteractiveWorkflowBuilder":
         """
         创建交互式工作流构建器
-        
+
         Args:
             callback: 用户交互回调实现，如果为 None 则使用 CLIInteractionCallback
             storage_path: 存储路径，用于保存检查点和迭代历史
             max_iterations: 每步最大迭代次数
-            
+
         Returns:
             InteractiveWorkflowBuilder 实例
-            
+
         示例:
             ```python
             builder = meta_agent.create_interactive_builder()
@@ -1826,12 +1907,12 @@ class MetaAgent:
             CLIInteractionCallback,
         )
         from pathlib import Path
-        
+
         if callback is None:
             callback = CLIInteractionCallback()
-        
+
         path = Path(storage_path) if storage_path else None
-        
+
         return InteractiveWorkflowBuilder(
             meta_agent=self,
             callback=callback,

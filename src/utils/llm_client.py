@@ -217,17 +217,39 @@ class ClientFactory:
             f"🔄 创建全新的 LangChain 客户端（无共享 HTTP 客户端）: {model_name}"
         )
 
-        client = ChatOpenAI(
-            model=model_name,
-            base_url=base_url,
-            openai_api_key=api_key,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout or 300.0,
-            max_retries=max_retries,
+        # 准备额外的模型参数
+        model_kwargs = {}
+
+        # 检查是否为 Kimi/Moonshot 模型，如果是，禁用 thinking 模式
+        # Kimi 的 thinking 模式会导致 tool calling 场景下的消息格式问题
+        # 错误: 'thinking is enabled but reasoning_content is missing in assistant tool call message'
+        model_lower = model_name.lower() if model_name else ""
+        if "kimi" in model_lower or "moonshot" in model_lower:
+            # 尝试通过 extra_body 禁用 thinking 模式
+            # 根据 Moonshot API 文档，可以通过设置 use_thinking=False 或相关参数来禁用
+            model_kwargs["extra_body"] = {
+                "use_thinking": False,  # 禁用 thinking 模式
+            }
+            logger.debug(f"🔄 Kimi/Moonshot 模型检测到，已禁用 thinking 模式")
+
+        # 构建 ChatOpenAI 参数
+        chat_kwargs = {
+            "model": model_name,
+            "base_url": base_url,
+            "openai_api_key": api_key,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout": timeout or 300.0,
+            "max_retries": max_retries,
             # 不传入 http_client 和 http_async_client，让 ChatOpenAI 自己创建
             # 这样每个 ChatOpenAI 实例都有自己独立的 HTTP 客户端
-        )
+        }
+
+        # 只有当 model_kwargs 非空时才传入，避免传入空字典或 None 导致错误
+        if model_kwargs:
+            chat_kwargs["model_kwargs"] = model_kwargs
+
+        client = ChatOpenAI(**chat_kwargs)
 
         # 只有明确启用缓存时才缓存 ChatOpenAI 实例
         if use_cache:
@@ -724,6 +746,42 @@ class UnifiedLLMClient:
             logger.debug(f"响应内容预览（后500字符）: {content[-500:]}")
         return None
 
+    def _adjust_params_for_model(
+        self,
+        temperature: float,
+        max_tokens: int,
+    ) -> tuple[float, int]:
+        """
+        根据模型特性调整参数
+
+        某些模型对参数有特殊限制：
+        - moonshot (kimi): 某些模型只支持 temperature=1
+        - 其他模型可能有类似限制
+
+        Args:
+            temperature: 原始温度参数
+            max_tokens: 原始 max_tokens
+
+        Returns:
+            调整后的 (temperature, max_tokens)
+        """
+        model_lower = self.model_name.lower() if self.model_name else ""
+
+        # moonshot/kimi 模型限制
+        # https://platform.moonshot.cn/docs/api-reference
+        if "moonshot" in model_lower or "kimi" in model_lower:
+            # moonshot 某些模型只接受 temperature=1
+            # 其他模型接受 0.0-1.0，但某些高级模型有限制
+            if temperature != 1.0:
+                logger.debug(
+                    f"模型 {self.model_name} 可能要求 temperature=1，"
+                    f"原始值 {temperature} 将被调整"
+                )
+                # 如果不是 0（确定性），则使用 1
+                temperature = 1.0
+
+        return temperature, max_tokens
+
     async def call(
         self,
         messages: List[Dict[str, str]],
@@ -741,6 +799,7 @@ class UnifiedLLMClient:
         - JSON 响应优化
         - Token 追踪
         - 详细日志
+        - 模型特定参数调整（如 moonshot 的 temperature 限制）
 
         Args:
             messages: 消息列表
@@ -756,6 +815,9 @@ class UnifiedLLMClient:
         # 使用传入参数或实例默认值
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
+
+        # 根据模型调整参数
+        temp, max_tok = self._adjust_params_for_model(temp, max_tok)
 
         # 检查是否期望 JSON 响应
         expect_json = self._is_json_response_expected(response_format)
@@ -1018,6 +1080,11 @@ class UnifiedLLMClient:
         Returns:
             ChatOpenAI 客户端实例
         """
+        # 根据模型调整参数（处理 moonshot 等特殊模型的限制）
+        adjusted_temp, adjusted_max_tokens = self._adjust_params_for_model(
+            self.temperature, self.max_tokens
+        )
+
         # 默认每次创建新的客户端，避免状态累积导致的 token 爆炸问题
         if fresh:
             logger.debug(f"🔄 创建新的 LangChain 客户端（完全隔离）: {self.model_name}")
@@ -1025,8 +1092,8 @@ class UnifiedLLMClient:
                 base_url=self.base_url,
                 api_key=self.api_key,
                 model_name=self.model_name,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                temperature=adjusted_temp,
+                max_tokens=adjusted_max_tokens,
                 timeout=self.timeout,
                 max_retries=self.max_retries,
                 use_cache=False,  # 禁用 ChatOpenAI 缓存
@@ -1041,8 +1108,8 @@ class UnifiedLLMClient:
             base_url=self.base_url,
             api_key=self.api_key,
             model_name=self.model_name,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
+            temperature=adjusted_temp,
+            max_tokens=adjusted_max_tokens,
             timeout=self.timeout,
             max_retries=self.max_retries,
             use_cache=False,

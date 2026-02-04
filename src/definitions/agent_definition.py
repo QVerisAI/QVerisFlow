@@ -6,8 +6,8 @@ Agent 定义模型
 """
 
 from enum import Enum
-from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
+from typing import Dict, Any, Optional, List, Union
+from pydantic import BaseModel, Field, field_validator
 
 from .prompt_structure import (
     BackgroundInstruction,
@@ -67,7 +67,9 @@ class AgentDefinition(BaseModel):
     # === 基本信息 ===
     agent_id: str = Field(description="Agent 唯一标识")
     name: str = Field(description="Agent 技术名称，如 'DataCollectorAgent'")
-    display_name: str = Field(default="", description="用户友好的显示名称，如 '数据收集器'")
+    display_name: str = Field(
+        default="", description="用户友好的显示名称，如 '数据收集器'"
+    )
     description: str = Field(description="Agent 描述")
     version: str = Field(default="1.0.0", description="版本号")
 
@@ -112,6 +114,23 @@ class AgentDefinition(BaseModel):
     author: str = Field(default="system", description="创建者")
     created_at: Optional[str] = Field(default=None, description="创建时间")
     is_active: bool = Field(default=True, description="是否激活")
+
+    @field_validator("tool_references", mode="before")
+    @classmethod
+    def convert_tool_references(cls, v: Optional[List[Any]]) -> List[ToolReference]:
+        """确保 tool_references 中的项都是 ToolReference 对象"""
+        if not v:
+            return []
+        result = []
+        for item in v:
+            if isinstance(item, dict):
+                result.append(ToolReference(**item))
+            elif isinstance(item, ToolReference):
+                result.append(item)
+            else:
+                # 尝试转换
+                result.append(ToolReference.model_validate(item))
+        return result
 
     def build_system_prompt(self) -> str:
         """构建完整的系统 prompt"""

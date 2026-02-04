@@ -206,13 +206,24 @@ class BaseAgent:
                     "duration_ms": duration_ms,
                 }
 
+    # 核心本地工具列表 - 这些工具始终可用，无论 tool_references 如何配置
+    # 这确保了 Agent 能够与本地文件系统交互，而不是尝试通过远程 API 搜索文件系统工具
+    CORE_LOCAL_TOOLS = [
+        "file_ls",
+        "file_read",
+        "file_write",
+        "file_edit",
+        "file_append",
+    ]
+
     def _get_tools(self) -> List[Any]:
         """
         获取 Agent 可用的工具
 
         工具加载策略：
-        1. 如果 definition.tool_references 非空，只加载指定的工具
-        2. 如果 definition.tool_references 为空，加载注册表中的所有工具
+        1. 始终加载核心本地工具（文件系统操作）
+        2. 如果 definition.tool_references 非空，加载指定的工具
+        3. 如果 definition.tool_references 为空，加载注册表中的所有工具
 
         Returns:
             LangChain 格式的工具列表
@@ -230,19 +241,38 @@ class BaseAgent:
             enhanced_registry = self.tool_registry
 
         tools = []
+        loaded_tool_ids = set()  # 跟踪已加载的工具，避免重复
+
+        # === 始终加载核心本地工具（文件系统操作）===
+        # 这确保 Agent 能够与本地文件系统交互
+        logger.debug(f"加载核心本地工具: {self.CORE_LOCAL_TOOLS}")
+        for tool_id in self.CORE_LOCAL_TOOLS:
+            if tool_id not in loaded_tool_ids:
+                try:
+                    tool = enhanced_registry.get_langchain_tool(tool_id)
+                    if tool:
+                        tools.append(tool)
+                        loaded_tool_ids.add(tool_id)
+                        logger.debug(f"  ✓ 已加载核心工具: {tool_id}")
+                    else:
+                        # 核心工具未注册，尝试触发注册
+                        logger.debug(f"  ⚠️ 核心工具 {tool_id} 未注册，跳过")
+                except Exception as e:
+                    logger.warning(f"  ✗ 加载核心工具 {tool_id} 失败: {e}")
 
         # 检查是否有明确指定的工具引用
         if self.definition.tool_references:
-            # 策略 1: 只加载指定的工具
+            # 策略 1: 加载指定的工具（排除已加载的核心工具）
             logger.debug(
                 f"从 tool_references 加载 {len(self.definition.tool_references)} 个工具"
             )
             for tool_ref in self.definition.tool_references:
-                if tool_ref.enabled:
+                if tool_ref.enabled and tool_ref.tool_id not in loaded_tool_ids:
                     try:
                         tool = enhanced_registry.get_langchain_tool(tool_ref.tool_id)
                         if tool:
                             tools.append(tool)
+                            loaded_tool_ids.add(tool_ref.tool_id)
                             logger.debug(f"  ✓ 已加载工具: {tool_ref.tool_id}")
                         else:
                             logger.warning(
@@ -254,7 +284,12 @@ class BaseAgent:
             # 策略 2: 加载注册表中的所有工具
             logger.debug("tool_references 为空，将加载注册表中的所有工具")
             try:
-                tools = enhanced_registry.get_all_langchain_tools()
+                all_tools = enhanced_registry.get_all_langchain_tools()
+                for tool in all_tools:
+                    tool_name = getattr(tool, "name", str(tool))
+                    if tool_name not in loaded_tool_ids:
+                        tools.append(tool)
+                        loaded_tool_ids.add(tool_name)
                 logger.debug(f"  已加载 {len(tools)} 个工具")
             except Exception as e:
                 logger.warning(f"加载所有工具失败: {e}")

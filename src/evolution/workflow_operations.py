@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 import json
 import traceback
+import asyncio
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -86,16 +87,17 @@ class WorkflowOperationTools:
 
         # 任务描述
         self._task_description: str = ""
-        
+
         # 缓存的有效工具列表
         self._valid_tools_cache: Optional[set] = None
-        
+
         # 进度回调
-        self._progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
+        self._progress_callback: Optional[
+            Callable[[Dict[str, Any]], Awaitable[None]]
+        ] = None
 
     def set_progress_callback(
-        self, 
-        callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
+        self, callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
     ) -> None:
         """设置进度回调函数"""
         self._progress_callback = callback
@@ -120,6 +122,20 @@ class WorkflowOperationTools:
             max_iterations_per_step=3,
         )
         self._builder.task_description = task_description
+
+    def _get_executions_path(self) -> Path:
+        """
+        获取执行记录存储路径（确保所有方法使用一致的路径）
+
+        Returns:
+            执行记录存储目录的 Path 对象
+        """
+        if self.storage_path:
+            return Path(self.storage_path) / "executions"
+        elif self._builder and hasattr(self._builder, "storage_path"):
+            return Path(self._builder.storage_path) / "executions"
+        else:
+            return Path("./workspaces/workflow_executions")
 
     # ========== 创建操作 ==========
 
@@ -249,8 +265,12 @@ class WorkflowOperationTools:
                 pass
 
             # 验证并过滤工具列表 - 只保留内置工具
-            validated_tools = self._validate_tools(tools) if tools else ["qveris_search_tools", "qveris_execute_tool"]
-            
+            validated_tools = (
+                self._validate_tools(tools)
+                if tools
+                else ["qveris_search_tools", "qveris_execute_tool"]
+            )
+
             # 创建新的 AgentSpec
             new_spec = AgentSpec(
                 name=name,
@@ -724,8 +744,7 @@ class WorkflowOperationTools:
             return OperationResult(success=False, message=str(e))
 
     async def generate_agents_from_plan(
-        self,
-        progress_callback: Optional[Callable] = None
+        self, progress_callback: Optional[Callable] = None
     ) -> OperationResult:
         """
         从规划生成实际的 Agent 定义
@@ -753,19 +772,23 @@ class WorkflowOperationTools:
             for i, spec in enumerate(self._builder.current_plan.agent_specs):
                 # 获取用户友好的显示名称
                 display_name = spec.display_name or spec.name
-                
+
                 # 发送生成进度事件
                 if callback:
                     try:
-                        await callback({
-                            "type": "agent_generation_progress",
-                            "current": i + 1,
-                            "total": total,
-                            "agent_name": spec.name,
-                            "display_name": display_name,
-                            "status": "generating",
-                            "message": f"正在生成 {display_name}..."
-                        })
+                        await callback(
+                            {
+                                "type": "agent_generation_progress",
+                                "current": i + 1,
+                                "total": total,
+                                "agent_name": spec.name,
+                                "display_name": display_name,
+                                "status": "generating",
+                                "message": f"正在生成 {display_name}...",
+                            }
+                        )
+                        # 让出事件循环，确保 WebSocket 消息能够立即发送
+                        await asyncio.sleep(0)
                     except Exception as cb_error:
                         logger.warning(f"进度回调执行失败: {cb_error}")
 
@@ -784,43 +807,64 @@ class WorkflowOperationTools:
                         if not agent.display_name:
                             agent.display_name = display_name
                         self._builder.draft_agents.append(agent)
-                        generated.append({
-                            "name": agent.name,
-                            "display_name": agent.display_name,
-                            "description": agent.description,
-                            "domain_type": agent.domain_type.value if agent.domain_type else "general",
-                            "tools_count": len(agent.tool_references) if agent.tool_references else 0,
-                            "tools": [t.alias or t.tool_id for t in (agent.tool_references or [])],
-                            "status": "success"
-                        })
-                        
+                        generated.append(
+                            {
+                                "name": agent.name,
+                                "display_name": agent.display_name,
+                                "description": agent.description,
+                                "domain_type": (
+                                    agent.domain_type.value
+                                    if agent.domain_type
+                                    else "general"
+                                ),
+                                "tools_count": (
+                                    len(agent.tool_references)
+                                    if agent.tool_references
+                                    else 0
+                                ),
+                                "tools": [
+                                    t.alias or t.tool_id
+                                    for t in (agent.tool_references or [])
+                                ],
+                                "status": "success",
+                            }
+                        )
+
                         # 发送完成事件
                         if callback:
                             try:
-                                await callback({
-                                    "type": "agent_generation_progress",
-                                    "current": i + 1,
-                                    "total": total,
-                                    "agent_name": agent.name,
-                                    "display_name": agent.display_name,
-                                    "status": "completed",
-                                    "message": f"{agent.display_name} 生成完成"
-                                })
+                                await callback(
+                                    {
+                                        "type": "agent_generation_progress",
+                                        "current": i + 1,
+                                        "total": total,
+                                        "agent_name": agent.name,
+                                        "display_name": agent.display_name,
+                                        "status": "completed",
+                                        "message": f"{agent.display_name} 生成完成",
+                                    }
+                                )
+                                # 让出事件循环，确保 WebSocket 消息能够立即发送
+                                await asyncio.sleep(0)
                             except Exception as cb_error:
                                 logger.warning(f"进度回调执行失败: {cb_error}")
                     else:
-                        failed.append({
-                            "name": spec.name,
-                            "display_name": display_name,
-                            "reason": "生成返回空结果"
-                        })
+                        failed.append(
+                            {
+                                "name": spec.name,
+                                "display_name": display_name,
+                                "reason": "生成返回空结果",
+                            }
+                        )
                 except Exception as agent_error:
                     logger.error(f"生成 Agent {spec.name} 失败: {agent_error}")
-                    failed.append({
-                        "name": spec.name,
-                        "display_name": display_name,
-                        "reason": str(agent_error)
-                    })
+                    failed.append(
+                        {
+                            "name": spec.name,
+                            "display_name": display_name,
+                            "reason": str(agent_error),
+                        }
+                    )
 
             self._builder.iteration_manager.checkpoint(
                 label="generate_agents",
@@ -837,7 +881,7 @@ class WorkflowOperationTools:
                 "failed_count": len(failed),
                 "agents": generated,
                 "failed_agents": failed if failed else None,
-                "next_step": "您可以确认这些 Agent，或点击画布中的节点查看详情并进行修改"
+                "next_step": "您可以确认这些 Agent，或点击画布中的节点查看详情并进行修改",
             }
 
             success_names = [a["display_name"] for a in generated]
@@ -860,124 +904,142 @@ class WorkflowOperationTools:
         self,
         agent_name: str,
         feedback: Optional[str] = None,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
     ) -> OperationResult:
         """
         重新生成指定的 Agent
-        
+
         用于生成失败或用户不满意时重新生成单个 Agent。
-        
+
         Args:
             agent_name: Agent 名称（支持 name 或 display_name，也支持 'failed' 表示所有失败的）
             feedback: 用户反馈，用于改进生成（可选）
             progress_callback: 进度回调函数（可选）
-            
+
         Returns:
             操作结果
         """
         if not self._ensure_builder() or not self._builder.current_plan:
             return OperationResult(success=False, message="当前没有工作流规划")
-        
+
         callback = progress_callback or self._progress_callback
-        
+
         try:
             # 特殊处理：重新生成所有失败的 Agent
-            if agent_name.lower() in ["failed", "失败的", "失败的agent", "失败的 agent", "all_failed"]:
+            if agent_name.lower() in [
+                "failed",
+                "失败的",
+                "失败的agent",
+                "失败的 agent",
+                "all_failed",
+            ]:
                 return await self._regenerate_failed_agents(feedback, callback)
-            
+
             # 查找对应的 AgentSpec
             target_spec = None
             for spec in self._builder.current_plan.agent_specs:
-                if (spec.name.lower() == agent_name.lower() or 
-                    (spec.display_name and spec.display_name.lower() == agent_name.lower())):
+                if spec.name.lower() == agent_name.lower() or (
+                    spec.display_name
+                    and spec.display_name.lower() == agent_name.lower()
+                ):
                     target_spec = spec
                     break
-            
+
             if not target_spec:
                 # 尝试模糊匹配
                 for spec in self._builder.current_plan.agent_specs:
-                    if (agent_name.lower() in spec.name.lower() or 
-                        (spec.display_name and agent_name.lower() in spec.display_name.lower())):
+                    if agent_name.lower() in spec.name.lower() or (
+                        spec.display_name
+                        and agent_name.lower() in spec.display_name.lower()
+                    ):
                         target_spec = spec
                         break
-            
+
             if not target_spec:
                 return OperationResult(
-                    success=False, 
-                    message=f"未找到 Agent: {agent_name}。可用的 Agent: {[s.display_name or s.name for s in self._builder.current_plan.agent_specs]}"
+                    success=False,
+                    message=f"未找到 Agent: {agent_name}。可用的 Agent: {[s.display_name or s.name for s in self._builder.current_plan.agent_specs]}",
                 )
-            
+
             display_name = target_spec.display_name or target_spec.name
-            
+
             # 发送进度事件
             if callback:
                 try:
-                    await callback({
-                        "type": "agent_generation_progress",
-                        "current": 1,
-                        "total": 1,
-                        "agent_name": target_spec.name,
-                        "display_name": display_name,
-                        "status": "regenerating",
-                        "message": f"正在重新生成 {display_name}..."
-                    })
+                    await callback(
+                        {
+                            "type": "agent_generation_progress",
+                            "current": 1,
+                            "total": 1,
+                            "agent_name": target_spec.name,
+                            "display_name": display_name,
+                            "status": "regenerating",
+                            "message": f"正在重新生成 {display_name}...",
+                        }
+                    )
                 except Exception as cb_error:
                     logger.warning(f"进度回调执行失败: {cb_error}")
-            
+
             # 移除旧的 Agent（如果存在）
             self._builder.draft_agents = [
-                a for a in self._builder.draft_agents 
-                if a.name.lower() != target_spec.name.lower() and 
-                   (not a.display_name or a.display_name.lower() != display_name.lower())
+                a
+                for a in self._builder.draft_agents
+                if a.name.lower() != target_spec.name.lower()
+                and (
+                    not a.display_name or a.display_name.lower() != display_name.lower()
+                )
             ]
-            
+
             # 从失败列表中移除（如果存在）
             self._failed_agents = [
-                f for f in self._failed_agents
-                if f.get("name", "").lower() != target_spec.name.lower() and
-                   f.get("display_name", "").lower() != display_name.lower()
+                f
+                for f in self._failed_agents
+                if f.get("name", "").lower() != target_spec.name.lower()
+                and f.get("display_name", "").lower() != display_name.lower()
             ]
-            
+
             # 构建增强的任务描述
             full_description = f"Agent名称: {target_spec.name}\n显示名称: {display_name}\n任务: {target_spec.task}"
             if target_spec.dependencies:
                 full_description += f"\n依赖: {', '.join(target_spec.dependencies)}"
             if feedback:
                 full_description += f"\n\n用户反馈: {feedback}"
-            
+
             # 重新生成
             agent = await self.meta_agent.create_agent(
                 task_description=full_description,
                 tools=target_spec.suggested_tools or None,
             )
-            
+
             if agent:
                 if not agent.display_name:
                     agent.display_name = display_name
                 self._builder.draft_agents.append(agent)
-                
+
                 # 发送完成事件
                 if callback:
                     try:
-                        await callback({
-                            "type": "agent_generation_progress",
-                            "current": 1,
-                            "total": 1,
-                            "agent_name": agent.name,
-                            "display_name": agent.display_name,
-                            "status": "completed",
-                            "message": f"{agent.display_name} 重新生成完成"
-                        })
+                        await callback(
+                            {
+                                "type": "agent_generation_progress",
+                                "current": 1,
+                                "total": 1,
+                                "agent_name": agent.name,
+                                "display_name": agent.display_name,
+                                "status": "completed",
+                                "message": f"{agent.display_name} 重新生成完成",
+                            }
+                        )
                     except Exception as cb_error:
                         logger.warning(f"进度回调执行失败: {cb_error}")
-                
+
                 # 创建检查点
                 self._builder.iteration_manager.checkpoint(
                     label="regenerate_agent",
                     stage=self._builder.current_stage,
                     state=self._builder._get_current_state(),
                 )
-                
+
                 return OperationResult(
                     success=True,
                     message=f"已重新生成 Agent: {agent.display_name}",
@@ -992,108 +1054,112 @@ class WorkflowOperationTools:
                 )
             else:
                 # 记录失败
-                self._failed_agents.append({
-                    "name": target_spec.name,
-                    "display_name": display_name,
-                    "reason": "重新生成返回空结果"
-                })
+                self._failed_agents.append(
+                    {
+                        "name": target_spec.name,
+                        "display_name": display_name,
+                        "reason": "重新生成返回空结果",
+                    }
+                )
                 return OperationResult(
                     success=False,
-                    message=f"重新生成 Agent {display_name} 失败：返回空结果"
+                    message=f"重新生成 Agent {display_name} 失败：返回空结果",
                 )
-                
+
         except Exception as e:
-            logger.error(f"重新生成 Agent 失败: {e}, traceback: {traceback.format_exc()}")
+            logger.error(
+                f"重新生成 Agent 失败: {e}, traceback: {traceback.format_exc()}"
+            )
             return OperationResult(success=False, message=f"重新生成失败: {str(e)}")
 
     async def _regenerate_failed_agents(
         self,
         feedback: Optional[str] = None,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
     ) -> OperationResult:
         """
         重新生成所有失败的 Agent
-        
+
         Args:
             feedback: 用户反馈
             progress_callback: 进度回调
-            
+
         Returns:
             操作结果
         """
         if not self._failed_agents:
-            return OperationResult(
-                success=True,
-                message="没有需要重新生成的失败 Agent"
-            )
-        
+            return OperationResult(success=True, message="没有需要重新生成的失败 Agent")
+
         regenerated = []
         still_failed = []
         total = len(self._failed_agents)
-        
+
         for i, failed_info in enumerate(self._failed_agents.copy()):
             agent_name = failed_info.get("name", "")
             display_name = failed_info.get("display_name", agent_name)
-            
+
             # 发送进度
             if progress_callback:
                 try:
-                    await progress_callback({
-                        "type": "agent_generation_progress",
-                        "current": i + 1,
-                        "total": total,
-                        "agent_name": agent_name,
-                        "display_name": display_name,
-                        "status": "regenerating",
-                        "message": f"正在重新生成 {display_name}... ({i+1}/{total})"
-                    })
+                    await progress_callback(
+                        {
+                            "type": "agent_generation_progress",
+                            "current": i + 1,
+                            "total": total,
+                            "agent_name": agent_name,
+                            "display_name": display_name,
+                            "status": "regenerating",
+                            "message": f"正在重新生成 {display_name}... ({i+1}/{total})",
+                        }
+                    )
                 except Exception as cb_error:
                     logger.warning(f"进度回调执行失败: {cb_error}")
-            
+
             result = await self.regenerate_agent(agent_name, feedback, None)
-            
+
             if result.success:
                 regenerated.append(display_name)
             else:
-                still_failed.append({
-                    "name": agent_name,
-                    "display_name": display_name,
-                    "reason": result.message
-                })
-        
+                still_failed.append(
+                    {
+                        "name": agent_name,
+                        "display_name": display_name,
+                        "reason": result.message,
+                    }
+                )
+
         # 更新失败列表
         self._failed_agents = still_failed
-        
+
         if regenerated:
-            message = f"已重新生成 {len(regenerated)} 个 Agent: {', '.join(regenerated)}"
+            message = (
+                f"已重新生成 {len(regenerated)} 个 Agent: {', '.join(regenerated)}"
+            )
             if still_failed:
                 message += f"（{len(still_failed)} 个仍然失败）"
             return OperationResult(
                 success=True,
                 message=message,
-                data={
-                    "regenerated": regenerated,
-                    "still_failed": still_failed
-                },
+                data={"regenerated": regenerated, "still_failed": still_failed},
                 workflow_changed=True,
             )
         else:
             return OperationResult(
                 success=False,
-                message=f"重新生成失败，{len(still_failed)} 个 Agent 仍然无法生成"
+                message=f"重新生成失败，{len(still_failed)} 个 Agent 仍然无法生成",
             )
 
     async def merge_plans(
         self,
         source: str = "previous",
         merge_strategy: str = "union",
-        agents_to_include: Optional[List[str]] = None
+        agents_to_include: Optional[List[str]] = None,
     ) -> OperationResult:
         """
         合并或整合两个规划
-        
+
         用于用户说"整合两个规划"、"融合"、"合并"等场景。
-        
+
         Args:
             source: 源规划来源，'previous'（最近一个有不同规划的检查点）或具体的检查点ID
             merge_strategy: 合并策略
@@ -1101,122 +1167,150 @@ class WorkflowOperationTools:
                 - 'append': 追加所有（源规划的 Agent 添加到当前规划末尾）
                 - 'selective': 仅包含 agents_to_include 指定的 Agent
             agents_to_include: 要从源规划中包含的 Agent 名称列表（可选）
-            
+
         Returns:
             操作结果
         """
         if not self._ensure_builder() or not self._builder.current_plan:
             return OperationResult(success=False, message="当前没有规划可合并")
-        
+
         try:
             # 1. 获取源规划
             source_plan = None
             source_checkpoint_label = None
-            
+
             checkpoints = self._builder.iteration_manager.get_checkpoints()
-            
+
             if source == "previous":
                 # 找到最近一个有不同规划的检查点
-                current_agent_names = {spec.name for spec in self._builder.current_plan.agent_specs}
-                
+                current_agent_names = {
+                    spec.name for spec in self._builder.current_plan.agent_specs
+                }
+
                 for ckpt in reversed(checkpoints[:-1]):  # 排除最新的检查点
-                    state = ckpt.state if hasattr(ckpt, 'state') else ckpt.get('state', {})
-                    ckpt_plan = state.get('plan', {})
+                    state = (
+                        ckpt.state if hasattr(ckpt, "state") else ckpt.get("state", {})
+                    )
+                    ckpt_plan = state.get("plan", {})
                     if ckpt_plan:
-                        ckpt_agents = ckpt_plan.get('agents', [])
-                        ckpt_agent_names = {a.get('name', '') for a in ckpt_agents}
+                        ckpt_agents = ckpt_plan.get("agents", [])
+                        ckpt_agent_names = {a.get("name", "") for a in ckpt_agents}
                         # 检查是否有不同的 Agent（说明是不同的规划）
                         if ckpt_agent_names != current_agent_names and ckpt_agents:
                             source_plan = ckpt_plan
-                            source_checkpoint_label = ckpt.label if hasattr(ckpt, 'label') else ckpt.get('label', '')
+                            source_checkpoint_label = (
+                                ckpt.label
+                                if hasattr(ckpt, "label")
+                                else ckpt.get("label", "")
+                            )
                             break
             else:
                 # 根据检查点ID查找
                 for ckpt in checkpoints:
-                    ckpt_id = ckpt.checkpoint_id if hasattr(ckpt, 'checkpoint_id') else ckpt.get('checkpoint_id', '')
+                    ckpt_id = (
+                        ckpt.checkpoint_id
+                        if hasattr(ckpt, "checkpoint_id")
+                        else ckpt.get("checkpoint_id", "")
+                    )
                     if ckpt_id and (ckpt_id == source or ckpt_id.startswith(source)):
-                        state = ckpt.state if hasattr(ckpt, 'state') else ckpt.get('state', {})
-                        source_plan = state.get('plan', {})
-                        source_checkpoint_label = ckpt.label if hasattr(ckpt, 'label') else ckpt.get('label', '')
+                        state = (
+                            ckpt.state
+                            if hasattr(ckpt, "state")
+                            else ckpt.get("state", {})
+                        )
+                        source_plan = state.get("plan", {})
+                        source_checkpoint_label = (
+                            ckpt.label
+                            if hasattr(ckpt, "label")
+                            else ckpt.get("label", "")
+                        )
                         break
-            
-            if not source_plan or not source_plan.get('agents'):
+
+            if not source_plan or not source_plan.get("agents"):
                 return OperationResult(
-                    success=False, 
-                    message="未找到可合并的源规划。请确保之前有创建过其他规划（可在检查点历史中查看）。"
+                    success=False,
+                    message="未找到可合并的源规划。请确保之前有创建过其他规划（可在检查点历史中查看）。",
                 )
-            
+
             # 2. 提取源规划的 Agent 列表
-            source_agents = source_plan.get('agents', [])
+            source_agents = source_plan.get("agents", [])
             current_specs = self._builder.current_plan.agent_specs
             current_agent_names = {spec.name.lower() for spec in current_specs}
-            current_display_names = {(spec.display_name or spec.name).lower() for spec in current_specs}
-            
+            current_display_names = {
+                (spec.display_name or spec.name).lower() for spec in current_specs
+            }
+
             # 3. 根据策略合并
             agents_to_add = []
-            
+
             if merge_strategy == "selective" and agents_to_include:
                 # 仅包含指定的 Agent
                 include_lower = {name.lower() for name in agents_to_include}
                 for agent in source_agents:
-                    name = agent.get('name', '')
-                    display_name = agent.get('display_name', name)
-                    if name.lower() in include_lower or display_name.lower() in include_lower:
+                    name = agent.get("name", "")
+                    display_name = agent.get("display_name", name)
+                    if (
+                        name.lower() in include_lower
+                        or display_name.lower() in include_lower
+                    ):
                         agents_to_add.append(agent)
             elif merge_strategy == "union":
                 # 取并集，去重
                 for agent in source_agents:
-                    name = agent.get('name', '')
-                    display_name = agent.get('display_name', name)
-                    if name.lower() not in current_agent_names and display_name.lower() not in current_display_names:
+                    name = agent.get("name", "")
+                    display_name = agent.get("display_name", name)
+                    if (
+                        name.lower() not in current_agent_names
+                        and display_name.lower() not in current_display_names
+                    ):
                         agents_to_add.append(agent)
             else:  # append
                 # 追加所有，但重命名同名的
                 for agent in source_agents:
-                    name = agent.get('name', '')
+                    name = agent.get("name", "")
                     if name.lower() in current_agent_names:
                         # 重命名
                         agent = agent.copy()
-                        agent['name'] = f"{name}_merged"
-                        if agent.get('display_name'):
-                            agent['display_name'] = f"{agent['display_name']}（合并）"
+                        agent["name"] = f"{name}_merged"
+                        if agent.get("display_name"):
+                            agent["display_name"] = f"{agent['display_name']}（合并）"
                     agents_to_add.append(agent)
-            
+
             if not agents_to_add:
                 return OperationResult(
                     success=True,
-                    message=f"源规划（{source_checkpoint_label}）中没有需要添加的 Agent（可能都已存在于当前规划中）。"
+                    message=f"源规划（{source_checkpoint_label}）中没有需要添加的 Agent（可能都已存在于当前规划中）。",
                 )
-            
+
             # 4. 添加 Agent 到当前规划
             from .interactive_builder import AgentSpec
-            
+
             added_names = []
             for agent_dict in agents_to_add:
                 # 创建 AgentSpec
                 new_spec = AgentSpec(
-                    name=agent_dict.get('name', ''),
-                    display_name=agent_dict.get('display_name'),
-                    task=agent_dict.get('task', ''),
-                    dependencies=agent_dict.get('dependencies', []),
-                    suggested_tools=agent_dict.get('tools', []),
+                    name=agent_dict.get("name", ""),
+                    display_name=agent_dict.get("display_name"),
+                    task=agent_dict.get("task", ""),
+                    dependencies=agent_dict.get("dependencies", []),
+                    suggested_tools=agent_dict.get("tools", []),
                 )
                 self._builder.current_plan.agent_specs.append(new_spec)
                 added_names.append(new_spec.display_name or new_spec.name)
-            
+
             # 5. 更新工作流结构描述
             self._builder.current_plan.workflow_structure = (
                 f"{self._builder.current_plan.workflow_structure or ''}\n"
                 f"（已合并来自 {source_checkpoint_label} 的 {len(added_names)} 个 Agent）"
             ).strip()
-            
+
             # 6. 创建检查点
             self._builder.iteration_manager.checkpoint(
                 label=f"merge_plans_{source_checkpoint_label}",
                 stage=self._builder.current_stage,
                 state=self._builder._get_current_state(),
             )
-            
+
             return OperationResult(
                 success=True,
                 message=f"已成功合并规划！从 {source_checkpoint_label} 添加了 {len(added_names)} 个 Agent: {', '.join(added_names)}",
@@ -1224,11 +1318,11 @@ class WorkflowOperationTools:
                     "source_checkpoint": source_checkpoint_label,
                     "added_agents": added_names,
                     "merge_strategy": merge_strategy,
-                    "total_agents": len(self._builder.current_plan.agent_specs)
+                    "total_agents": len(self._builder.current_plan.agent_specs),
                 },
                 workflow_changed=True,
             )
-            
+
         except Exception as e:
             logger.error(f"合并规划失败: {e}, traceback: {traceback.format_exc()}")
             return OperationResult(success=False, message=f"合并规划失败: {str(e)}")
@@ -1240,35 +1334,39 @@ class WorkflowOperationTools:
     ) -> OperationResult:
         """
         智能迭代规划 - LLM 驱动的规划更新
-        
+
         根据用户的自然语言请求，结合历史规划和当前规划上下文，
         让 LLM 深度理解用户意图，生成新的完整规划。
-        
+
         适用场景：
         - "把上一版规划的 XXX Agent 加入当前规划"
         - "整合两次规划，取各自的优点"
         - "修改当前规划，增加数据验证环节"
         - "根据我的反馈重新设计规划"
-        
+
         Args:
             user_request: 用户的自然语言请求/反馈
             include_history: 是否包含历史规划（默认True）
-            
+
         Returns:
             操作结果，包含新生成的规划
         """
         if not self._ensure_builder():
             return OperationResult(success=False, message="请先创建工作流")
-        
+
         try:
             # 1. 提取历史规划（从检查点）
             previous_plans = self._extract_previous_plans() if include_history else None
-            
+
             # 2. 构建迭代上下文
-            iteration_context = self._build_iteration_context(user_request, previous_plans)
-            
-            logger.info(f"智能迭代规划: user_request={user_request[:100]}..., history_plans={len(previous_plans) if previous_plans else 0}")
-            
+            iteration_context = self._build_iteration_context(
+                user_request, previous_plans
+            )
+
+            logger.info(
+                f"智能迭代规划: user_request={user_request[:100]}..., history_plans={len(previous_plans) if previous_plans else 0}"
+            )
+
             # 3. 调用增强的 _generate_plan
             plan = await self._builder._generate_plan(
                 task_description=self._task_description,
@@ -1276,21 +1374,23 @@ class WorkflowOperationTools:
                 user_feedback=user_request,
                 iteration_context=iteration_context,
             )
-            
+
             if plan:
                 # 4. 更新状态
                 self._builder.current_plan = plan
-                
+
                 # 5. 创建检查点
                 self._builder.iteration_manager.checkpoint(
                     label="iterate_plan",
                     stage=self._builder.current_stage,
                     state=self._builder._get_current_state(),
                 )
-                
+
                 # 6. 构建结果摘要
-                agent_names = [spec.display_name or spec.name for spec in plan.agent_specs]
-                
+                agent_names = [
+                    spec.display_name or spec.name for spec in plan.agent_specs
+                ]
+
                 return OperationResult(
                     success=True,
                     message=f"已根据您的要求重新生成规划！新规划包含 {len(plan.agent_specs)} 个 Agent: {', '.join(agent_names)}",
@@ -1303,96 +1403,114 @@ class WorkflowOperationTools:
                 )
             else:
                 return OperationResult(success=False, message="规划生成失败，请重试")
-                
+
         except Exception as e:
             logger.error(f"智能迭代规划失败: {e}, traceback: {traceback.format_exc()}")
             return OperationResult(success=False, message=f"规划迭代失败: {str(e)}")
-    
+
     def _extract_previous_plans(self, limit: int = 5) -> List[Dict[str, Any]]:
         """
         从检查点提取历史规划
-        
+
         Args:
             limit: 最多提取的历史规划数量
-            
+
         Returns:
             历史规划列表（已去重）
         """
         if not self._builder:
             return []
-        
+
         plans = []
         checkpoints = self._builder.iteration_manager.get_checkpoints()
-        
+
         seen_plans = set()  # 用于去重
         for ckpt in reversed(checkpoints):
-            state = ckpt.state if hasattr(ckpt, 'state') else ckpt.get('state', {})
-            plan = state.get('plan', {})
-            if plan and plan.get('agents'):
+            state = ckpt.state if hasattr(ckpt, "state") else ckpt.get("state", {})
+            plan = state.get("plan", {})
+            if plan and plan.get("agents"):
                 # 简化表示，用于 LLM 理解
                 plan_summary = {
-                    'checkpoint_label': ckpt.label if hasattr(ckpt, 'label') else ckpt.get('label', ''),
-                    'timestamp': ckpt.timestamp if hasattr(ckpt, 'timestamp') else ckpt.get('timestamp', ''),
-                    'task_description': plan.get('task_description', ''),
-                    'agents': [
+                    "checkpoint_label": (
+                        ckpt.label if hasattr(ckpt, "label") else ckpt.get("label", "")
+                    ),
+                    "timestamp": (
+                        ckpt.timestamp
+                        if hasattr(ckpt, "timestamp")
+                        else ckpt.get("timestamp", "")
+                    ),
+                    "task_description": plan.get("task_description", ""),
+                    "agents": [
                         {
-                            'name': a.get('name'),
-                            'display_name': a.get('display_name'),
-                            'task': a.get('task'),
-                            'dependencies': a.get('dependencies', []),
-                            'suggested_tools': a.get('suggested_tools', a.get('tools', [])),
+                            "name": a.get("name"),
+                            "display_name": a.get("display_name"),
+                            "task": a.get("task"),
+                            "dependencies": a.get("dependencies", []),
+                            "suggested_tools": a.get(
+                                "suggested_tools", a.get("tools", [])
+                            ),
                         }
-                        for a in plan.get('agents', [])
+                        for a in plan.get("agents", [])
                     ],
                 }
                 # 用 agent 名称列表作为去重 key
-                plan_key = str(sorted([a['name'] for a in plan_summary['agents']]))
+                plan_key = str(sorted([a["name"] for a in plan_summary["agents"]]))
                 if plan_key not in seen_plans:
                     seen_plans.add(plan_key)
                     plans.append(plan_summary)
                     if len(plans) >= limit:
                         break
-        
+
         return plans
-    
-    def _build_iteration_context(self, user_request: str, previous_plans: Optional[List[Dict[str, Any]]]) -> str:
+
+    def _build_iteration_context(
+        self, user_request: str, previous_plans: Optional[List[Dict[str, Any]]]
+    ) -> str:
         """
         构建迭代上下文描述
-        
+
         Args:
             user_request: 用户请求
             previous_plans: 历史规划列表
-            
+
         Returns:
             迭代上下文描述字符串
         """
         if not previous_plans:
             return "这是首次规划迭代，无历史规划可参考"
-        
+
         context_parts = [f"用户请求: {user_request}"]
         context_parts.append(f"可参考的历史规划数量: {len(previous_plans)}")
-        
+
         # 分析用户意图，提供更明确的指导
         user_request_lower = user_request.lower()
-        if any(kw in user_request for kw in ['整合', '合并', '融合', '加入', '添加到']):
-            context_parts.append("用户意图分析: 希望整合历史规划中的部分 Agent 到新规划")
-            context_parts.append("建议: 分析历史规划中用户提到的 Agent，将其整合到新规划中，并建立合适的依赖关系")
-        elif any(kw in user_request for kw in ['修改', '调整', '更新', '改进']):
+        if any(kw in user_request for kw in ["整合", "合并", "融合", "加入", "添加到"]):
+            context_parts.append(
+                "用户意图分析: 希望整合历史规划中的部分 Agent 到新规划"
+            )
+            context_parts.append(
+                "建议: 分析历史规划中用户提到的 Agent，将其整合到新规划中，并建立合适的依赖关系"
+            )
+        elif any(kw in user_request for kw in ["修改", "调整", "更新", "改进"]):
             context_parts.append("用户意图分析: 希望修改当前规划的部分内容")
             context_parts.append("建议: 基于当前规划进行局部修改，保持整体结构不变")
-        elif any(kw in user_request for kw in ['添加', '增加', '新增', '加个']):
+        elif any(kw in user_request for kw in ["添加", "增加", "新增", "加个"]):
             context_parts.append("用户意图分析: 希望在当前规划基础上添加新 Agent")
-            context_parts.append("建议: 保留当前规划的所有 Agent，添加用户要求的新 Agent")
-        elif any(kw in user_request for kw in ['删除', '移除', '去掉', '不要']):
+            context_parts.append(
+                "建议: 保留当前规划的所有 Agent，添加用户要求的新 Agent"
+            )
+        elif any(kw in user_request for kw in ["删除", "移除", "去掉", "不要"]):
             context_parts.append("用户意图分析: 希望从当前规划中删除某些 Agent")
             context_parts.append("建议: 移除用户指定的 Agent，并修复依赖关系")
-        elif any(kw in user_request for kw in ['上一版', '之前', '刚才', '前面']):
+        elif any(kw in user_request for kw in ["上一版", "之前", "刚才", "前面"]):
             context_parts.append("用户意图分析: 用户提到了历史规划中的内容")
-            context_parts.append("建议: 从历史规划中找到用户提到的 Agent，整合到新规划中")
+            context_parts.append(
+                "建议: 从历史规划中找到用户提到的 Agent，整合到新规划中"
+            )
         else:
             context_parts.append("用户意图分析: 一般性的规划修改请求")
             context_parts.append("建议: 仔细理解用户需求，生成符合要求的完整规划")
-        
+
         return "\n".join(context_parts)
 
     async def assemble_workflow(self) -> OperationResult:
@@ -1464,17 +1582,21 @@ class WorkflowOperationTools:
                 # 1. 先发送批准消息（在生成之前）
                 if self._progress_callback:
                     try:
-                        await self._progress_callback({
-                            "type": "approval_started",
-                            "stage": "plan",
-                            "message": "规划已批准，正在生成 Agents..."
-                        })
+                        await self._progress_callback(
+                            {
+                                "type": "approval_started",
+                                "stage": "plan",
+                                "message": "规划已批准，正在生成 Agents...",
+                            }
+                        )
+                        # 让出事件循环，确保消息能够立即发送到前端
+                        await asyncio.sleep(0)
                     except Exception as cb_error:
                         logger.warning(f"批准消息回调执行失败: {cb_error}")
-                
+
                 # 2. 执行生成
                 result = await self.generate_agents_from_plan()
-                
+
                 # 3. 返回最终汇总（不再包含"规划已批准"前缀，因为已经单独发送）
                 if result.success:
                     return OperationResult(
@@ -1489,14 +1611,18 @@ class WorkflowOperationTools:
                 # 1. 先发送批准消息
                 if self._progress_callback:
                     try:
-                        await self._progress_callback({
-                            "type": "approval_started",
-                            "stage": "agent",
-                            "message": "Agents 已批准，正在组装工作流..."
-                        })
+                        await self._progress_callback(
+                            {
+                                "type": "approval_started",
+                                "stage": "agent",
+                                "message": "Agents 已批准，正在组装工作流...",
+                            }
+                        )
+                        # 让出事件循环，确保消息能够立即发送到前端
+                        await asyncio.sleep(0)
                     except Exception as cb_error:
                         logger.warning(f"批准消息回调执行失败: {cb_error}")
-                
+
                 # 2. 组装工作流
                 result = await self.assemble_workflow()
                 if result.success:
@@ -1575,24 +1701,136 @@ class WorkflowOperationTools:
     async def save_workflow(
         self,
         path: Optional[str] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        author: str = "user",
+        save_to_database: bool = True,
     ) -> OperationResult:
         """
-        保存工作流
+        保存工作流（优先保存到数据库）
 
         Args:
-            path: 保存路径（可选）
+            path: 保存路径（可选，用于本地文件备份）
+            name: 工作流名称
+            description: 工作流描述
+            tags: 标签列表
+            author: 作者
+            save_to_database: 是否保存到数据库（默认 True）
 
         Returns:
-            操作结果
+            操作结果，包含工作流信息卡片数据
         """
         if not self._ensure_builder():
             return OperationResult(success=False, message="没有可保存的工作流")
 
-        try:
-            from pathlib import Path
-            import json
+        if not self._builder.draft_workflow:
+            return OperationResult(success=False, message="没有可保存的工作流定义")
 
-            # 准备保存数据
+        try:
+            from pathlib import Path as FilePath
+            import json
+            import os
+
+            workflow = self._builder.draft_workflow
+            agents = self._builder.draft_agents
+
+            # 设置工作流名称和描述
+            if name:
+                workflow.name = name
+            if description:
+                workflow.description = description
+
+            # 如果没有提供名称，使用任务描述的前 50 个字符
+            if not workflow.name:
+                workflow.name = (self._task_description or "未命名工作流")[:50]
+
+            result_data = {}
+            db_saved = False
+            saved_agents_count = 0
+
+            # ========== 优先保存到数据库 ==========
+            if (
+                save_to_database
+                and os.getenv("ENABLE_POSTGRES", "false").lower() == "true"
+            ):
+                try:
+                    from src.services import WorkflowService, AgentService
+                    from src.storage.database import AsyncDatabaseManager
+                    from src.storage.repositories import (
+                        WorkflowDefinitionRepository,
+                        WorkflowExecutionRepository,
+                        AgentRepository,
+                    )
+                    from src.storage.config import PostgreSQLConfig
+
+                    config = PostgreSQLConfig(
+                        host=os.getenv("POSTGRES_HOST", "localhost"),
+                        port=int(os.getenv("POSTGRES_PORT", "5432")),
+                        database=os.getenv("POSTGRES_DB", "agent_framework"),
+                        user=os.getenv("POSTGRES_USER", "postgres"),
+                        password=os.getenv("POSTGRES_PASSWORD", ""),
+                    )
+                    db = AsyncDatabaseManager(config)
+                    await db.connect()
+
+                    # 初始化服务
+                    workflow_repo = WorkflowDefinitionRepository(db._session_factory)
+                    execution_repo = WorkflowExecutionRepository(db._session_factory)
+                    agent_repo = AgentRepository(db._session_factory)
+                    workflow_service = WorkflowService(workflow_repo, execution_repo)
+                    agent_service = AgentService(agent_repo)
+
+                    # 保存工作流到数据库
+                    workflow_data = workflow.model_dump(mode="json")
+                    if tags:
+                        workflow_data["tags"] = tags
+
+                    workflow_detail = await workflow_service.create_workflow_from_dict(
+                        workflow_data=workflow_data,
+                        author=author,
+                    )
+
+                    # 保存所有 Agents 到数据库
+                    for agent_def in agents:
+                        try:
+                            agent_data = (
+                                agent_def.model_dump(mode="json")
+                                if hasattr(agent_def, "model_dump")
+                                else agent_def.__dict__
+                            )
+                            await agent_service.create_agent_from_dict(
+                                agent_data=agent_data,
+                                author=author,
+                            )
+                            saved_agents_count += 1
+                        except Exception as agent_error:
+                            logger.warning(f"保存 Agent 失败: {agent_error}")
+
+                    await db.close()
+
+                    # 构建工作流信息卡片数据
+                    result_data = self._build_workflow_info_card(
+                        workflow_detail=workflow_detail,
+                        workflow=workflow,
+                        agents=agents,
+                        saved_agents_count=saved_agents_count,
+                    )
+                    db_saved = True
+
+                    logger.info(
+                        f"工作流已保存到数据库: {workflow_detail.name} "
+                        f"(ID: {workflow_detail.workflow_id}), "
+                        f"Agents: {saved_agents_count}/{len(agents)}"
+                    )
+
+                except Exception as db_error:
+                    logger.error(f"保存到数据库失败: {db_error}")
+                    import traceback
+
+                    logger.debug(f"详细错误: {traceback.format_exc()}")
+
+            # ========== 本地文件备份 ==========
             save_data = {
                 "task_description": self._task_description,
                 "plan": (
@@ -1602,23 +1840,20 @@ class WorkflowOperationTools:
                 ),
                 "agents": [
                     a.model_dump() if hasattr(a, "model_dump") else a.__dict__
-                    for a in self._builder.draft_agents
+                    for a in agents
                 ],
                 "workflow": (
-                    self._builder.draft_workflow.model_dump()
-                    if self._builder.draft_workflow
-                    and hasattr(self._builder.draft_workflow, "model_dump")
-                    else None
+                    workflow.model_dump() if hasattr(workflow, "model_dump") else None
                 ),
                 "saved_at": datetime.now().isoformat(),
             }
 
-            # 确定保存路径
+            # 确定本地保存路径
             if not path:
                 if self.storage_path:
-                    save_dir = Path(self.storage_path)
+                    save_dir = FilePath(self.storage_path)
                 else:
-                    save_dir = Path("./workspaces/saved_workflows")
+                    save_dir = FilePath("./workspaces/saved_workflows")
                 save_dir.mkdir(parents=True, exist_ok=True)
                 path = str(
                     save_dir
@@ -1628,15 +1863,77 @@ class WorkflowOperationTools:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(save_data, f, ensure_ascii=False, indent=2)
 
-            return OperationResult(
-                success=True,
-                message=f"工作流已保存到: {path}",
-                data={"path": path},
-            )
+            result_data["local_path"] = path
+
+            # 构建返回消息
+            if db_saved:
+                message = (
+                    f"工作流 '{result_data.get('name', workflow.name)}' 已保存到数据库"
+                )
+                return OperationResult(
+                    success=True,
+                    message=message,
+                    data=result_data,
+                    workflow_changed=False,
+                )
+            else:
+                # 数据库未启用，只保存到本地
+                result_data.update(
+                    {
+                        "type": "workflow_info_card",
+                        "name": workflow.name,
+                        "description": workflow.description or "",
+                        "agent_count": len(agents),
+                        "node_count": len(workflow.nodes) if workflow.nodes else 0,
+                        "saved_to": "local",
+                    }
+                )
+                return OperationResult(
+                    success=True,
+                    message=f"工作流已保存到本地: {path}（数据库未启用）",
+                    data=result_data,
+                    workflow_changed=False,
+                )
 
         except Exception as e:
             logger.error(f"保存工作流失败: {e}, traceback: {traceback.format_exc()}")
             return OperationResult(success=False, message=str(e))
+
+    def _build_workflow_info_card(
+        self,
+        workflow_detail,
+        workflow,
+        agents: List,
+        saved_agents_count: int,
+    ) -> Dict[str, Any]:
+        """
+        构建工作流信息卡片数据
+
+        Args:
+            workflow_detail: 数据库返回的工作流详情
+            workflow: 工作流定义
+            agents: Agent 列表
+            saved_agents_count: 成功保存的 Agent 数量
+
+        Returns:
+            工作流信息卡片数据字典
+        """
+        return {
+            "type": "workflow_info_card",
+            "id": workflow_detail.id,
+            "workflow_id": workflow_detail.workflow_id,
+            "name": workflow_detail.name,
+            "description": workflow_detail.description or "",
+            "version": workflow_detail.version,
+            "agent_count": len(agents),
+            "saved_agents_count": saved_agents_count,
+            "node_count": len(workflow.nodes) if workflow.nodes else 0,
+            "edge_count": len(workflow.edges) if workflow.edges else 0,
+            "tags": workflow_detail.tags or [],
+            "author": workflow_detail.author,
+            "created_at": workflow_detail.created_at,
+            "saved_to": "database",
+        }
 
     # ========== 执行操作 ==========
 
@@ -1661,14 +1958,9 @@ class WorkflowOperationTools:
 
             # 初始化工作流引擎（使用 MetaAgent 的 registry）
             if not self._workflow_engine:
-                # 确定执行结果保存路径
-                if self.storage_path:
-                    executions_path = str(Path(self.storage_path) / "executions")
-                elif self._builder and hasattr(self._builder, 'storage_path'):
-                    executions_path = str(Path(self._builder.storage_path) / "executions")
-                else:
-                    executions_path = "./workspaces/workflow_executions"
-                
+                # 使用统一的路径获取方法
+                executions_path = str(self._get_executions_path())
+
                 self._workflow_engine = WorkflowEngine(
                     agent_registry=self.meta_agent.agent_registry,
                     tool_registry=self.tool_registry,
@@ -1692,21 +1984,53 @@ class WorkflowOperationTools:
             self._is_executing = False
 
             # WorkflowResult 是一个 dataclass，需要正确访问其属性
+            # 构建详细的结果数据，包含 execution_id 用于前端查询
+            nodes_completed = len(
+                [r for r in result.node_results.values() if r.status == "success"]
+            )
+            nodes_failed = len(
+                [r for r in result.node_results.values() if r.status == "failed"]
+            )
+            total_nodes = len(result.node_results)
+
             return OperationResult(
                 success=result.status.value == "completed",
                 message=f"工作流执行完成，状态: {result.status.value}",
-                data=result.to_dict() if hasattr(result, 'to_dict') else {"status": result.status.value},
+                data={
+                    "execution_id": result.workflow_id,  # 执行 ID，用于查询执行历史
+                    "status": result.status.value,
+                    "total_duration_ms": result.total_duration_ms,
+                    "nodes_completed": nodes_completed,
+                    "nodes_failed": nodes_failed,
+                    "total_nodes": total_nodes,
+                    "started_at": result.started_at,
+                    "completed_at": result.completed_at,
+                    "node_results": (
+                        {
+                            k: {
+                                "status": v.status,
+                                "duration_ms": v.duration_ms,
+                                "error": v.error,
+                            }
+                            for k, v in result.node_results.items()
+                        }
+                        if result.node_results
+                        else {}
+                    ),
+                },
             )
 
         except Exception as e:
             self._is_executing = False
             # 通知执行失败
             if self._progress_callback:
-                await self._progress_callback({
-                    "event_type": "execution_failed",
-                    "error": str(e),
-                    "message": f"工作流执行失败: {str(e)}"
-                })
+                await self._progress_callback(
+                    {
+                        "event_type": "execution_failed",
+                        "error": str(e),
+                        "message": f"工作流执行失败: {str(e)}",
+                    }
+                )
             logger.error(f"执行工作流失败: {e}, traceback: {traceback.format_exc()}")
             return OperationResult(success=False, message=str(e))
 
@@ -1735,56 +2059,51 @@ class WorkflowOperationTools:
     async def get_execution_history(self, limit: int = 10) -> OperationResult:
         """
         获取工作流执行历史列表
-        
+
         Args:
             limit: 最多返回的记录数
-            
+
         Returns:
             操作结果，包含执行历史列表
         """
         try:
-            # 确定执行结果保存路径
-            if self.storage_path:
-                executions_dir = Path(self.storage_path) / "executions"
-            elif self._builder and hasattr(self._builder, 'storage_path'):
-                executions_dir = Path(self._builder.storage_path) / "executions"
-            else:
-                executions_dir = Path("./workspaces/workflow_executions")
-            
+            # 使用统一的路径获取方法
+            executions_dir = self._get_executions_path()
+
             if not executions_dir.exists():
                 return OperationResult(
-                    success=True,
-                    message="暂无执行记录",
-                    data={"history": []}
+                    success=True, message="暂无执行记录", data={"history": []}
                 )
-            
+
             records = []
             # 扫描执行目录
             workflow_dirs = sorted(
                 [d for d in executions_dir.iterdir() if d.is_dir()],
                 key=lambda x: x.stat().st_mtime,
-                reverse=True
+                reverse=True,
             )
-            
-            for workflow_dir in workflow_dirs[:limit * 2]:  # 多扫描一些，因为有些可能是节点目录
+
+            for workflow_dir in workflow_dirs[
+                : limit * 2
+            ]:  # 多扫描一些，因为有些可能是节点目录
                 # 检查是否有检查点目录（工作流执行目录的标志）
                 checkpoint_dir = workflow_dir / "checkpoints"
                 if not checkpoint_dir.exists():
                     continue
-                
+
                 # 尝试加载最新的检查点
                 record = self._load_execution_record(workflow_dir)
                 if record:
                     records.append(record)
                     if len(records) >= limit:
                         break
-            
+
             return OperationResult(
                 success=True,
                 message=f"找到 {len(records)} 条执行记录",
-                data={"history": records}
+                data={"history": records},
             )
-            
+
         except Exception as e:
             logger.error(f"获取执行历史失败: {e}")
             return OperationResult(success=False, message=str(e))
@@ -1795,48 +2114,75 @@ class WorkflowOperationTools:
             checkpoint_dir = workflow_dir / "checkpoints"
             if not checkpoint_dir.exists():
                 return None
-            
+
             # 找到最新的检查点文件
             checkpoint_files = sorted(
                 checkpoint_dir.glob("ckpt_*.json"),
                 key=lambda x: x.stat().st_mtime,
-                reverse=True
+                reverse=True,
             )
-            
+
             if not checkpoint_files:
                 return None
-            
+
             with open(checkpoint_files[0], "r", encoding="utf-8") as f:
                 checkpoint = json.load(f)
-            
+
             # 解析检查点数据
             node_results = checkpoint.get("node_results", {})
-            
+
             # 统计节点状态
-            nodes_completed = sum(1 for r in node_results.values() if r.get("status") == "success")
-            nodes_failed = sum(1 for r in node_results.values() if r.get("status") == "failed")
-            nodes_total = len(node_results)
-            
-            # 计算总耗时
-            total_duration = sum(
-                r.get("duration_ms", 0) for r in node_results.values()
+            nodes_completed = sum(
+                1 for r in node_results.values() if r.get("status") == "success"
             )
-            
-            # 判断整体状态
-            status = checkpoint.get("status", "running")
-            if status == "completed":
+            nodes_failed = sum(
+                1 for r in node_results.values() if r.get("status") == "failed"
+            )
+            nodes_total = len(node_results)
+
+            # 计算总耗时
+            total_duration = sum(r.get("duration_ms", 0) for r in node_results.values())
+
+            # 判断整体状态 - 从检查点加载并规范化
+            raw_status = checkpoint.get("status", "running")
+
+            # 规范化状态（处理字符串和可能的枚举残留）
+            status_lower = str(raw_status).lower()
+            if status_lower in ("completed", "workflowstatus.completed"):
                 status = "success"
-            elif nodes_failed > 0:
+            elif status_lower in ("failed", "workflowstatus.failed"):
                 status = "failed"
-            
+            elif status_lower in ("cancelled", "workflowstatus.cancelled"):
+                status = "cancelled"
+            elif status_lower in (
+                "running",
+                "workflowstatus.running",
+                "pending",
+                "workflowstatus.pending",
+            ):
+                status = "running"
+            else:
+                status = "running"
+
+            # 基于实际节点结果覆盖状态（如果状态为 running 但实际已完成）
+            if status == "running":
+                if nodes_failed > 0:
+                    status = "failed"
+                elif nodes_completed == nodes_total and nodes_total > 0:
+                    status = "success"
+
             # 获取时间信息
             started_at = checkpoint.get("created_at", "")
             if node_results:
                 # 尝试从节点结果获取开始时间
-                start_times = [r.get("started_at") for r in node_results.values() if r.get("started_at")]
+                start_times = [
+                    r.get("started_at")
+                    for r in node_results.values()
+                    if r.get("started_at")
+                ]
                 if start_times:
                     started_at = min(start_times)
-            
+
             return {
                 "executionId": checkpoint.get("checkpoint_id", workflow_dir.name),
                 "workflowId": checkpoint.get("workflow_id", workflow_dir.name),
@@ -1848,7 +2194,7 @@ class WorkflowOperationTools:
                 "nodesCompleted": nodes_completed,
                 "nodesFailed": nodes_failed,
             }
-            
+
         except Exception as e:
             logger.warning(f"加载执行记录失败 {workflow_dir}: {e}")
             return None
@@ -1856,22 +2202,17 @@ class WorkflowOperationTools:
     async def get_execution_detail(self, execution_id: str) -> OperationResult:
         """
         获取某次执行的详细信息
-        
+
         Args:
             execution_id: 执行 ID
-            
+
         Returns:
             操作结果，包含执行详情（所有节点的 input/output）
         """
         try:
-            # 确定执行结果保存路径
-            if self.storage_path:
-                executions_dir = Path(self.storage_path) / "executions"
-            elif self._builder and hasattr(self._builder, 'storage_path'):
-                executions_dir = Path(self._builder.storage_path) / "executions"
-            else:
-                executions_dir = Path("./workspaces/workflow_executions")
-            
+            # 使用统一的路径获取方法
+            executions_dir = self._get_executions_path()
+
             # 查找对应的执行目录
             target_dir = None
             for workflow_dir in executions_dir.iterdir():
@@ -1891,36 +2232,32 @@ class WorkflowOperationTools:
                         break
                 if target_dir:
                     break
-            
+
             if not target_dir:
                 return OperationResult(
-                    success=False,
-                    message=f"未找到执行记录: {execution_id}"
+                    success=False, message=f"未找到执行记录: {execution_id}"
                 )
-            
+
             # 加载检查点
             checkpoint_dir = target_dir / "checkpoints"
             checkpoint_files = sorted(
                 checkpoint_dir.glob("ckpt_*.json"),
                 key=lambda x: x.stat().st_mtime,
-                reverse=True
+                reverse=True,
             )
-            
+
             if not checkpoint_files:
-                return OperationResult(
-                    success=False,
-                    message=f"未找到检查点文件"
-                )
-            
+                return OperationResult(success=False, message=f"未找到检查点文件")
+
             with open(checkpoint_files[0], "r", encoding="utf-8") as f:
                 checkpoint = json.load(f)
-            
+
             # 构建详细的节点结果
             node_results = {}
             for node_id, result in checkpoint.get("node_results", {}).items():
                 # 尝试加载节点的输入输出
                 node_workspace = executions_dir / f"{target_dir.name}_{node_id}"
-                
+
                 node_detail = {
                     "nodeId": node_id,
                     "nodeName": result.get("node_name", node_id),
@@ -1930,7 +2267,7 @@ class WorkflowOperationTools:
                     "durationMs": result.get("duration_ms"),
                     "error": result.get("error"),
                 }
-                
+
                 # 尝试加载输入
                 input_file = node_workspace / "input" / "input.json"
                 if input_file.exists():
@@ -1939,7 +2276,7 @@ class WorkflowOperationTools:
                             node_detail["input"] = json.load(f)
                     except:
                         pass
-                
+
                 # 尝试加载输出
                 output_file = node_workspace / "output" / "result.json"
                 if output_file.exists():
@@ -1948,9 +2285,9 @@ class WorkflowOperationTools:
                             node_detail["output"] = json.load(f)
                     except:
                         pass
-                
+
                 node_results[node_id] = node_detail
-            
+
             return OperationResult(
                 success=True,
                 message="获取执行详情成功",
@@ -1959,9 +2296,9 @@ class WorkflowOperationTools:
                     "workflowId": checkpoint.get("workflow_id"),
                     "nodeResults": node_results,
                     "context": checkpoint.get("context"),
-                }
+                },
             )
-            
+
         except Exception as e:
             logger.error(f"获取执行详情失败: {e}")
             return OperationResult(success=False, message=str(e))
@@ -1973,7 +2310,7 @@ class WorkflowOperationTools:
         agent_name: str,
         field: str,
         current_value: str,
-        optimization_goal: Optional[str] = None
+        optimization_goal: Optional[str] = None,
     ) -> OperationResult:
         """
         使用 LLM 优化 Agent 的 Prompt 字段
@@ -1996,10 +2333,10 @@ class WorkflowOperationTools:
                 "description": "描述",
                 "display_name": "显示名称",
             }
-            
+
             field_display = field_names.get(field, field)
             goal = optimization_goal or "使其更清晰、更专业、更有效"
-            
+
             prompt = f"""你是一个专业的 Prompt 优化专家。请优化以下 Agent 配置中的「{field_display}」字段。
 
 ## Agent 名称
@@ -2022,7 +2359,7 @@ class WorkflowOperationTools:
 
             # 调用 LLM
             response = await self.meta_agent._call_llm(prompt)
-            
+
             # 清理响应（移除可能的引号和多余空白）
             optimized_value = response.strip()
             if optimized_value.startswith('"') and optimized_value.endswith('"'):
@@ -2037,20 +2374,17 @@ class WorkflowOperationTools:
                     "field": field,
                     "original_value": current_value,
                     "optimized_value": optimized_value,
-                }
+                },
             )
 
         except Exception as e:
-            logger.error(f"优化 Agent Prompt 失败: {e}, traceback: {traceback.format_exc()}")
-            return OperationResult(
-                success=False, 
-                message=f"优化失败: {str(e)}"
+            logger.error(
+                f"优化 Agent Prompt 失败: {e}, traceback: {traceback.format_exc()}"
             )
+            return OperationResult(success=False, message=f"优化失败: {str(e)}")
 
     async def update_agent_definition(
-        self,
-        agent_name: str,
-        updates: Dict[str, Any]
+        self, agent_name: str, updates: Dict[str, Any]
     ) -> OperationResult:
         """
         更新 Agent 定义
@@ -2074,13 +2408,15 @@ class WorkflowOperationTools:
                     break
 
             if not agent:
-                return OperationResult(success=False, message=f"未找到 Agent: {agent_name}")
+                return OperationResult(
+                    success=False, message=f"未找到 Agent: {agent_name}"
+                )
 
             # 应用更新
             for key, value in updates.items():
-                if '.' in key:
+                if "." in key:
                     # 处理嵌套字段（如 'background_instruction.role_description'）
-                    parts = key.split('.')
+                    parts = key.split(".")
                     obj = agent
                     for part in parts[:-1]:
                         obj = getattr(obj, part, None)
@@ -2091,7 +2427,7 @@ class WorkflowOperationTools:
                 else:
                     if hasattr(agent, key):
                         setattr(agent, key, value)
-            
+
             # 自动递增版本号
             old_version = agent.version
             try:
@@ -2101,7 +2437,7 @@ class WorkflowOperationTools:
             except (ValueError, IndexError):
                 # 如果版本号格式不正确，使用默认递增
                 agent.version = "1.0.1"
-            
+
             display_name = agent.display_name or agent.name
             return OperationResult(
                 success=True,
@@ -2116,13 +2452,12 @@ class WorkflowOperationTools:
             )
 
         except Exception as e:
-            logger.error(f"更新 Agent 定义失败: {e}, traceback: {traceback.format_exc()}")
+            logger.error(
+                f"更新 Agent 定义失败: {e}, traceback: {traceback.format_exc()}"
+            )
             return OperationResult(success=False, message=str(e))
 
-    async def get_agent_definition(
-        self,
-        agent_name: str
-    ) -> OperationResult:
+    async def get_agent_definition(self, agent_name: str) -> OperationResult:
         """
         获取 Agent 的完整定义
 
@@ -2139,17 +2474,23 @@ class WorkflowOperationTools:
             # 在 draft_agents 中查找 agent
             for agent in self._builder.draft_agents:
                 if agent.name == agent_name:
-                    agent_dict = agent.model_dump() if hasattr(agent, 'model_dump') else agent.__dict__
+                    agent_dict = (
+                        agent.model_dump()
+                        if hasattr(agent, "model_dump")
+                        else agent.__dict__
+                    )
                     return OperationResult(
                         success=True,
                         message=f"获取 Agent 定义成功",
-                        data={"agent_definition": agent_dict}
+                        data={"agent_definition": agent_dict},
                     )
 
             return OperationResult(success=False, message=f"未找到 Agent: {agent_name}")
 
         except Exception as e:
-            logger.error(f"获取 Agent 定义失败: {e}, traceback: {traceback.format_exc()}")
+            logger.error(
+                f"获取 Agent 定义失败: {e}, traceback: {traceback.format_exc()}"
+            )
             return OperationResult(success=False, message=str(e))
 
     # ========== 查询操作 ==========
@@ -2174,12 +2515,12 @@ class WorkflowOperationTools:
             a.model_dump() if hasattr(a, "model_dump") else a.__dict__
             for a in self._builder.draft_agents
         ]
-    
+
     def get_draft_agents(self) -> List[Dict[str, Any]]:
         """获取已生成的 draft agents（完整的 AgentDefinition）"""
         if not self._builder:
             return []
-        
+
         return [
             a.model_dump() if hasattr(a, "model_dump") else a.__dict__
             for a in self._builder.draft_agents
@@ -2213,12 +2554,12 @@ class WorkflowOperationTools:
         if self._builder:
             return self._builder.current_stage.value
         return "idle"
-    
+
     def get_available_tools(self) -> List[Dict[str, Any]]:
         """获取可用工具列表"""
         if not self.tool_registry:
             return []
-        
+
         try:
             return self.tool_registry.list_tools()
         except Exception as e:
@@ -2245,19 +2586,19 @@ class WorkflowOperationTools:
                 parts.append(f"{spec.name} (起始节点)")
 
         return " → ".join(parts)
-    
+
     def _get_valid_tools(self) -> set:
         """
         从 ToolRegistry 动态获取有效工具列表
-        
+
         Returns:
             有效工具 ID 集合
         """
         if self._valid_tools_cache is not None:
             return self._valid_tools_cache
-        
+
         valid_tools = set()
-        
+
         # 从 ToolRegistry 获取已注册的工具
         if self.tool_registry:
             try:
@@ -2272,7 +2613,7 @@ class WorkflowOperationTools:
                         valid_tools.add(alias)
             except Exception as e:
                 logger.warning(f"无法从 ToolRegistry 获取工具列表: {e}")
-        
+
         # 如果没有从 registry 获取到，使用默认的内置工具
         if not valid_tools:
             valid_tools = {
@@ -2286,23 +2627,23 @@ class WorkflowOperationTools:
                 "bash_execute",
                 "bash_execute_safe",
             }
-        
+
         self._valid_tools_cache = valid_tools
         logger.debug(f"有效工具列表: {valid_tools}")
         return valid_tools
-    
+
     def _validate_tools(self, tools: List[str]) -> List[str]:
         """
         验证并过滤工具列表，只保留有效工具
-        
+
         Args:
             tools: 待验证的工具列表
-            
+
         Returns:
             有效的工具列表
         """
         valid_tools = self._get_valid_tools()
-        
+
         validated = []
         for tool in tools:
             tool_stripped = tool.strip()
@@ -2313,12 +2654,18 @@ class WorkflowOperationTools:
                 # 尝试映射常见的别名到有效工具
                 tool_lower = tool_stripped.lower()
                 mapped = False
-                
+
                 if "qveris" in tool_lower or "远程" in tool_lower:
-                    if "qveris_search_tools" in valid_tools and "qveris_search_tools" not in validated:
+                    if (
+                        "qveris_search_tools" in valid_tools
+                        and "qveris_search_tools" not in validated
+                    ):
                         validated.append("qveris_search_tools")
                         mapped = True
-                    if "qveris_execute_tool" in valid_tools and "qveris_execute_tool" not in validated:
+                    if (
+                        "qveris_execute_tool" in valid_tools
+                        and "qveris_execute_tool" not in validated
+                    ):
                         validated.append("qveris_execute_tool")
                         mapped = True
                 elif "file" in tool_lower or "文件" in tool_lower:
@@ -2326,14 +2673,21 @@ class WorkflowOperationTools:
                         if ft in valid_tools and ft not in validated:
                             validated.append(ft)
                             mapped = True
-                elif "bash" in tool_lower or "shell" in tool_lower or "命令" in tool_lower:
-                    if "bash_execute_safe" in valid_tools and "bash_execute_safe" not in validated:
+                elif (
+                    "bash" in tool_lower
+                    or "shell" in tool_lower
+                    or "命令" in tool_lower
+                ):
+                    if (
+                        "bash_execute_safe" in valid_tools
+                        and "bash_execute_safe" not in validated
+                    ):
                         validated.append("bash_execute_safe")
                         mapped = True
-                
+
                 if not mapped:
                     logger.warning(f"工具 '{tool}' 不存在于注册表中，已忽略")
-        
+
         # 确保至少有基础工具
         if not validated:
             default_tools = ["qveris_search_tools", "qveris_execute_tool"]
@@ -2341,9 +2695,9 @@ class WorkflowOperationTools:
             if not validated:
                 # 最后的备选
                 validated = list(valid_tools)[:2] if valid_tools else []
-        
+
         return validated
-    
+
     def refresh_tools_cache(self) -> None:
         """刷新工具缓存"""
         self._valid_tools_cache = None

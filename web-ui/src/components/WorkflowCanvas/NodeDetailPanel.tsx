@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { 
-  X, 
-  Bot, 
-  Wrench, 
-  Clock, 
-  CheckCircle, 
-  XCircle, 
+import {
+  X,
+  Bot,
+  Wrench,
+  Clock,
+  CheckCircle,
+  XCircle,
   SkipForward,
   ChevronDown,
   ChevronUp,
@@ -40,21 +40,21 @@ interface NodeDetailPanelProps {
 }
 
 // 可折叠的配置卡片
-function ConfigCard({ 
-  title, 
-  icon: Icon, 
-  children, 
+function ConfigCard({
+  title,
+  icon: Icon,
+  children,
   defaultExpanded = false,
   badge,
-}: { 
-  title: string; 
+}: {
+  title: string;
   icon: React.ComponentType<{ className?: string }>;
   children: React.ReactNode;
   defaultExpanded?: boolean;
   badge?: React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  
+
   return (
     <div className="bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
       <button
@@ -74,9 +74,8 @@ function ConfigCard({
           <ChevronDown className="w-4 h-4 text-slate-400" />
         )}
       </button>
-      <div className={`transition-all duration-200 ease-in-out ${
-        expanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden'
-      }`}>
+      <div className={`transition-all duration-200 ease-in-out ${expanded ? 'max-h-[2000px] opacity-100' : 'max-h-0 opacity-0 overflow-hidden'
+        }`}>
         <div className="px-5 pb-5 pt-1">
           {children}
         </div>
@@ -107,18 +106,18 @@ function ExpandableTextField({
   const [isEditing, setIsEditing] = useState(false);
   const [editValue, setEditValue] = useState(value);
   const [isOptimizing, setIsOptimizing] = useState(false);
-  
+
   const displayValue = value || placeholder;
   const isLongText = displayValue.length > 80;
   const showToggle = isLongText && !isEditing;
-  
+
   const handleSave = () => {
     if (onEdit) {
       onEdit(editValue);
     }
     setIsEditing(false);
   };
-  
+
   const handleOptimize = async () => {
     if (onOptimize) {
       setIsOptimizing(true);
@@ -129,7 +128,7 @@ function ExpandableTextField({
       }
     }
   };
-  
+
   return (
     <div className="group relative">
       {/* 标签行 */}
@@ -162,7 +161,7 @@ function ExpandableTextField({
           )}
         </div>
       </div>
-      
+
       {/* 内容区 */}
       {isEditing ? (
         <div className="space-y-3">
@@ -191,10 +190,9 @@ function ExpandableTextField({
         </div>
       ) : (
         <div className="relative">
-          <div 
-            className={`text-sm text-slate-700 leading-relaxed whitespace-pre-wrap ${
-              !isExpanded && isLongText ? 'line-clamp-3' : ''
-            } ${!value ? 'text-slate-400 italic' : ''}`}
+          <div
+            className={`text-sm text-slate-700 leading-relaxed whitespace-pre-wrap ${!isExpanded && isLongText ? 'line-clamp-3' : ''
+              } ${!value ? 'text-slate-400 italic' : ''}`}
           >
             {displayValue}
           </div>
@@ -208,8 +206,8 @@ function ExpandableTextField({
           )}
           {/* 可编辑提示 */}
           {editable && !isEditing && (
-            <div className="absolute -right-1 -top-1 w-2 h-2 bg-blue-400 rounded-full opacity-0 group-hover:opacity-100 transition-opacity" 
-                 title="可编辑" />
+            <div className="absolute -right-1 -top-1 w-2 h-2 bg-blue-400 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+              title="可编辑" />
           )}
         </div>
       )}
@@ -225,13 +223,13 @@ function Divider() {
 // 复制按钮
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
-  
+
   const handleCopy = async () => {
     await navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
-  
+
   return (
     <button
       onClick={handleCopy}
@@ -247,7 +245,7 @@ function CopyButton({ text }: { text: string }) {
 function ExecutionResultPanel({ result }: { result?: import('../../types').NodeExecutionResult }) {
   const [showInput, setShowInput] = useState(false);
   const [showOutput, setShowOutput] = useState(true);
-  
+
   if (!result) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-slate-400">
@@ -257,7 +255,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
       </div>
     );
   }
-  
+
   const statusConfig: Record<string, { label: string; color: string; icon: React.ComponentType<{ className?: string }> }> = {
     success: { label: '成功', color: 'text-emerald-600 bg-emerald-50', icon: CheckCircle },
     failed: { label: '失败', color: 'text-red-600 bg-red-50', icon: XCircle },
@@ -265,10 +263,10 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
     running: { label: '运行中', color: 'text-blue-600 bg-blue-50', icon: Loader2 },
     pending: { label: '等待', color: 'text-slate-500 bg-slate-50', icon: Clock },
   };
-  
+
   const status = statusConfig[result.status] || statusConfig.pending;
   const StatusIcon = status.icon;
-  
+
   const formatJson = (obj: unknown) => {
     try {
       return JSON.stringify(obj, null, 2);
@@ -276,7 +274,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
       return String(obj);
     }
   };
-  
+
   const formatTime = (dateStr?: string) => {
     if (!dateStr) return '-';
     const date = new Date(dateStr);
@@ -288,7 +286,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
       second: '2-digit',
     });
   };
-  
+
   return (
     <div className="space-y-4">
       {/* 执行状态卡片 */}
@@ -300,7 +298,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
             {status.label}
           </span>
         </div>
-        
+
         <div className="grid grid-cols-2 gap-4">
           <div>
             <p className="text-xs text-slate-400 mb-1">开始时间</p>
@@ -323,7 +321,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
             </p>
           </div>
         </div>
-        
+
         {result.error && (
           <div className="mt-4 p-3 bg-red-50 rounded-xl">
             <p className="text-xs font-medium text-red-600 mb-1">错误信息</p>
@@ -331,7 +329,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
           </div>
         )}
       </div>
-      
+
       {/* 输入 */}
       {result.input !== undefined && (
         <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
@@ -353,14 +351,14 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
           </button>
           {showInput && (
             <div className="px-5 pb-5">
-              <pre className="p-4 bg-slate-50 rounded-xl text-xs font-mono text-slate-700 overflow-x-auto max-h-64 overflow-y-auto">
+              <pre className="p-4 bg-slate-50 rounded-xl text-xs font-mono text-slate-700 max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
                 {formatJson(result.input)}
               </pre>
             </div>
           )}
         </div>
       )}
-      
+
       {/* 输出 */}
       {result.output !== undefined && (
         <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
@@ -382,7 +380,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
           </button>
           {showOutput && (
             <div className="px-5 pb-5">
-              <pre className="p-4 bg-slate-50 rounded-xl text-xs font-mono text-slate-700 overflow-x-auto max-h-96 overflow-y-auto">
+              <pre className="p-4 bg-slate-50 rounded-xl text-xs font-mono text-slate-700 max-h-96 overflow-y-auto whitespace-pre-wrap break-words">
                 {formatJson(result.output)}
               </pre>
             </div>
@@ -393,13 +391,13 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
   );
 }
 
-export function NodeDetailPanel({ 
-  node, 
-  agent, 
+export function NodeDetailPanel({
+  node,
+  agent,
   agentDefinition,
   availableTools = [],
   availableModels = [],
-  state, 
+  state,
   executionResult,
   isHistoryMode = false,
   onClose,
@@ -412,16 +410,16 @@ export function NodeDetailPanel({
   const [showAddTool, setShowAddTool] = useState(false);
   // Tab 状态
   const [activeTab, setActiveTab] = useState<'config' | 'result'>(isHistoryMode ? 'result' : 'config');
-  
+
   if (!node) return null;
 
   const status = state?.status || node.status || 'pending';
   const duration = state?.duration;
   const def = agentDefinition;
-  
+
   // 检查是否有待保存的更改
   const hasChanges = Object.keys(pendingChanges).length > 0;
-  
+
   // 保存所有更改
   const handleSaveAll = async () => {
     if (!onEdit || !hasChanges) return;
@@ -435,12 +433,12 @@ export function NodeDetailPanel({
       setIsSaving(false);
     }
   };
-  
+
   // 更新本地更改
   const updatePendingChange = (field: string, value: unknown) => {
     setPendingChanges(prev => ({ ...prev, [field]: value }));
   };
-  
+
   // 获取字段值
   const getFieldValue = <T,>(field: string, defaultValue: T): T => {
     if (field in pendingChanges) {
@@ -510,7 +508,7 @@ export function NodeDetailPanel({
             <X className="w-5 h-5 text-slate-400" />
           </button>
         </div>
-        
+
         {/* 描述 */}
         {(def?.description || node.description) && (
           <p className="mt-3 text-sm text-slate-600 leading-relaxed">
@@ -524,21 +522,19 @@ export function NodeDetailPanel({
         <div className="px-4 pt-4 pb-2 bg-white border-b border-slate-100 flex gap-2">
           <button
             onClick={() => setActiveTab('config')}
-            className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-              activeTab === 'config'
+            className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${activeTab === 'config'
                 ? 'bg-blue-50 text-blue-700'
                 : 'text-slate-500 hover:bg-slate-50'
-            }`}
+              }`}
           >
             配置
           </button>
           <button
             onClick={() => setActiveTab('result')}
-            className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-              activeTab === 'result'
+            className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${activeTab === 'result'
                 ? 'bg-blue-50 text-blue-700'
                 : 'text-slate-500 hover:bg-slate-50'
-            }`}
+              }`}
           >
             执行结果
           </button>
@@ -556,9 +552,9 @@ export function NodeDetailPanel({
         {activeTab === 'config' && def && (
           <>
             {/* Prompt 配置 */}
-            <ConfigCard 
-              title="提示词配置" 
-              icon={FileText} 
+            <ConfigCard
+              title="提示词配置"
+              icon={FileText}
               defaultExpanded={true}
               badge={
                 !isHistoryMode && (
@@ -578,9 +574,9 @@ export function NodeDetailPanel({
                   optimizable
                   placeholder="定义 Agent 的角色身份..."
                 />
-                
+
                 <Divider />
-                
+
                 <ExpandableTextField
                   label="核心能力"
                   value={def.background_instruction?.core_capability || ''}
@@ -590,9 +586,9 @@ export function NodeDetailPanel({
                   optimizable
                   placeholder="描述 Agent 的核心能力..."
                 />
-                
+
                 <Divider />
-                
+
                 <ExpandableTextField
                   label="任务上下文"
                   value={def.background_instruction?.task_context || ''}
@@ -614,7 +610,7 @@ export function NodeDetailPanel({
                     {def.output_instruction?.format_type || 'json'}
                   </span>
                 </div>
-                
+
                 {def.output_instruction?.format_requirements?.length ? (
                   <>
                     <Divider />
@@ -630,7 +626,7 @@ export function NodeDetailPanel({
                     </div>
                   </>
                 ) : null}
-                
+
                 {def.output_instruction?.quality_standards?.length ? (
                   <>
                     <Divider />
@@ -676,7 +672,7 @@ export function NodeDetailPanel({
                     )}
                   </select>
                 </div>
-                
+
                 {/* 温度 */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
@@ -701,7 +697,7 @@ export function NodeDetailPanel({
                     </div>
                   </div>
                 </div>
-                
+
                 {/* 参数网格 */}
                 <div className="grid grid-cols-2 gap-4">
                   <div>
@@ -732,9 +728,9 @@ export function NodeDetailPanel({
             </ConfigCard>
 
             {/* 工具配置 */}
-            <ConfigCard 
-              title="工具配置" 
-              icon={Wrench} 
+            <ConfigCard
+              title="工具配置"
+              icon={Wrench}
               defaultExpanded
               badge={
                 (getFieldValue('tool_references', def.tool_references) || []).length > 0 && (
@@ -747,13 +743,12 @@ export function NodeDetailPanel({
               <div className="space-y-3">
                 {/* 工具列表 */}
                 {(getFieldValue('tool_references', def.tool_references) || []).map((tool: { tool_id: string; alias?: string; tool_type?: string; enabled: boolean }, i: number) => (
-                  <div 
-                    key={i} 
-                    className={`flex items-center justify-between p-3 rounded-xl transition-all ${
-                      tool.enabled 
-                        ? 'bg-white border border-slate-200 shadow-sm' 
+                  <div
+                    key={i}
+                    className={`flex items-center justify-between p-3 rounded-xl transition-all ${tool.enabled
+                        ? 'bg-white border border-slate-200 shadow-sm'
                         : 'bg-slate-100 border border-transparent opacity-60'
-                    }`}
+                      }`}
                   >
                     <div className="flex-1 min-w-0">
                       <span className="text-sm font-medium text-slate-700 block truncate">
@@ -761,8 +756,8 @@ export function NodeDetailPanel({
                       </span>
                       {tool.tool_type && (
                         <span className="text-[11px] text-slate-400">
-                          {tool.tool_type === 'qveris' ? '搜索工具' : 
-                           tool.tool_type === 'builtin' ? '内置工具' : tool.tool_type}
+                          {tool.tool_type === 'qveris' ? '搜索工具' :
+                            tool.tool_type === 'builtin' ? '内置工具' : tool.tool_type}
                         </span>
                       )}
                     </div>
@@ -797,7 +792,7 @@ export function NodeDetailPanel({
                     </div>
                   </div>
                 ))}
-                
+
                 {/* 添加工具 */}
                 {showAddTool ? (
                   <div className="p-4 bg-blue-50 border-2 border-dashed border-blue-200 rounded-xl">
@@ -932,7 +927,7 @@ export function NodeDetailPanel({
           </ConfigCard>
         )}
       </div>
-      
+
       {/* 保存按钮 - 固定在底部（仅在非历史模式下显示） */}
       {def && hasChanges && !isHistoryMode && (
         <div className="p-4 bg-white border-t border-slate-200 flex-shrink-0">

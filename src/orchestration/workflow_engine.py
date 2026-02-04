@@ -200,10 +200,10 @@ class WorkflowEngine(IWorkflowEngine):
 
         # 工作流定义缓存（用于恢复）
         self._workflow_definitions: Dict[str, WorkflowDefinition] = {}
-        
+
         # LLM 客户端缓存（按模型名缓存）
         self._llm_client_cache: Dict[str, Any] = {}
-        
+
         # === 流式执行支持 ===
         # 暂停标志: workflow_id -> bool
         self._pause_flags: Dict[str, bool] = {}
@@ -221,30 +221,30 @@ class WorkflowEngine(IWorkflowEngine):
     def _get_or_create_llm_client(self, llm_config: ModelConfig) -> Any:
         """
         根据 Agent 的 llm_config 获取或创建对应的 LLM 客户端
-        
+
         优先级：
         1. 如果 llm_config.model_name 在 ModelRegistry 中配置，使用对应配置创建客户端
         2. 否则回退到 WorkflowEngine 的默认 llm_client
-        
+
         Args:
             llm_config: Agent 定义中的模型配置
-            
+
         Returns:
             LLM 客户端实例
         """
         model_name = llm_config.model_name if llm_config else None
-        
+
         # 如果没有指定模型名，使用默认客户端
         if not model_name:
             if self.llm_client:
                 return self.llm_client
             # 使用 ModelRegistry 的默认模型
             model_name = get_model_registry().get_default_model()
-        
+
         # 检查缓存
         if model_name in self._llm_client_cache:
             return self._llm_client_cache[model_name]
-        
+
         # 尝试从 ModelRegistry 创建客户端
         try:
             model_registry = get_model_registry()
@@ -441,9 +441,9 @@ class WorkflowEngine(IWorkflowEngine):
                     self._pause_events[workflow_id].set()
                 return True
         return False
-    
+
     # ========== 流式执行支持 ==========
-    
+
     async def execute_with_streaming(
         self,
         workflow_definition: WorkflowDefinition,
@@ -452,26 +452,26 @@ class WorkflowEngine(IWorkflowEngine):
     ) -> WorkflowResult:
         """
         执行工作流并实时推送事件
-        
+
         与 execute() 类似，但会在执行过程中通过回调推送事件。
-        
+
         Args:
             workflow_definition: 工作流定义
             initial_context: 初始上下文
             event_callback: 事件回调函数，接收事件字典
-            
+
         Returns:
             工作流执行结果
         """
         workflow_id = f"{workflow_definition.workflow_id}_{uuid.uuid4().hex[:8]}"
         started_at = datetime.now()
-        
+
         logger.info(f"开始流式执行工作流: {workflow_id}")
-        
+
         # 注册事件回调
         if event_callback:
             self._event_callbacks[workflow_id] = event_callback
-        
+
         # 初始化控制状态
         self._pause_flags[workflow_id] = False
         self._pause_events[workflow_id] = asyncio.Event()
@@ -479,86 +479,100 @@ class WorkflowEngine(IWorkflowEngine):
         self._skip_nodes[workflow_id] = set()
         self._modified_inputs[workflow_id] = {}
         self._injected_context[workflow_id] = {}
-        
+
         # 推送工作流开始事件
-        await self._emit_event(workflow_id, {
-            "event_type": "workflow_started",
-            "workflow_id": workflow_id,
-            "timestamp": started_at.isoformat(),
-            "data": {
-                "total_nodes": len(workflow_definition.nodes),
-            }
-        })
-        
+        await self._emit_event(
+            workflow_id,
+            {
+                "event_type": "workflow_started",
+                "workflow_id": workflow_id,
+                "timestamp": started_at.isoformat(),
+                "data": {
+                    "total_nodes": len(workflow_definition.nodes),
+                },
+            },
+        )
+
         # 初始化结果
         result = WorkflowResult(
             workflow_id=workflow_id,
             status=WorkflowStatus.RUNNING,
             started_at=started_at.isoformat(),
         )
-        
+
         self._running_workflows[workflow_id] = WorkflowStatus.RUNNING
         self._workflow_results[workflow_id] = result
         self._cancel_flags[workflow_id] = False
-        
+
+        # Initialize variables before try block so they're accessible in finally
+        context: Dict[str, Any] = {
+            "workflow_id": workflow_id,
+            "global_context": workflow_definition.global_context or {},
+            **(initial_context or {}),
+        }
+        node_outputs: Dict[str, Any] = {}
+
         try:
             # 验证工作流
             self._validate_workflow(workflow_definition)
-            
-            # 构建执行上下文
-            context = {
-                "workflow_id": workflow_id,
-                "global_context": workflow_definition.global_context or {},
-                **(initial_context or {}),
-            }
-            
+
             # 构建 DAG 并获取拓扑排序
             execution_order = self._topological_sort(workflow_definition)
-            
+
             # 保存工作流定义用于恢复
-            self._workflow_definitions[workflow_definition.workflow_id] = workflow_definition
-            
+            self._workflow_definitions[workflow_definition.workflow_id] = (
+                workflow_definition
+            )
+
             # 按拓扑顺序执行节点
-            node_outputs: Dict[str, Any] = {}
             nodes_executed = 0
             total_nodes = len(execution_order)
-            
+
             for node_id in execution_order:
                 # 检查取消标志
                 if self._cancel_flags.get(workflow_id):
                     result.status = WorkflowStatus.CANCELLED
                     result.error = "工作流被取消"
-                    await self._emit_event(workflow_id, {
-                        "event_type": "workflow_cancelled",
-                        "workflow_id": workflow_id,
-                        "timestamp": datetime.now().isoformat(),
-                    })
+                    await self._emit_event(
+                        workflow_id,
+                        {
+                            "event_type": "workflow_cancelled",
+                            "workflow_id": workflow_id,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
                     break
-                
+
                 # 检查暂停标志
                 if self._pause_flags.get(workflow_id):
-                    await self._emit_event(workflow_id, {
-                        "event_type": "workflow_paused",
-                        "workflow_id": workflow_id,
-                        "timestamp": datetime.now().isoformat(),
-                    })
+                    await self._emit_event(
+                        workflow_id,
+                        {
+                            "event_type": "workflow_paused",
+                            "workflow_id": workflow_id,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
                     # 等待恢复
                     await self._pause_events[workflow_id].wait()
-                    await self._emit_event(workflow_id, {
-                        "event_type": "workflow_resumed",
-                        "workflow_id": workflow_id,
-                        "timestamp": datetime.now().isoformat(),
-                    })
-                
+                    await self._emit_event(
+                        workflow_id,
+                        {
+                            "event_type": "workflow_resumed",
+                            "workflow_id": workflow_id,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
+
                 # 合并注入的上下文
                 if self._injected_context.get(workflow_id):
                     context.update(self._injected_context[workflow_id])
                     self._injected_context[workflow_id] = {}
-                
+
                 node = self._get_node(workflow_definition, node_id)
                 if not node:
                     continue
-                
+
                 # 检查是否需要跳过
                 if node_id in self._skip_nodes.get(workflow_id, set()):
                     result.node_results[node_id] = NodeExecutionResult(
@@ -566,18 +580,21 @@ class WorkflowEngine(IWorkflowEngine):
                         status="skipped",
                         error="用户请求跳过",
                     )
-                    await self._emit_event(workflow_id, {
-                        "event_type": "node_skipped",
-                        "workflow_id": workflow_id,
-                        "node_id": node_id,
-                        "node_name": node.name,
-                        "timestamp": datetime.now().isoformat(),
-                    })
+                    await self._emit_event(
+                        workflow_id,
+                        {
+                            "event_type": "node_skipped",
+                            "workflow_id": workflow_id,
+                            "node_id": node_id,
+                            "node_name": node.name,
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                    )
                     continue
-                
+
                 # 检查依赖是否都已完成
                 dependencies_met = self._check_dependencies(node, result.node_results)
-                
+
                 if not dependencies_met:
                     result.node_results[node_id] = NodeExecutionResult(
                         node_id=node_id,
@@ -585,23 +602,26 @@ class WorkflowEngine(IWorkflowEngine):
                         error="依赖节点未成功完成",
                     )
                     continue
-                
+
                 # 推送节点开始事件
                 node_start_time = datetime.now()
-                await self._emit_event(workflow_id, {
-                    "event_type": "node_started",
-                    "workflow_id": workflow_id,
-                    "node_id": node_id,
-                    "node_name": node.name,
-                    "timestamp": node_start_time.isoformat(),
-                    "data": {
-                        "progress": nodes_executed / total_nodes * 100,
-                    }
-                })
-                
+                await self._emit_event(
+                    workflow_id,
+                    {
+                        "event_type": "node_started",
+                        "workflow_id": workflow_id,
+                        "node_id": node_id,
+                        "node_name": node.name,
+                        "timestamp": node_start_time.isoformat(),
+                        "data": {
+                            "progress": nodes_executed / total_nodes * 100,
+                        },
+                    },
+                )
+
                 # 检查是否有修改的输入
                 modified_input = self._modified_inputs.get(workflow_id, {}).get(node_id)
-                
+
                 # 执行节点
                 node_result = await self._execute_node(
                     node=node,
@@ -611,53 +631,64 @@ class WorkflowEngine(IWorkflowEngine):
                     workflow_id=workflow_id,  # 传递 workflow_id 用于事件
                     modified_input=modified_input,
                 )
-                
+
                 result.node_results[node_id] = node_result
                 nodes_executed += 1
-                
+
                 # 推送节点完成事件
                 if node_result.status == "success":
                     node_outputs[node_id] = node_result.output
-                    await self._emit_event(workflow_id, {
-                        "event_type": "node_completed",
-                        "workflow_id": workflow_id,
-                        "node_id": node_id,
-                        "node_name": node.name,
-                        "timestamp": datetime.now().isoformat(),
-                        "data": {
-                            "duration_ms": node_result.duration_ms,
-                            "output_preview": self._truncate_output(node_result.output),
-                        }
-                    })
+                    await self._emit_event(
+                        workflow_id,
+                        {
+                            "event_type": "node_completed",
+                            "workflow_id": workflow_id,
+                            "node_id": node_id,
+                            "node_name": node.name,
+                            "timestamp": datetime.now().isoformat(),
+                            "data": {
+                                "duration_ms": node_result.duration_ms,
+                                "output_preview": self._truncate_output(
+                                    node_result.output
+                                ),
+                            },
+                        },
+                    )
                 elif node_result.status == "failed":
-                    await self._emit_event(workflow_id, {
-                        "event_type": "node_failed",
-                        "workflow_id": workflow_id,
-                        "node_id": node_id,
-                        "node_name": node.name,
-                        "timestamp": datetime.now().isoformat(),
-                        "data": {
-                            "error": node_result.error,
-                        }
-                    })
-                    
+                    await self._emit_event(
+                        workflow_id,
+                        {
+                            "event_type": "node_failed",
+                            "workflow_id": workflow_id,
+                            "node_id": node_id,
+                            "node_name": node.name,
+                            "timestamp": datetime.now().isoformat(),
+                            "data": {
+                                "error": node_result.error,
+                            },
+                        },
+                    )
+
                     if not workflow_definition.continue_on_error:
                         result.status = WorkflowStatus.FAILED
                         result.error = f"节点 {node_id} 执行失败: {node_result.error}"
                         break
-                
+
                 # 推送进度更新
-                await self._emit_event(workflow_id, {
-                    "event_type": "progress_update",
-                    "workflow_id": workflow_id,
-                    "timestamp": datetime.now().isoformat(),
-                    "data": {
-                        "nodes_completed": nodes_executed,
-                        "total_nodes": total_nodes,
-                        "progress": nodes_executed / total_nodes * 100,
-                    }
-                })
-            
+                await self._emit_event(
+                    workflow_id,
+                    {
+                        "event_type": "progress_update",
+                        "workflow_id": workflow_id,
+                        "timestamp": datetime.now().isoformat(),
+                        "data": {
+                            "nodes_completed": nodes_executed,
+                            "total_nodes": total_nodes,
+                            "progress": nodes_executed / total_nodes * 100,
+                        },
+                    },
+                )
+
             # 确定最终状态
             if result.status == WorkflowStatus.RUNNING:
                 exit_node_id = workflow_definition.exit_point
@@ -672,7 +703,7 @@ class WorkflowEngine(IWorkflowEngine):
                 else:
                     result.status = WorkflowStatus.COMPLETED
                     result.final_output = node_outputs
-        
+
         except WorkflowCycleError as e:
             result.status = WorkflowStatus.FAILED
             result.error = str(e)
@@ -680,49 +711,88 @@ class WorkflowEngine(IWorkflowEngine):
             result.status = WorkflowStatus.FAILED
             result.error = f"工作流执行异常: {str(e)}"
             logger.exception(f"工作流 {workflow_id} 执行异常")
-        
+
         finally:
             # 清理
             completed_at = datetime.now()
             result.completed_at = completed_at.isoformat()
-            result.total_duration_ms = (completed_at - started_at).total_seconds() * 1000
-            
+            result.total_duration_ms = (
+                completed_at - started_at
+            ).total_seconds() * 1000
+
             self._running_workflows[workflow_id] = result.status
             self._workflow_results[workflow_id] = result
-            
+
             # 推送完成事件
             if result.status == WorkflowStatus.COMPLETED:
-                await self._emit_event(workflow_id, {
-                    "event_type": "workflow_completed",
-                    "workflow_id": workflow_id,
-                    "timestamp": completed_at.isoformat(),
-                    "data": {
-                        "total_duration_ms": result.total_duration_ms,
-                        "nodes_completed": len([r for r in result.node_results.values() if r.status == "success"]),
-                        "total_nodes": len(result.node_results),
-                    }
-                })
+                await self._emit_event(
+                    workflow_id,
+                    {
+                        "event_type": "workflow_completed",
+                        "workflow_id": workflow_id,
+                        "status": "completed",  # 添加明确的 status 字段
+                        "timestamp": completed_at.isoformat(),
+                        "data": {
+                            "status": "completed",  # 同时在 data 中也添加
+                            "total_duration_ms": result.total_duration_ms,
+                            "nodes_completed": len(
+                                [
+                                    r
+                                    for r in result.node_results.values()
+                                    if r.status == "success"
+                                ]
+                            ),
+                            "total_nodes": len(result.node_results),
+                        },
+                    },
+                )
             elif result.status == WorkflowStatus.FAILED:
-                await self._emit_event(workflow_id, {
-                    "event_type": "workflow_failed",
-                    "workflow_id": workflow_id,
-                    "timestamp": completed_at.isoformat(),
-                    "data": {
-                        "error": result.error,
-                        "failed_node": next((k for k, v in result.node_results.items() if v.status == "failed"), None),
-                    }
-                })
-            
+                await self._emit_event(
+                    workflow_id,
+                    {
+                        "event_type": "workflow_failed",
+                        "workflow_id": workflow_id,
+                        "status": "failed",  # 添加明确的 status 字段
+                        "timestamp": completed_at.isoformat(),
+                        "data": {
+                            "status": "failed",  # 同时在 data 中也添加
+                            "error": result.error,
+                            "failed_node": next(
+                                (
+                                    k
+                                    for k, v in result.node_results.items()
+                                    if v.status == "failed"
+                                ),
+                                None,
+                            ),
+                        },
+                    },
+                )
+
             # 清理控制状态
             self._cleanup_streaming_state(workflow_id)
-        
+
+            # Save final checkpoint with completed status for execution history
+            try:
+                await self._save_checkpoint(
+                    workflow_id=workflow_id,
+                    workflow_definition=workflow_definition,
+                    result=result,
+                    node_outputs=node_outputs,
+                    pending_nodes=[],  # No pending nodes after completion
+                    context=context,
+                )
+                logger.debug(f"工作流 {workflow_id} 最终检查点已保存")
+            except Exception as ckpt_error:
+                logger.warning(f"保存最终检查点失败: {ckpt_error}")
+
         logger.info(
             f"工作流 {workflow_id} 流式执行完成: {result.status.value}, "
             f"耗时 {result.total_duration_ms:.2f}ms"
         )
-        
+
         return result
-    
+
     async def _emit_event(self, workflow_id: str, event: Dict[str, Any]) -> None:
         """推送事件到回调"""
         callback = self._event_callbacks.get(workflow_id)
@@ -731,23 +801,26 @@ class WorkflowEngine(IWorkflowEngine):
                 await callback(event)
             except Exception as e:
                 logger.warning(f"事件回调失败: {e}")
-    
+
     def _truncate_output(self, output: Any, max_length: int = 200) -> Any:
         """截断输出用于预览"""
         if output is None:
             return None
-        
+
         if isinstance(output, str):
             return output[:max_length] + "..." if len(output) > max_length else output
-        
+
         if isinstance(output, dict):
-            return {k: self._truncate_output(v, max_length // 2) for k, v in list(output.items())[:5]}
-        
+            return {
+                k: self._truncate_output(v, max_length // 2)
+                for k, v in list(output.items())[:5]
+            }
+
         if isinstance(output, list):
             return output[:3] if len(output) > 3 else output
-        
+
         return output
-    
+
     def _cleanup_streaming_state(self, workflow_id: str) -> None:
         """清理流式执行状态"""
         if workflow_id in self._cancel_flags:
@@ -764,121 +837,114 @@ class WorkflowEngine(IWorkflowEngine):
             del self._injected_context[workflow_id]
         if workflow_id in self._event_callbacks:
             del self._event_callbacks[workflow_id]
-    
+
     # ========== 运行时干预方法 ==========
-    
+
     async def pause(self, workflow_id: str) -> bool:
         """
         暂停工作流执行
-        
+
         Args:
             workflow_id: 工作流 ID
-            
+
         Returns:
             是否成功
         """
         if workflow_id not in self._running_workflows:
             return False
-        
+
         if self._running_workflows[workflow_id] != WorkflowStatus.RUNNING:
             return False
-        
+
         self._pause_flags[workflow_id] = True
         if workflow_id in self._pause_events:
             self._pause_events[workflow_id].clear()
-        
+
         logger.info(f"工作流 {workflow_id} 已暂停")
         return True
-    
+
     async def resume_execution(self, workflow_id: str) -> bool:
         """
         恢复工作流执行
-        
+
         Args:
             workflow_id: 工作流 ID
-            
+
         Returns:
             是否成功
         """
         if workflow_id not in self._pause_flags:
             return False
-        
+
         self._pause_flags[workflow_id] = False
         if workflow_id in self._pause_events:
             self._pause_events[workflow_id].set()
-        
+
         logger.info(f"工作流 {workflow_id} 已恢复")
         return True
-    
+
     async def skip_node(self, workflow_id: str, node_id: str) -> bool:
         """
         跳过指定节点
-        
+
         Args:
             workflow_id: 工作流 ID
             node_id: 节点 ID
-            
+
         Returns:
             是否成功
         """
         if workflow_id not in self._running_workflows:
             return False
-        
+
         if workflow_id not in self._skip_nodes:
             self._skip_nodes[workflow_id] = set()
-        
+
         self._skip_nodes[workflow_id].add(node_id)
         logger.info(f"工作流 {workflow_id} 将跳过节点 {node_id}")
         return True
-    
+
     async def modify_node_input(
-        self,
-        workflow_id: str,
-        node_id: str,
-        new_input: Dict[str, Any]
+        self, workflow_id: str, node_id: str, new_input: Dict[str, Any]
     ) -> bool:
         """
         修改即将执行的节点输入
-        
+
         Args:
             workflow_id: 工作流 ID
             node_id: 节点 ID
             new_input: 新的输入数据
-            
+
         Returns:
             是否成功
         """
         if workflow_id not in self._running_workflows:
             return False
-        
+
         if workflow_id not in self._modified_inputs:
             self._modified_inputs[workflow_id] = {}
-        
+
         self._modified_inputs[workflow_id][node_id] = new_input
         logger.info(f"工作流 {workflow_id} 节点 {node_id} 输入已修改")
         return True
-    
-    async def inject_context(
-        self,
-        workflow_id: str,
-        context: Dict[str, Any]
-    ) -> bool:
+
+    async def inject_context(self, workflow_id: str, context: Dict[str, Any]) -> bool:
         """
         注入额外上下文
-        
+
         Args:
             workflow_id: 工作流 ID
             context: 要注入的上下文
-            
+
         Returns:
             是否成功
         """
         if workflow_id not in self._running_workflows:
             return False
-        
+
         if workflow_id not in self._injected_context:
             self._injected_context[workflow_id] = {}
-        
+
         self._injected_context[workflow_id].update(context)
         logger.info(f"工作流 {workflow_id} 已注入额外上下文")
         return True
@@ -1346,7 +1412,7 @@ class WorkflowEngine(IWorkflowEngine):
                 context=context,
                 node_outputs=node_outputs,
             )
-            
+
             # 应用修改的输入
             if modified_input:
                 node_input.update(modified_input)
@@ -1419,7 +1485,7 @@ class WorkflowEngine(IWorkflowEngine):
         node_outputs: Dict[str, Any],
     ) -> Dict[str, Any]:
         """准备节点输入
-        
+
         数据来源优先级：
         1. context: 全局上下文
         2. config: 节点配置
@@ -1432,7 +1498,7 @@ class WorkflowEngine(IWorkflowEngine):
             "context": context,
             "config": node.config or {},
         }
-        
+
         # 收集上游节点的工作空间路径（用于复制 context 文件）
         upstream_workspace_paths = {}
 
@@ -1444,7 +1510,9 @@ class WorkflowEngine(IWorkflowEngine):
                     value = source_value.get(mapping.source_field)
                     # 收集工作空间路径
                     if "_workspace_path" in source_value:
-                        upstream_workspace_paths[mapping.source_node] = source_value["_workspace_path"]
+                        upstream_workspace_paths[mapping.source_node] = source_value[
+                            "_workspace_path"
+                        ]
                 else:
                     value = source_value
                 node_input[mapping.target_field] = value
@@ -1454,8 +1522,13 @@ class WorkflowEngine(IWorkflowEngine):
             if dep_id in node_outputs:
                 node_input[f"dep_{dep_id}"] = node_outputs[dep_id]
                 # 收集工作空间路径
-                if isinstance(node_outputs[dep_id], dict) and "_workspace_path" in node_outputs[dep_id]:
-                    upstream_workspace_paths[dep_id] = node_outputs[dep_id]["_workspace_path"]
+                if (
+                    isinstance(node_outputs[dep_id], dict)
+                    and "_workspace_path" in node_outputs[dep_id]
+                ):
+                    upstream_workspace_paths[dep_id] = node_outputs[dep_id][
+                        "_workspace_path"
+                    ]
 
         # 从 context_refs 引用节点获取输出（数据引用，不影响执行顺序）
         # 用于获取非直接依赖节点的数据，如 report_generator 需要 data_collector 的原始数据
@@ -1463,19 +1536,28 @@ class WorkflowEngine(IWorkflowEngine):
             for ref_id in node.context_refs:
                 if ref_id in node_outputs:
                     node_input[f"ref_{ref_id}"] = node_outputs[ref_id]
-                    logger.debug(f"节点 {node.node_id} 通过 context_refs 引用了 {ref_id} 的输出")
+                    logger.debug(
+                        f"节点 {node.node_id} 通过 context_refs 引用了 {ref_id} 的输出"
+                    )
                     # 收集工作空间路径
-                    if isinstance(node_outputs[ref_id], dict) and "_workspace_path" in node_outputs[ref_id]:
-                        upstream_workspace_paths[ref_id] = node_outputs[ref_id]["_workspace_path"]
+                    if (
+                        isinstance(node_outputs[ref_id], dict)
+                        and "_workspace_path" in node_outputs[ref_id]
+                    ):
+                        upstream_workspace_paths[ref_id] = node_outputs[ref_id][
+                            "_workspace_path"
+                        ]
                 else:
                     logger.warning(
                         f"节点 {node.node_id} 的 context_refs 引用了不存在的节点: {ref_id}"
                     )
-        
+
         # 添加上游工作空间路径到输入（供 _execute_agent_node 使用）
         if upstream_workspace_paths:
             node_input["_upstream_workspace_paths"] = upstream_workspace_paths
-            logger.debug(f"节点 {node.node_id} 将从以下上游节点复制 context 文件: {list(upstream_workspace_paths.keys())}")
+            logger.debug(
+                f"节点 {node.node_id} 将从以下上游节点复制 context 文件: {list(upstream_workspace_paths.keys())}"
+            )
 
         return node_input
 
@@ -1507,12 +1589,12 @@ class WorkflowEngine(IWorkflowEngine):
             task_id=f"{context['workflow_id']}_{node.node_id}",
         )
         workspace = AgentWorkspace(workspace_config)
-        
+
         # === 复制上游节点的 context 文件到当前工作空间 ===
         # 这解决了下游 Agent 无法读取上游 Agent 产生的 context 文件的问题
         upstream_workspace_paths = node_input.get("_upstream_workspace_paths", {})
         copied_files_count = 0
-        
+
         for upstream_node_id, upstream_ws_path in upstream_workspace_paths.items():
             upstream_context_dir = Path(upstream_ws_path) / "context"
             if upstream_context_dir.exists():
@@ -1521,13 +1603,18 @@ class WorkflowEngine(IWorkflowEngine):
                     if src_file.is_file():
                         # 目标路径：context/{upstream_node_id}_{filename} 或直接 context/{filename}
                         # 使用 upstream_node_id 前缀避免文件名冲突
-                        dest_file = workspace.context_dir / f"{upstream_node_id}_{src_file.name}"
+                        dest_file = (
+                            workspace.context_dir
+                            / f"{upstream_node_id}_{src_file.name}"
+                        )
                         try:
                             shutil.copy2(src_file, dest_file)
                             copied_files_count += 1
                         except Exception as e:
-                            logger.warning(f"复制上游 context 文件失败: {src_file} -> {dest_file}: {e}")
-                
+                            logger.warning(
+                                f"复制上游 context 文件失败: {src_file} -> {dest_file}: {e}"
+                            )
+
                 # 同时创建不带前缀的软链接或复制，便于直接引用
                 # 如果同名文件已存在则跳过（优先使用较早节点的文件）
                 for src_file in upstream_context_dir.iterdir():
@@ -1537,10 +1624,14 @@ class WorkflowEngine(IWorkflowEngine):
                             try:
                                 shutil.copy2(src_file, dest_file_direct)
                             except Exception as e:
-                                logger.warning(f"复制上游 context 文件失败: {src_file} -> {dest_file_direct}: {e}")
-        
+                                logger.warning(
+                                    f"复制上游 context 文件失败: {src_file} -> {dest_file_direct}: {e}"
+                                )
+
         if copied_files_count > 0:
-            logger.info(f"节点 {node.node_id} 从上游节点复制了 {copied_files_count} 个 context 文件")
+            logger.info(
+                f"节点 {node.node_id} 从上游节点复制了 {copied_files_count} 个 context 文件"
+            )
 
         # 创建并运行 Agent
         agent = self.agent_registry.create_agent(
@@ -1583,7 +1674,7 @@ class WorkflowEngine(IWorkflowEngine):
             task_description=task_description,
             input_data=node_input.get("input_data", node_input),
         )
-        
+
         # 在结果中添加工作空间路径，供下游节点使用
         if isinstance(result, dict):
             result["_workspace_path"] = str(workspace.root)

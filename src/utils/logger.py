@@ -17,6 +17,9 @@ from typing import Optional
 class LogConfig:
     """日志配置"""
 
+    # 默认格式字符串
+    DEFAULT_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s"
+
     def __init__(self):
         self.level: str = os.getenv("LOG_LEVEL", "INFO")
         self.console_output: bool = os.getenv("LOG_CONSOLE", "true").lower() == "true"
@@ -24,10 +27,18 @@ class LogConfig:
         self.file_path: Optional[str] = os.getenv("LOG_FILE_PATH")
         self.max_file_size: int = int(os.getenv("LOG_MAX_SIZE", "10485760"))  # 10MB
         self.backup_count: int = int(os.getenv("LOG_BACKUP_COUNT", "5"))
-        self.format: str = os.getenv(
-            "LOG_FORMAT",
-            "%(asctime)s - %(levelname)s - %(name)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s",
-        )
+
+        # 日志格式：支持 "json" 关键字或自定义格式字符串
+        format_value = os.getenv("LOG_FORMAT", "")
+        if format_value.lower() == "json":
+            self.use_json = True
+            self.format = self.DEFAULT_FORMAT  # JSON 模式下也需要基础格式
+        elif format_value and "%" in format_value:
+            self.use_json = False
+            self.format = format_value
+        else:
+            self.use_json = False
+            self.format = self.DEFAULT_FORMAT
 
 
 class LoggerManager:
@@ -70,7 +81,10 @@ class LoggerManager:
         root_logger.handlers.clear()
 
         # 创建格式化器
-        formatter = logging.Formatter(self.config.format)
+        if getattr(self.config, "use_json", False):
+            formatter = self._create_json_formatter()
+        else:
+            formatter = logging.Formatter(self.config.format)
 
         # 控制台处理器
         if self.config.console_output:
@@ -81,6 +95,27 @@ class LoggerManager:
         # 文件处理器
         if self.config.file_output and self.config.file_path:
             self._setup_file_handler(root_logger, formatter)
+
+    def _create_json_formatter(self) -> logging.Formatter:
+        """创建 JSON 格式化器"""
+        import json as json_module
+
+        class JsonFormatter(logging.Formatter):
+            def format(self, record):
+                log_obj = {
+                    "timestamp": self.formatTime(record),
+                    "level": record.levelname,
+                    "name": record.name,
+                    "message": record.getMessage(),
+                    "filename": record.filename,
+                    "funcName": record.funcName,
+                    "lineno": record.lineno,
+                }
+                if record.exc_info:
+                    log_obj["exc_info"] = self.formatException(record.exc_info)
+                return json_module.dumps(log_obj, ensure_ascii=False)
+
+        return JsonFormatter()
 
     def _setup_file_handler(
         self, logger: logging.Logger, formatter: logging.Formatter

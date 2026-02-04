@@ -1,8 +1,9 @@
-import { User, Bot, Info, AlertCircle, Play, Loader2, CheckCircle, XCircle, BarChart3, Rocket, SkipForward } from 'lucide-react';
+import { User, Bot, Info, AlertCircle, Play, Loader2, CheckCircle, XCircle, BarChart3, Rocket, SkipForward, Save } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import type { Message, WorkflowPlan, GenerationSummary, GenerationProgressEvent } from '../../types';
+import type { Message, WorkflowPlan, GenerationSummary, GenerationProgressEvent, WorkflowInfoCard as WorkflowInfoCardType } from '../../types';
 import PlanDetailCard from './PlanDetailCard';
 import GenerationSummaryCard from './GenerationSummaryCard';
+import WorkflowInfoCard from './WorkflowInfoCard';
 
 interface MessageBubbleProps {
   message: Message;
@@ -14,23 +15,28 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const isError = message.messageType === 'error';
   const isExecutionEvent = message.messageType === 'execution_event';
   const isProgress = message.messageType === 'progress';
-  
+
   // 检查是否包含规划数据
   const planData = message.data?.plan as WorkflowPlan | undefined;
-  
+
   // 检查是否包含生成摘要数据
   const summaryData = message.data?.summary as GenerationSummary | undefined;
-  
+
   // 检查是否是生成进度事件
-  const progressData = message.data?.type === 'agent_generation_progress' 
-    ? message.data as unknown as GenerationProgressEvent 
+  const progressData = message.data?.type === 'agent_generation_progress'
+    ? message.data as unknown as GenerationProgressEvent
+    : undefined;
+
+  // 检查是否是工作流信息卡片
+  const workflowInfoData = message.data?.type === 'workflow_info_card'
+    ? message.data as unknown as WorkflowInfoCardType
     : undefined;
 
   // 根据消息类型和内容智能选择图标
   const getIcon = () => {
     if (isUser) return <User className="w-4 h-4" />;
     if (isError) return <AlertCircle className="w-4 h-4 text-red-500" />;
-    
+
     // 执行事件：根据消息内容智能匹配图标
     if (isExecutionEvent) {
       const content = message.content;
@@ -54,13 +60,17 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       }
       return <Play className="w-4 h-4 text-blue-500" />;
     }
-    
+
     // 进度消息：已完成显示✓，进行中显示转圈
     if (progressData) {
       if (progressData.status === 'completed') {
         return <CheckCircle className="w-4 h-4 text-emerald-500" />;
       }
       return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />;
+    }
+    // 工作流信息卡片
+    if (workflowInfoData) {
+      return <Save className="w-4 h-4 text-emerald-500" />;
     }
     if (isProgress) return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />;
     if (isSystem) return <Info className="w-4 h-4 text-gray-400" />;
@@ -102,6 +112,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     if (isProgress || progressData) {
       return 'bg-blue-50 text-blue-700 border border-blue-100 mr-8 text-sm';
     }
+    // 工作流信息卡片
+    if (workflowInfoData) {
+      return 'bg-emerald-50 text-emerald-700 border border-emerald-200 mr-8 text-sm';
+    }
     if (isSystem) {
       return 'bg-gray-100 text-gray-600 mr-8 text-sm';
     }
@@ -125,6 +139,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         return `✓ ${display_name} 生成完成 (${current}/${total})`;
       }
       return `正在生成 ${display_name}... (${current}/${total})`;
+    }
+    if (workflowInfoData) {
+      // 工作流保存成功消息
+      return '工作流保存成功！详情如下：';
     }
     return message.content;
   };
@@ -186,8 +204,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     );
   };
 
-  // 如果有规划数据或摘要数据，使用更宽的布局
-  const maxWidthClass = (planData || summaryData) ? 'max-w-full' : 'max-w-[90%]';
+  // 如果有规划数据、摘要数据或工作流信息卡片，使用更宽的布局
+  const maxWidthClass = (planData || summaryData || workflowInfoData) ? 'max-w-full' : 'max-w-[90%]';
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -195,18 +213,19 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         {/* 头像 */}
         <div className={`
           flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center
-          ${isUser ? 'bg-primary text-white' : 
-            isError ? 'bg-red-100' : 
-            isExecutionEvent ? (
-              message.content.includes('完成') || message.content.includes('✅') ? 'bg-emerald-100' :
-              message.content.includes('失败') || message.content.includes('❌') ? 'bg-red-100' :
-              message.content.includes('跳过') || message.content.includes('⏭') ? 'bg-amber-100' :
-              message.content.includes('进度') || message.content.includes('📈') ? 'bg-slate-100' :
-              'bg-blue-100'
-            ) :
-            (progressData?.status === 'completed') ? 'bg-emerald-100' :
-            (isProgress || progressData) ? 'bg-blue-100' :
-            'bg-gray-100'}
+          ${isUser ? 'bg-primary text-white' :
+            isError ? 'bg-red-100' :
+              isExecutionEvent ? (
+                message.content.includes('完成') || message.content.includes('✅') ? 'bg-emerald-100' :
+                  message.content.includes('失败') || message.content.includes('❌') ? 'bg-red-100' :
+                    message.content.includes('跳过') || message.content.includes('⏭') ? 'bg-amber-100' :
+                      message.content.includes('进度') || message.content.includes('📈') ? 'bg-slate-100' :
+                        'bg-blue-100'
+              ) :
+                workflowInfoData ? 'bg-emerald-100' :
+                  (progressData?.status === 'completed') ? 'bg-emerald-100' :
+                    (isProgress || progressData) ? 'bg-blue-100' :
+                      'bg-gray-100'}
         `}>
           {getIcon()}
         </div>
@@ -216,25 +235,28 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           <div className="text-sm leading-relaxed">
             {renderContent(getDisplayContent())}
           </div>
-          
+
           {/* 规划详情卡片 */}
           {planData && <PlanDetailCard plan={planData} />}
-          
+
           {/* 生成摘要卡片 */}
           {summaryData && <GenerationSummaryCard summary={summaryData} />}
-          
+
+          {/* 工作流信息卡片 */}
+          {workflowInfoData && <WorkflowInfoCard info={workflowInfoData} />}
+
           {/* 进度条（用于进度消息） */}
           {progressData && progressData.status !== 'completed' && (
             <div className="mt-2">
               <div className="w-full bg-blue-200 rounded-full h-1.5">
-                <div 
+                <div
                   className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
                   style={{ width: `${(progressData.current / progressData.total) * 100}%` }}
                 />
               </div>
             </div>
           )}
-          
+
           {/* 时间戳 */}
           <div className={`
             text-[10px] mt-1 opacity-60

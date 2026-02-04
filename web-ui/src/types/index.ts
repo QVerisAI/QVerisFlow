@@ -8,6 +8,7 @@ export enum WSMessageType {
   OPTIMIZE_PROMPT = 'optimize_prompt',  // 优化 Prompt
   GET_EXECUTION_HISTORY = 'get_execution_history',  // 获取执行历史
   GET_EXECUTION_DETAIL = 'get_execution_detail',  // 获取执行详情
+  SYNC_MESSAGES = 'sync_messages',  // 同步缺失的消息（增量同步）
   WORKFLOW_UPDATE = 'workflow_update',
   NODE_HIGHLIGHT = 'node_highlight',
   PROGRESS_UPDATE = 'progress_update',
@@ -24,6 +25,28 @@ export enum WSMessageType {
   // 心跳
   PING = 'ping',
   PONG = 'pong',
+
+  // 工作流管理 (Client -> Server)
+  LOAD_WORKFLOW = 'load_workflow',
+  SAVE_WORKFLOW = 'save_workflow',
+  LIST_WORKFLOWS = 'list_workflows',
+  DELETE_WORKFLOW = 'delete_workflow',
+
+  // Agent 管理 (Client -> Server)
+  LIST_AGENTS = 'list_agents',
+  REUSE_AGENT = 'reuse_agent',
+  GET_AGENT_TEMPLATES = 'get_agent_templates',
+
+  // 工作流管理响应 (Server -> Client)
+  WORKFLOW_LOADED = 'workflow_loaded',
+  WORKFLOW_SAVED = 'workflow_saved',
+  WORKFLOWS_LIST = 'workflows_list',
+  WORKFLOW_DELETED = 'workflow_deleted',
+
+  // Agent 管理响应 (Server -> Client)
+  AGENTS_LIST = 'agents_list',
+  AGENT_REUSED = 'agent_reused',
+  AGENT_TEMPLATES = 'agent_templates',
 }
 
 // 消息
@@ -301,4 +324,69 @@ export interface NodeExecutionResult {
   input?: unknown;
   output?: unknown;
   error?: string;
+}
+
+// 工作流摘要（用于列表展示）
+export interface WorkflowSummary {
+  id: string;
+  workflowId: string;
+  name: string;
+  description: string;
+  version: string;
+  status: string;
+  nodeCount: number;
+  edgeCount: number;
+  isActive: boolean;
+  tags: string[];
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// Agent 库条目（用于列表展示）
+export interface AgentLibraryItem {
+  id: string;
+  agentId: string;
+  name: string;
+  description: string;
+  version: string;
+  status: string;
+  domainType: string;
+  executionType: string;
+  modelName: string;
+  tags: string[];
+  isTemplate: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// 保存工作流请求
+export interface SaveWorkflowRequest {
+  name: string;
+  description: string;
+  tags?: string[];
+}
+
+// 加载工作流请求
+export interface LoadWorkflowRequest {
+  workflowId: string;
+}
+
+// 工作流信息卡片（保存后显示）
+export interface WorkflowInfoCard {
+  type: 'workflow_info_card';
+  id?: string;
+  workflow_id?: string;
+  name: string;
+  description: string;
+  version?: string;
+  agent_count: number;
+  saved_agents_count?: number;
+  node_count: number;
+  edge_count?: number;
+  tags?: string[];
+  author?: string;
+  created_at?: string;
+  saved_to: 'database' | 'local';
+  local_path?: string;
 }

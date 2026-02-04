@@ -4,6 +4,11 @@ FastAPI 应用入口
 对话式工作流构建器 Web UI 后端。
 """
 
+# Load .env file FIRST before any other imports that might use environment variables
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from typing import Optional, Any
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -127,11 +132,19 @@ def create_app() -> FastAPI:
     )
 
     # 注册路由
-    from src.web.routers import sessions_router, workflows_router, execution_router
+    from src.web.routers import (
+        sessions_router,
+        workflows_router,
+        execution_router,
+        agents_router,
+        executions_router,
+    )
 
     app.include_router(sessions_router, prefix="/api")
     app.include_router(workflows_router, prefix="/api")
     app.include_router(execution_router, prefix="/api")
+    app.include_router(agents_router, prefix="/api")
+    app.include_router(executions_router, prefix="/api")
 
     # WebSocket 端点
     @app.websocket("/ws/{session_id}")
@@ -153,7 +166,7 @@ def create_app() -> FastAPI:
             builder = await session_manager.get_session(session_id)
 
             if not builder:
-                # 创建新的构建器
+                # 创建新的构建器（传入 session_id 以便从数据库恢复）
                 storage_path = Path("./workspaces") / session_id
                 builder = ConversationalWorkflowBuilder(
                     meta_agent=_meta_agent,
@@ -161,8 +174,17 @@ def create_app() -> FastAPI:
                     llm_client=_llm_client,
                     workflow_engine=_workflow_engine,
                     storage_path=storage_path,
+                    session_id=session_id,  # 传入 session_id 用于数据库恢复
                 )
+                # 异步初始化（从数据库加载会话历史）
+                await builder.init_dependencies()
                 await session_manager.create_session(session_id, builder)
+                logger.info(f"创建新会话: {session_id}")
+            else:
+                # 已有会话，确保已初始化
+                if not builder._initialized:
+                    await builder.init_dependencies()
+                logger.debug(f"复用现有会话: {session_id}")
 
             # 创建处理器并处理连接
             handler = WebSocketHandler(
