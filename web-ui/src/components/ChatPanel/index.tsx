@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Send, Loader2 } from 'lucide-react';
+import { Send, Loader2, FolderOpen, Bot, Save } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { MessageBubble } from './MessageBubble';
@@ -18,10 +18,10 @@ export function ChatPanel() {
   // 智能滚动：仅在新消息添加时滚动到底部，且用户未手动滚动时
   const scrollToBottom = useCallback((force = false) => {
     if (!messagesContainerRef.current || !messagesEndRef.current) return;
-    
+
     const container = messagesContainerRef.current;
     const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-    
+
     // 只有在接近底部或强制滚动时才滚动
     if (isNearBottom || force) {
       // 使用 requestAnimationFrame 确保在 DOM 更新后滚动
@@ -35,12 +35,12 @@ export function ChatPanel() {
   useEffect(() => {
     const newCount = messages.length;
     const oldCount = lastMessageCountRef.current;
-    
+
     if (newCount > oldCount) {
       // 新消息添加，滚动到底部
       scrollToBottom(true);
     }
-    
+
     lastMessageCountRef.current = newCount;
   }, [messages.length, scrollToBottom]);
 
@@ -65,7 +65,7 @@ export function ChatPanel() {
 
     sendMessage(trimmed);
     setInput('');
-    
+
     // 重新聚焦输入框
     setTimeout(() => {
       inputRef.current?.focus();
@@ -85,7 +85,7 @@ export function ChatPanel() {
     // 将建议操作映射为直接的 WebSocket action
     const actionMap: Record<string, string | null> = {
       '确认规划': 'approve',
-      '确认 Agents': 'approve', 
+      '确认 Agents': 'approve',
       '确认工作流': 'approve',
       '确认': 'approve',
       '修改规划': null,  // 保持为聊天消息
@@ -98,7 +98,7 @@ export function ChatPanel() {
       '保存工作流': 'save',
       '保存': 'save',
     };
-    
+
     const directAction = actionMap[suggestion];
     if (directAction) {
       // 直接调用 WebSocket action，绕过 LLM
@@ -115,14 +115,14 @@ export function ChatPanel() {
       <div className="px-4 py-3 border-b bg-white">
         <h2 className="font-semibold text-gray-800">对话</h2>
         <p className="text-xs text-gray-500 mt-0.5">
-          {mode === 'executing' ? '执行中 - 可随时干预' : 
-           mode === 'building' ? '构建中 - 描述您的需求' : 
-           '描述您要创建的工作流'}
+          {mode === 'executing' ? '执行中 - 可随时干预' :
+            mode === 'building' ? '构建中 - 描述您的需求' :
+              '描述您要创建的工作流'}
         </p>
       </div>
 
       {/* 消息列表 */}
-      <div 
+      <div
         ref={messagesContainerRef}
         className="flex-1 overflow-y-auto p-4 space-y-4"
       >
@@ -139,14 +139,14 @@ export function ChatPanel() {
             <MessageBubble key={message.id || `fallback_${index}`} message={message} />
           ))
         )}
-        
+
         {isLoading && (
           <div className="flex items-center gap-2 text-gray-500">
             <Loader2 className="w-4 h-4 animate-spin" />
             <span className="text-sm">思考中...</span>
           </div>
         )}
-        
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -170,11 +170,46 @@ export function ChatPanel() {
       {/* 检查点列表 - 使用平滑过渡 */}
       <div className={`transition-all duration-150 ${checkpoints.length > 0 ? '' : 'h-0 overflow-hidden'}`}>
         {checkpoints.length > 0 && (
-          <CheckpointList 
+          <CheckpointList
             checkpoints={checkpoints}
             onRollback={(id: string) => sendMessage(`回滚到 ${id}`)}
           />
         )}
+      </div>
+
+      {/* 快捷工具栏 */}
+      <div className="px-4 py-2 border-t bg-slate-50 flex items-center gap-2">
+        <button
+          onClick={() => sendMessage("列出所有工作流")}
+          disabled={isLoading}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:opacity-50"
+          title="浏览工作流库"
+        >
+          <FolderOpen className="w-3.5 h-3.5" />
+          <span>工作流库</span>
+        </button>
+        <button
+          onClick={() => sendMessage("列出所有 Agent")}
+          disabled={isLoading}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:opacity-50"
+          title="浏览 Agent 库"
+        >
+          <Bot className="w-3.5 h-3.5" />
+          <span>Agent 库</span>
+        </button>
+        <button
+          onClick={() => sendMessage("保存当前工作流")}
+          disabled={isLoading || mode === 'idle'}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          title="保存当前工作流"
+        >
+          <Save className="w-3.5 h-3.5" />
+          <span>保存</span>
+        </button>
+        <div className="flex-1" />
+        <span className="text-[10px] text-slate-400">
+          通过对话搜索和管理
+        </span>
       </div>
 
       {/* 输入区域 */}
@@ -186,8 +221,8 @@ export function ChatPanel() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              mode === 'executing' 
-                ? "输入干预指令... (暂停/跳过/停止)" 
+              mode === 'executing'
+                ? "输入干预指令... (暂停/跳过/停止)"
                 : "描述您的需求或修改意见..."
             }
             className="flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary min-h-[40px] max-h-[120px]"

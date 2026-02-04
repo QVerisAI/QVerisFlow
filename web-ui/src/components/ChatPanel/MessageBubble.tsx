@@ -1,9 +1,11 @@
-import { User, Bot, Info, AlertCircle, Play, Loader2, CheckCircle, XCircle, BarChart3, Rocket, SkipForward, Save } from 'lucide-react';
+import { User, Bot, Info, AlertCircle, Play, Loader2, CheckCircle, XCircle, BarChart3, Rocket, SkipForward, Save, FolderOpen } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import type { Message, WorkflowPlan, GenerationSummary, GenerationProgressEvent, WorkflowInfoCard as WorkflowInfoCardType } from '../../types';
+import type { Message, WorkflowPlan, GenerationSummary, GenerationProgressEvent, WorkflowInfoCard as WorkflowInfoCardType, WorkflowSearchResult, AgentSearchResult } from '../../types';
 import PlanDetailCard from './PlanDetailCard';
 import GenerationSummaryCard from './GenerationSummaryCard';
 import WorkflowInfoCard from './WorkflowInfoCard';
+import WorkflowSearchCard from './WorkflowSearchCard';
+import AgentSearchCard from './AgentSearchCard';
 
 interface MessageBubbleProps {
   message: Message;
@@ -30,6 +32,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   // 检查是否是工作流信息卡片
   const workflowInfoData = message.data?.type === 'workflow_info_card'
     ? message.data as unknown as WorkflowInfoCardType
+    : undefined;
+
+  // 检查是否是工作流搜索结果
+  const workflowSearchData = message.data?.type === 'workflow_search_result'
+    ? message.data as unknown as WorkflowSearchResult
+    : undefined;
+
+  // 检查是否是 Agent 搜索结果
+  const agentSearchData = message.data?.type === 'agent_search_result'
+    ? message.data as unknown as AgentSearchResult
     : undefined;
 
   // 根据消息类型和内容智能选择图标
@@ -71,6 +83,13 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     // 工作流信息卡片
     if (workflowInfoData) {
       return <Save className="w-4 h-4 text-emerald-500" />;
+    }
+    // 搜索结果
+    if (workflowSearchData) {
+      return <FolderOpen className="w-4 h-4 text-blue-500" />;
+    }
+    if (agentSearchData) {
+      return <Bot className="w-4 h-4 text-purple-500" />;
     }
     if (isProgress) return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />;
     if (isSystem) return <Info className="w-4 h-4 text-gray-400" />;
@@ -115,6 +134,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     // 工作流信息卡片
     if (workflowInfoData) {
       return 'bg-emerald-50 text-emerald-700 border border-emerald-200 mr-8 text-sm';
+    }
+    // 搜索结果
+    if (workflowSearchData || agentSearchData) {
+      return 'bg-slate-50 text-slate-700 border border-slate-200 mr-4 text-sm';
     }
     if (isSystem) {
       return 'bg-gray-100 text-gray-600 mr-8 text-sm';
@@ -204,8 +227,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     );
   };
 
-  // 如果有规划数据、摘要数据或工作流信息卡片，使用更宽的布局
-  const maxWidthClass = (planData || summaryData || workflowInfoData) ? 'max-w-full' : 'max-w-[90%]';
+  // 如果有规划数据、摘要数据、工作流信息卡片或搜索结果，使用更宽的布局
+  const maxWidthClass = (planData || summaryData || workflowInfoData || workflowSearchData || agentSearchData) ? 'max-w-full' : 'max-w-[90%]';
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -223,9 +246,11 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                         'bg-blue-100'
               ) :
                 workflowInfoData ? 'bg-emerald-100' :
-                  (progressData?.status === 'completed') ? 'bg-emerald-100' :
-                    (isProgress || progressData) ? 'bg-blue-100' :
-                      'bg-gray-100'}
+                  workflowSearchData ? 'bg-blue-100' :
+                    agentSearchData ? 'bg-purple-100' :
+                      (progressData?.status === 'completed') ? 'bg-emerald-100' :
+                        (isProgress || progressData) ? 'bg-blue-100' :
+                          'bg-gray-100'}
         `}>
           {getIcon()}
         </div>
@@ -244,6 +269,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
           {/* 工作流信息卡片 */}
           {workflowInfoData && <WorkflowInfoCard info={workflowInfoData} />}
+
+          {/* 工作流搜索结果卡片 */}
+          {workflowSearchData && <WorkflowSearchCard data={workflowSearchData} />}
+
+          {/* Agent 搜索结果卡片 */}
+          {agentSearchData && <AgentSearchCard data={agentSearchData} />}
 
           {/* 进度条（用于进度消息） */}
           {progressData && progressData.status !== 'completed' && (

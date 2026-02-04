@@ -457,17 +457,19 @@ class ConversationalWorkflowBuilder:
             if dialogue_response.workflow_changed:
                 self.mode = SessionMode.BUILDING
 
-            # 3. 记录助手回复
-            assistant_msg = Message(
-                role="assistant",
-                content=dialogue_response.message,
-                data=dialogue_response.data,
-            )
-            self.conversation_history.append(assistant_msg)
+            # 3. 记录助手回复（如果有消息内容）
+            # 注意：执行工作流时返回空消息，因为状态更新通过执行事件实时推送
+            if dialogue_response.message:
+                assistant_msg = Message(
+                    role="assistant",
+                    content=dialogue_response.message,
+                    data=dialogue_response.data,
+                )
+                self.conversation_history.append(assistant_msg)
 
-            # 4. 推送消息
-            if self.on_message:
-                await self.on_message(assistant_msg)
+                # 4. 推送消息
+                if self.on_message:
+                    await self.on_message(assistant_msg)
 
             # 5. 推送工作流更新
             workflow_state = None
@@ -528,15 +530,23 @@ class ConversationalWorkflowBuilder:
         draft_agents = self.operations.get_draft_agents()
         draft_agent_map = {}
         for agent_def in draft_agents:
-            # 使用 agent_id 和 name 都作为 key，方便查找
-            draft_agent_map[agent_def.get("agent_id", "")] = agent_def
-            draft_agent_map[agent_def.get("name", "")] = agent_def
+            # ========== 改进：使用多种 key 确保匹配成功 ==========
+            agent_id = agent_def.get("agent_id", "")
+            name = agent_def.get("name", "")
+            display_name = agent_def.get("display_name", "")
 
-        # 判断是否已生成 agents（不再是预览状态）
-        has_generated_agents = len(draft_agents) > 0 and current_stage in [
-            "agent",
-            "workflow",
-        ]
+            if agent_id:
+                draft_agent_map[agent_id] = agent_def
+            if name:
+                draft_agent_map[name] = agent_def
+                # 处理空格替换的情况
+                draft_agent_map[name.replace(" ", "_")] = agent_def
+            if display_name:
+                draft_agent_map[display_name] = agent_def
+
+        # ========== 改进：只要有 draft_agents 就认为已生成（支持加载模式）==========
+        # 原条件要求 current_stage in ["agent", "workflow"]，但加载已保存工作流时 stage 可能不满足
+        has_generated_agents = len(draft_agents) > 0
 
         # 获取规划中的 agent specs
         plan_agents = self.operations.get_current_agents()
@@ -544,23 +554,35 @@ class ConversationalWorkflowBuilder:
         # 从 WorkflowDefinition 获取 node_id 映射（用于执行事件匹配）
         # 映射：多种 key -> workflow_node_id（增加匹配成功率）
         workflow_node_ids = {}
+        # ========== 关键修复：从 WorkflowDefinition 获取节点依赖关系 ==========
+        # 用于在 plan_agents 没有 dependencies 时（如加载已保存的工作流），从工作流定义获取依赖
+        workflow_node_dependencies = (
+            {}
+        )  # node_id/agent_id/name -> dependencies (node_ids)
         current_workflow = self.operations.get_current_workflow()
         if current_workflow and "nodes" in current_workflow:
             for wf_node in current_workflow["nodes"]:
                 agent_id = wf_node.get("agent_id")
                 node_id = wf_node.get("node_id")
                 name = wf_node.get("name")
+                dependencies = wf_node.get("dependencies", [])
                 if node_id:
                     # node_id 本身也作为 key（执行事件直接使用 node_id）
                     workflow_node_ids[node_id] = node_id
+                    workflow_node_dependencies[node_id] = dependencies
                     # 使用 agent_id 作为 key
                     if agent_id:
                         workflow_node_ids[agent_id] = node_id
+                        workflow_node_dependencies[agent_id] = dependencies
                     # 使用 name 作为备用 key
                     if name:
                         workflow_node_ids[name] = node_id
+                        workflow_node_dependencies[name] = dependencies
                         # 处理空格替换的情况
                         workflow_node_ids[name.replace(" ", "_")] = node_id
+                        workflow_node_dependencies[name.replace(" ", "_")] = (
+                            dependencies
+                        )
 
         # 构建 agents 列表和节点
         name_to_id = {}
@@ -571,16 +593,26 @@ class ConversationalWorkflowBuilder:
             node_id = f"agent_{name.replace(' ', '_')}"
             name_to_id[name] = node_id
 
-            # 检查是否有对应的完整 AgentDefinition
-            agent_def = draft_agent_map.get(name)
+            # ========== 改进：尝试多种 key 匹配 AgentDefinition ==========
+            agent_id_from_plan = agent.get("agent_id", name.replace(" ", "_"))
+            agent_def = (
+                draft_agent_map.get(name)
+                or draft_agent_map.get(agent_id_from_plan)
+                or draft_agent_map.get(display_name)
+                or draft_agent_map.get(name.replace(" ", "_"))
+            )
 
             # 根据是否有完整定义来决定状态
             if has_generated_agents and agent_def:
                 node_status = "pending"
                 node_type = "agent"
 
-                # 将完整的 AgentDefinition 加入 state
+                # 将完整的 AgentDefinition 加入 state（使用多种 key 确保前端能匹配）
                 state["agentDefinitions"][name] = agent_def
+                # 同时使用 agent_id 作为 key（前端可能通过 agentId 查找）
+                actual_agent_id = agent_def.get("agent_id")
+                if actual_agent_id and actual_agent_id != name:
+                    state["agentDefinitions"][actual_agent_id] = agent_def
 
                 # 使用生成后的完整信息，注意使用 or 处理空字符串
                 state["agents"].append(
@@ -640,6 +672,18 @@ class ConversationalWorkflowBuilder:
                 or name
             )
 
+            # ========== 关键修复：获取节点依赖关系 ==========
+            # 优先从 plan_agents 获取，其次从 WorkflowDefinition 获取
+            node_dependencies = agent.get("dependencies", [])
+            if not node_dependencies:
+                # 尝试从 workflow_node_dependencies 获取
+                node_dependencies = (
+                    workflow_node_dependencies.get(agent_id)
+                    or workflow_node_dependencies.get(name)
+                    or workflow_node_dependencies.get(name.replace(" ", "_"))
+                    or []
+                )
+
             state["nodes"].append(
                 {
                     "nodeId": node_id,
@@ -651,12 +695,14 @@ class ConversationalWorkflowBuilder:
                     "description": (agent_def.get("description") if agent_def else None)
                     or agent.get("task", ""),
                     "tools": tools,
-                    "dependencies": agent.get("dependencies", []),
+                    "dependencies": node_dependencies,
                     "status": node_status,
                 }
             )
 
         # 生成边
+        # 首先从 plan_agents 获取依赖关系
+        edges_added = set()  # 用于去重
         for agent in plan_agents:
             name = agent.get("name", "")
             deps = agent.get("dependencies", [])
@@ -666,13 +712,52 @@ class ConversationalWorkflowBuilder:
                 for dep in deps:
                     source_id = name_to_id.get(dep)
                     if source_id:
-                        state["edges"].append(
-                            {
-                                "source": source_id,
-                                "target": target_id,
-                                "edgeType": "dependency",
-                            }
-                        )
+                        edge_key = f"{source_id}->{target_id}"
+                        if edge_key not in edges_added:
+                            state["edges"].append(
+                                {
+                                    "source": source_id,
+                                    "target": target_id,
+                                    "edgeType": "dependency",
+                                }
+                            )
+                            edges_added.add(edge_key)
+
+        # ========== 关键修复：如果 plan_agents 没有生成边，从 WorkflowDefinition 获取 ==========
+        # 这种情况发生在加载已保存的工作流时，因为 AgentDefinition 不包含 dependencies
+        if not state["edges"] and workflow_node_dependencies:
+            # 构建 workflow_node_id -> frontend_node_id 的映射
+            wf_node_to_frontend = {}
+            for node in state["nodes"]:
+                wf_node_id = node.get("workflowNodeId")
+                frontend_id = node.get("nodeId")
+                agent_id = node.get("agentId")
+                node_name = node.get("name")
+                if wf_node_id:
+                    wf_node_to_frontend[wf_node_id] = frontend_id
+                if agent_id:
+                    wf_node_to_frontend[agent_id] = frontend_id
+                if node_name:
+                    wf_node_to_frontend[node_name] = frontend_id
+                    wf_node_to_frontend[node_name.replace(" ", "_")] = frontend_id
+
+            # 从 workflow_node_dependencies 生成边
+            for key, deps in workflow_node_dependencies.items():
+                target_id = wf_node_to_frontend.get(key)
+                if target_id and deps:
+                    for dep in deps:
+                        source_id = wf_node_to_frontend.get(dep)
+                        if source_id:
+                            edge_key = f"{source_id}->{target_id}"
+                            if edge_key not in edges_added:
+                                state["edges"].append(
+                                    {
+                                        "source": source_id,
+                                        "target": target_id,
+                                        "edgeType": "dependency",
+                                    }
+                                )
+                                edges_added.add(edge_key)
 
         # 检查点
         checkpoints = self.operations.get_checkpoints()

@@ -390,3 +390,48 @@ export interface WorkflowInfoCard {
   saved_to: 'database' | 'local';
   local_path?: string;
 }
+
+// 工作流搜索结果
+export interface WorkflowSearchResult {
+  type: 'workflow_search_result';
+  workflows: WorkflowSearchItem[];
+  total: number;
+}
+
+// 工作流搜索条目
+export interface WorkflowSearchItem {
+  id: string;
+  workflow_id: string;
+  name: string;
+  description: string;
+  version: string;
+  node_count: number;
+  edge_count: number;
+  tags: string[];
+  author: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// Agent 搜索结果
+export interface AgentSearchResult {
+  type: 'agent_search_result';
+  agents: AgentSearchItem[];
+  total: number;
+}
+
+// Agent 搜索条目
+export interface AgentSearchItem {
+  id: string;
+  agent_id: string;
+  name: string;
+  description: string;
+  version: string;
+  domain_type: string;
+  execution_type: string;
+  model_name: string;
+  tags: string[];
+  is_template: boolean;
+  created_at: string;
+  updated_at: string;
+}

@@ -465,13 +465,83 @@ class WebSocketHandler:
             )
 
             if result.success:
+                # ========== 同步更新到数据库（如果是已保存的 Agent）==========
+                db_sync_msg = ""
+                if self.builder.builder:
+                    loaded_agent_db_ids = getattr(
+                        self.builder.builder, "loaded_agent_db_ids", {}
+                    )
+                    # 查找对应的 agent_id（可能是 name 或 agent_id）
+                    agent_id = None
+                    for agent_def in self.builder.builder.draft_agents:
+                        if hasattr(agent_def, "model_dump"):
+                            agent_data = agent_def.model_dump()
+                        else:
+                            agent_data = (
+                                agent_def.__dict__
+                                if hasattr(agent_def, "__dict__")
+                                else agent_def
+                            )
+                        if (
+                            agent_data.get("name") == agent_name
+                            or agent_data.get("agent_id") == agent_name
+                        ):
+                            agent_id = agent_data.get("agent_id")
+                            break
+
+                    if agent_id and agent_id in loaded_agent_db_ids:
+                        try:
+                            from src.services import AgentService
+                            from src.storage.database import AsyncDatabaseManager
+                            from src.storage.repositories import AgentRepository
+                            from src.storage.config import PostgreSQLConfig
+                            import os
+
+                            config = PostgreSQLConfig(
+                                host=os.getenv("POSTGRES_HOST", "localhost"),
+                                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                                user=os.getenv("POSTGRES_USER", "postgres"),
+                                password=os.getenv("POSTGRES_PASSWORD", ""),
+                            )
+                            db = AsyncDatabaseManager(config)
+                            await db.connect()
+
+                            agent_repo = AgentRepository(db._session_factory)
+                            agent_service = AgentService(agent_repo)
+
+                            # 获取更新后的完整 Agent 数据
+                            for agent_def in self.builder.builder.draft_agents:
+                                if hasattr(agent_def, "model_dump"):
+                                    agent_data = agent_def.model_dump(mode="json")
+                                else:
+                                    agent_data = (
+                                        agent_def.__dict__
+                                        if hasattr(agent_def, "__dict__")
+                                        else agent_def
+                                    )
+                                if agent_data.get("agent_id") == agent_id:
+                                    await agent_service.update_agent(
+                                        agent_id, agent_data
+                                    )
+                                    db_sync_msg = "（已同步到数据库）"
+                                    logger.info(
+                                        f"已同步更新 Agent 到数据库: {agent_id}"
+                                    )
+                                    break
+
+                            await db.close()
+                        except Exception as db_error:
+                            logger.warning(f"同步 Agent 到数据库失败: {db_error}")
+                            db_sync_msg = "（数据库同步失败）"
+
                 # 发送更新成功的响应
                 await self._send_message(
                     WSMessage(
                         type=WSMessageType.AGENT_UPDATED,
                         payload={
                             "agent_name": agent_name,
-                            "message": result.message,
+                            "message": result.message + db_sync_msg,
                             "data": result.data,
                         },
                     )
@@ -682,25 +752,27 @@ class WebSocketHandler:
     async def _handle_load_workflow(self, payload: Dict[str, Any]) -> None:
         """处理加载工作流请求"""
         workflow_id = payload.get("workflow_id", "")
+        workflow_db_id = payload.get("workflow_db_id", "")
 
-        if not workflow_id:
+        if not workflow_id and not workflow_db_id:
             await self._send_message(
                 WSMessage(
                     type=WSMessageType.ERROR,
-                    payload={"error": "缺少 workflow_id 参数"},
+                    payload={"error": "缺少 workflow_id 或 workflow_db_id 参数"},
                 )
             )
             return
 
         try:
-            from src.services import WorkflowService
+            from src.services import WorkflowService, AgentService
             from src.storage.database import AsyncDatabaseManager
             from src.storage.repositories import (
                 WorkflowDefinitionRepository,
                 WorkflowExecutionRepository,
+                AgentRepository,
             )
             from src.storage.config import PostgreSQLConfig
-            from src.definitions import WorkflowDefinition
+            from src.definitions import WorkflowDefinition, AgentDefinition
             import os
 
             # 获取服务
@@ -716,17 +788,37 @@ class WebSocketHandler:
 
             workflow_repo = WorkflowDefinitionRepository(db._session_factory)
             execution_repo = WorkflowExecutionRepository(db._session_factory)
+            agent_repo = AgentRepository(db._session_factory)
             service = WorkflowService(workflow_repo, execution_repo)
+            agent_service = AgentService(agent_repo)
 
-            # 获取工作流
-            workflow_detail = await service.get_workflow(workflow_id)
-            await db.close()
+            workflow_detail = None
+            execution_history = []
+
+            # 优先按数据库主键加载（零歧义）
+            if workflow_db_id:
+                workflow_detail = await service.get_workflow_by_id(workflow_db_id)
+                if workflow_detail:
+                    execution_history = await execution_repo.get_by_workflow(
+                        workflow_definition_id=workflow_detail.id,
+                        limit=10,
+                    )
+            else:
+                # 兼容旧流程：按 workflow_id 加载（可能有版本歧义）
+                workflow_detail = await service.get_workflow(workflow_id)
+                if workflow_detail:
+                    execution_history = await service.get_execution_history(
+                        workflow_detail.workflow_id, limit=10
+                    )
 
             if not workflow_detail:
+                await db.close()
                 await self._send_message(
                     WSMessage(
                         type=WSMessageType.ERROR,
-                        payload={"error": f"工作流不存在: {workflow_id}"},
+                        payload={
+                            "error": f"工作流不存在: {workflow_db_id or workflow_id}"
+                        },
                     )
                 )
                 return
@@ -735,29 +827,143 @@ class WebSocketHandler:
             definition = workflow_detail.definition
             workflow = WorkflowDefinition(**definition)
 
-            if self.builder.builder:
-                self.builder.builder.draft_workflow = workflow
+            # ========== 关键修复：加载工作流引用的 Agents ==========
+            # 从工作流节点中提取所有 agent_id
+            agent_ids = set()
+            for node in workflow.nodes:
+                if node.agent_id:
+                    agent_ids.add(node.agent_id)
+                # 也检查 config 中的 agent_id（兼容旧格式）
+                if node.config and node.config.get("agent_id"):
+                    agent_ids.add(node.config.get("agent_id"))
+
+            # 从数据库加载这些 Agents 并注册到 AgentRegistry
+            loaded_agents = []
+            loaded_agent_db_ids = {}  # agent_id -> 数据库 ID 映射
+            for agent_id in agent_ids:
+                try:
+                    agent_model = await agent_repo.get_by_agent_id(agent_id)
+                    if agent_model and agent_model.definition_json:
+                        # 从数据库记录构建 AgentDefinition
+                        agent_def = AgentDefinition(**agent_model.definition_json)
+                        loaded_agents.append(agent_def)
+                        # 保存数据库 ID 用于后续更新
+                        loaded_agent_db_ids[agent_id] = agent_model.id
+
+                        # 注册到 AgentRegistry（用于执行时查找）
+                        if not self.builder.meta_agent.agent_registry.get_definition(
+                            agent_id
+                        ):
+                            self.builder.meta_agent.agent_registry.register_definition(
+                                agent_def
+                            )
+                            logger.info(f"已注册 Agent 到 Registry: {agent_id}")
+                    else:
+                        logger.warning(f"Agent 不存在于数据库: {agent_id}")
+                except Exception as agent_error:
+                    logger.warning(f"加载 Agent {agent_id} 失败: {agent_error}")
+
+            await db.close()
+
+            # 使用 operations 管理底层 builder（避免直接给 property 赋值）
+            from src.evolution.interactive_builder import (
+                InteractiveWorkflowBuilder,
+                InteractionStage,
+            )
+
+            ops = self.builder.operations
+            if ops.builder:
+                ops.builder.draft_workflow = workflow
+                # 设置加载的 agents 到 draft_agents
+                ops.builder.draft_agents = loaded_agents
+                # ========== 关键修复：设置 current_stage 为 WORKFLOW ==========
+                ops.builder.current_stage = InteractionStage.WORKFLOW
+                # 保存数据库 ID 用于后续更新
+                ops.builder.loaded_workflow_db_id = workflow_detail.id
+                ops.builder.loaded_agent_db_ids = loaded_agent_db_ids
             else:
                 # 初始化构建器
-                from src.evolution.interactive_builder import InteractiveWorkflowBuilder
-                from src.evolution.conversational_builder import AutoApproveCallback
-
-                self.builder.builder = InteractiveWorkflowBuilder(
+                ops._builder = InteractiveWorkflowBuilder(
                     meta_agent=self.builder.meta_agent,
-                    callback=AutoApproveCallback(),
+                    callback=None,
                     storage_path=self.builder.storage_path,
                 )
-                self.builder.builder.draft_workflow = workflow
+                ops._builder.draft_workflow = workflow
+                # 设置加载的 agents 到 draft_agents
+                ops._builder.draft_agents = loaded_agents
+                # ========== 关键修复：设置 current_stage 为 WORKFLOW ==========
+                ops._builder.current_stage = InteractionStage.WORKFLOW
+                # 保存数据库 ID 用于后续更新
+                ops._builder.loaded_workflow_db_id = workflow_detail.id
+                ops._builder.loaded_agent_db_ids = loaded_agent_db_ids
+
+            ops._task_description = workflow.description or workflow.name
+
+            logger.info(
+                f"工作流加载完成: {workflow.name}, "
+                f"已加载 {len(loaded_agents)}/{len(agent_ids)} 个 Agents"
+            )
+
+            # 格式化执行历史
+            def _normalize_status(raw_status: Optional[str]) -> Optional[str]:
+                if raw_status in ("completed", "success"):
+                    return "success"
+                return raw_status
+
+            history_list = []
+            for h in execution_history:
+                if hasattr(h, "to_dict"):
+                    node_results = h.node_results or {}
+                    nodes_completed = sum(
+                        1
+                        for r in node_results.values()
+                        if r.get("status") == "completed"
+                    )
+                    nodes_failed = sum(
+                        1 for r in node_results.values() if r.get("status") == "failed"
+                    )
+                    history_list.append(
+                        {
+                            "execution_id": h.id,
+                            "status": _normalize_status(
+                                h.status.value if h.status else None
+                            ),
+                            "started_at": (
+                                h.started_at.isoformat() if h.started_at else None
+                            ),
+                            "completed_at": (
+                                h.completed_at.isoformat() if h.completed_at else None
+                            ),
+                            "total_duration_ms": h.total_duration_ms,
+                            "nodes_completed": nodes_completed,
+                            "nodes_failed": nodes_failed,
+                        }
+                    )
+                else:
+                    history_list.append(
+                        {
+                            "execution_id": h.id,
+                            "status": _normalize_status(h.status),
+                            "started_at": h.started_at,
+                            "completed_at": h.completed_at,
+                            "total_duration_ms": h.total_duration_ms,
+                            "nodes_completed": h.nodes_completed,
+                            "nodes_failed": h.nodes_failed,
+                        }
+                    )
 
             # 发送成功响应
             await self._send_message(
                 WSMessage(
                     type=WSMessageType.WORKFLOW_LOADED,
                     payload={
-                        "workflow_id": workflow_id,
+                        "id": workflow_detail.id,
+                        "workflow_id": workflow_detail.workflow_id,
                         "name": workflow_detail.name,
                         "description": workflow_detail.description,
+                        "version": workflow_detail.version,
                         "message": f"已加载工作流: {workflow_detail.name}",
+                        "execution_history": history_list,
                     },
                 )
             )
@@ -799,11 +1005,12 @@ class WebSocketHandler:
             return
 
         try:
-            from src.services import WorkflowService
+            from src.services import WorkflowService, AgentService
             from src.storage.database import AsyncDatabaseManager
             from src.storage.repositories import (
                 WorkflowDefinitionRepository,
                 WorkflowExecutionRepository,
+                AgentRepository,
             )
             from src.storage.config import PostgreSQLConfig
             import os
@@ -825,19 +1032,106 @@ class WebSocketHandler:
 
             workflow_repo = WorkflowDefinitionRepository(db._session_factory)
             execution_repo = WorkflowExecutionRepository(db._session_factory)
-            service = WorkflowService(workflow_repo, execution_repo)
+            agent_repo = AgentRepository(db._session_factory)
+            workflow_service = WorkflowService(workflow_repo, execution_repo)
+            agent_service = AgentService(agent_repo)
 
-            # 保存工作流
+            # ========== 获取已加载的数据库 ID（用于判断是更新还是新建）==========
+            loaded_workflow_db_id = getattr(
+                self.builder.builder, "loaded_workflow_db_id", None
+            )
+            loaded_agent_db_ids = getattr(
+                self.builder.builder, "loaded_agent_db_ids", {}
+            )
+
+            # ========== 保存工作流关联的 Agents ==========
+            draft_agents = self.builder.builder.draft_agents
+            saved_agents_count = 0
+            updated_agents_count = 0
+            for agent_def in draft_agents:
+                try:
+                    # 将 AgentDefinition 转换为字典
+                    if hasattr(agent_def, "model_dump"):
+                        agent_data = agent_def.model_dump(mode="json")
+                    else:
+                        agent_data = agent_def.__dict__
+
+                    agent_id = agent_data.get("agent_id")
+
+                    # 检查是否是已加载的 Agent（需要更新）
+                    loaded_db_id = loaded_agent_db_ids.get(agent_id)
+                    if loaded_db_id:
+                        # 更新已有 Agent
+                        await agent_service.update_agent(agent_id, agent_data)
+                        updated_agents_count += 1
+                        logger.info(f"已更新 Agent: {agent_id}")
+                    else:
+                        # 检查 agent 是否已存在于数据库
+                        existing_agent = await agent_repo.get_by_agent_id(agent_id)
+                        if not existing_agent:
+                            # 创建新 Agent
+                            await agent_service.create_agent_from_dict(
+                                agent_data=agent_data,
+                                author="websocket",
+                            )
+                            saved_agents_count += 1
+                            logger.info(f"已保存 Agent 到数据库: {agent_id}")
+                        else:
+                            logger.info(f"Agent 已存在于数据库，跳过: {agent_id}")
+                except Exception as agent_error:
+                    logger.warning(f"保存/更新 Agent 失败: {agent_error}")
+
+            # ========== 保存或更新工作流 ==========
             workflow_data = self.builder.builder.draft_workflow.model_dump(mode="json")
             workflow_data["tags"] = tags
 
-            workflow_detail = await service.create_workflow_from_dict(
-                workflow_data=workflow_data,
-                author="websocket",
-            )
+            if loaded_workflow_db_id:
+                # 更新已有工作流
+                workflow_detail = await workflow_service.update_workflow(
+                    workflow_id=self.builder.builder.draft_workflow.workflow_id,
+                    updates={
+                        "definition": workflow_data,
+                        "name": name,
+                        "description": description,
+                        "tags": tags,
+                    },
+                )
+                if not workflow_detail:
+                    # 更新失败，可能工作流已被删除，创建新的
+                    workflow_detail = await workflow_service.create_workflow_from_dict(
+                        workflow_data=workflow_data,
+                        author="websocket",
+                    )
+                    logger.info(f"工作流不存在，已创建新工作流: {workflow_detail.name}")
+                else:
+                    logger.info(f"已更新工作流: {workflow_detail.name}")
+            else:
+                # 创建新工作流
+                workflow_detail = await workflow_service.create_workflow_from_dict(
+                    workflow_data=workflow_data,
+                    author="websocket",
+                )
+                logger.info(f"已创建新工作流: {workflow_detail.name}")
+
             await db.close()
 
+            # 更新 builder 中的数据库 ID（保存后变为已保存状态）
+            self.builder.builder.loaded_workflow_db_id = workflow_detail.id
+
+            logger.info(
+                f"工作流保存完成: {workflow_detail.name}, "
+                f"新建 {saved_agents_count} 个 Agent, 更新 {updated_agents_count} 个 Agent"
+            )
+
             # 发送成功响应
+            action = "更新" if loaded_workflow_db_id else "保存"
+            agent_msg_parts = []
+            if saved_agents_count > 0:
+                agent_msg_parts.append(f"新建 {saved_agents_count} 个")
+            if updated_agents_count > 0:
+                agent_msg_parts.append(f"更新 {updated_agents_count} 个")
+            agent_msg = "，".join(agent_msg_parts) if agent_msg_parts else "0 个"
+
             await self._send_message(
                 WSMessage(
                     type=WSMessageType.WORKFLOW_SAVED,
@@ -845,7 +1139,7 @@ class WebSocketHandler:
                         "id": workflow_detail.id,
                         "workflow_id": workflow_detail.workflow_id,
                         "name": workflow_detail.name,
-                        "message": f"工作流已保存: {workflow_detail.name}",
+                        "message": f"工作流已{action}: {workflow_detail.name}（Agent: {agent_msg}）",
                     },
                 )
             )
@@ -938,12 +1232,13 @@ class WebSocketHandler:
     async def _handle_delete_workflow(self, payload: Dict[str, Any]) -> None:
         """处理删除工作流请求"""
         workflow_id = payload.get("workflow_id", "")
+        workflow_db_id = payload.get("workflow_db_id", "")
 
-        if not workflow_id:
+        if not workflow_id and not workflow_db_id:
             await self._send_message(
                 WSMessage(
                     type=WSMessageType.ERROR,
-                    payload={"error": "缺少 workflow_id 参数"},
+                    payload={"error": "缺少 workflow_id 或 workflow_db_id 参数"},
                 )
             )
             return
@@ -972,7 +1267,10 @@ class WebSocketHandler:
             execution_repo = WorkflowExecutionRepository(db._session_factory)
             service = WorkflowService(workflow_repo, execution_repo)
 
-            result = await service.delete_workflow(workflow_id)
+            if workflow_db_id:
+                result = await service.delete_workflow_by_id(workflow_db_id)
+            else:
+                result = await service.delete_workflow(workflow_id)
             await db.close()
 
             if result:
@@ -980,8 +1278,9 @@ class WebSocketHandler:
                     WSMessage(
                         type=WSMessageType.WORKFLOW_DELETED,
                         payload={
-                            "workflow_id": workflow_id,
-                            "message": f"工作流已删除: {workflow_id}",
+                            "workflow_id": workflow_id or "",
+                            "workflow_db_id": workflow_db_id or "",
+                            "message": f"工作流已删除: {workflow_db_id or workflow_id}",
                         },
                     )
                 )
@@ -989,7 +1288,9 @@ class WebSocketHandler:
                 await self._send_message(
                     WSMessage(
                         type=WSMessageType.ERROR,
-                        payload={"error": f"工作流不存在: {workflow_id}"},
+                        payload={
+                            "error": f"工作流不存在: {workflow_db_id or workflow_id}"
+                        },
                     )
                 )
 
@@ -1080,13 +1381,14 @@ class WebSocketHandler:
     async def _handle_reuse_agent(self, payload: Dict[str, Any]) -> None:
         """处理复用 Agent 请求"""
         agent_id = payload.get("agent_id", "")
+        agent_db_id = payload.get("agent_db_id", "")
         node_id = payload.get("node_id")  # 可选：指定添加到哪个节点
 
-        if not agent_id:
+        if not agent_id and not agent_db_id:
             await self._send_message(
                 WSMessage(
                     type=WSMessageType.ERROR,
-                    payload={"error": "缺少 agent_id 参数"},
+                    payload={"error": "缺少 agent_id 或 agent_db_id 参数"},
                 )
             )
             return
@@ -1112,14 +1414,17 @@ class WebSocketHandler:
             agent_repo = AgentRepository(db._session_factory)
             service = AgentService(agent_repo)
 
-            agent_detail = await service.get_agent(agent_id)
+            if agent_db_id:
+                agent_detail = await service.get_agent_by_id(agent_db_id)
+            else:
+                agent_detail = await service.get_agent(agent_id)
             await db.close()
 
             if not agent_detail:
                 await self._send_message(
                     WSMessage(
                         type=WSMessageType.ERROR,
-                        payload={"error": f"Agent 不存在: {agent_id}"},
+                        payload={"error": f"Agent 不存在: {agent_db_id or agent_id}"},
                     )
                 )
                 return
@@ -1130,7 +1435,9 @@ class WebSocketHandler:
                 agent_def = AgentDefinition(**agent_detail.definition)
 
                 # 添加到工作流的 agents 字典
-                self.builder.builder.draft_workflow.agents[agent_id] = agent_def
+                self.builder.builder.draft_workflow.agents[agent_def.agent_id] = (
+                    agent_def
+                )
 
                 # 发送成功响应
                 await self._send_message(

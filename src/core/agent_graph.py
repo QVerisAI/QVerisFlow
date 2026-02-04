@@ -71,15 +71,15 @@ def _normalize_tool_calls_args(response: Any) -> Any:
 
 def _sanitize_message_for_kimi(message: Any, model_name: str = "") -> Any:
     """
-    针对 Kimi/Moonshot 模型规范化消息格式
+    针对 Kimi/Moonshot 模型规范化单个消息格式
 
     Kimi 的 thinking 模式要求：
     - 当启用 thinking 时，assistant 消息必须包含 reasoning_content
     - 如果 tool_calls 消息中缺少 reasoning_content，API 会返回 400 错误
 
     解决方案：
-    - 对于 tool_calls 的 assistant 消息，确保 additional_kwargs 中不触发 thinking 验证
-    - 或者在 additional_kwargs 中添加空的 reasoning_content
+    - 对于 tool_calls 的 assistant 消息，确保 additional_kwargs 中包含 reasoning_content
+    - 即使是空字符串也可以满足 API 的格式验证
 
     Args:
         message: LangChain 消息对象
@@ -122,6 +122,31 @@ def _sanitize_message_for_kimi(message: Any, model_name: str = "") -> Any:
     return message
 
 
+def _sanitize_messages_for_kimi(messages: List[Any], model_name: str = "") -> List[Any]:
+    """
+    针对 Kimi/Moonshot 模型规范化整个消息列表
+
+    遍历所有消息，确保每个 AIMessage（特别是有 tool_calls 的）都包含 reasoning_content。
+    这是解决 'thinking is enabled but reasoning_content is missing' 错误的关键。
+
+    Args:
+        messages: LangChain 消息列表
+        model_name: 模型名称，用于判断是否为 Kimi 模型
+
+    Returns:
+        处理后的消息列表
+    """
+    # 检查是否为 Kimi/Moonshot 模型
+    model_lower = model_name.lower() if model_name else ""
+    is_kimi = "kimi" in model_lower or "moonshot" in model_lower
+
+    if not is_kimi:
+        return messages
+
+    # 规范化每个消息
+    return [_sanitize_message_for_kimi(msg, model_name) for msg in messages]
+
+
 def _get_model_name_from_llm(llm_client: Any) -> str:
     """
     从 LLM 客户端获取模型名称
@@ -143,6 +168,251 @@ def _get_model_name_from_llm(llm_client: Any) -> str:
     if hasattr(llm_client, "bound"):
         return _get_model_name_from_llm(llm_client.bound)
     return ""
+
+
+# ========== 上下文长度管理 ==========
+
+# 默认的模型上下文限制（保守估计）
+DEFAULT_MAX_CONTEXT_TOKENS = 128000
+# 单个工具结果的最大 token 数
+MAX_TOOL_RESULT_TOKENS = 8000
+# 预留给响应的 token 数
+RESERVED_OUTPUT_TOKENS = 16000
+
+
+def _estimate_tokens(text: str) -> int:
+    """
+    快速估算文本的 token 数量
+
+    使用简单规则：
+    - 中文字符约 1.5 token
+    - 英文字符约 0.25 token (4个字符 ≈ 1 token)
+
+    Args:
+        text: 要估算的文本
+
+    Returns:
+        估算的 token 数量
+    """
+    if not text:
+        return 0
+
+    chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
+    other_chars = len(text) - chinese_chars
+
+    estimated_tokens = int(chinese_chars * 1.5 + other_chars * 0.25)
+    return max(1, estimated_tokens)
+
+
+def _estimate_message_tokens(message: Any) -> int:
+    """
+    估算单个消息的 token 数量
+
+    Args:
+        message: LangChain 消息对象
+
+    Returns:
+        估算的 token 数量
+    """
+    tokens = 4  # 消息格式开销
+
+    # 内容
+    if hasattr(message, "content") and message.content:
+        tokens += _estimate_tokens(str(message.content))
+
+    # 工具调用
+    if hasattr(message, "tool_calls") and message.tool_calls:
+        for tool_call in message.tool_calls:
+            tokens += 20  # 工具调用格式开销
+            if isinstance(tool_call, dict):
+                name = tool_call.get("name", "")
+                args = tool_call.get("args", {})
+                tokens += _estimate_tokens(name)
+                tokens += _estimate_tokens(
+                    json.dumps(args) if isinstance(args, dict) else str(args)
+                )
+
+    return tokens
+
+
+def _estimate_messages_tokens(messages: List[Any]) -> int:
+    """
+    估算消息列表的总 token 数量
+
+    Args:
+        messages: LangChain 消息列表
+
+    Returns:
+        估算的总 token 数量
+    """
+    total = 3  # 消息列表开销
+    for msg in messages:
+        total += _estimate_message_tokens(msg)
+    return total
+
+
+def _truncate_text(
+    text: str, max_tokens: int, suffix: str = "\n\n[内容已截断...]"
+) -> str:
+    """
+    截断文本到指定 token 数量
+
+    Args:
+        text: 原始文本
+        max_tokens: 最大 token 数
+        suffix: 截断后的后缀
+
+    Returns:
+        截断后的文本
+    """
+    if not text:
+        return text
+
+    current_tokens = _estimate_tokens(text)
+    if current_tokens <= max_tokens:
+        return text
+
+    # 计算大致需要保留的字符数
+    # 保守估计：中英混合平均 0.5 token/字符
+    target_chars = int(max_tokens * 2)
+    suffix_tokens = _estimate_tokens(suffix)
+    target_chars = int((max_tokens - suffix_tokens) * 2)
+
+    if target_chars <= 0:
+        return suffix
+
+    truncated = text[:target_chars]
+    return truncated + suffix
+
+
+def _truncate_tool_result(result: str, max_tokens: int = MAX_TOOL_RESULT_TOKENS) -> str:
+    """
+    截断工具结果到合理大小
+
+    Args:
+        result: 工具执行结果
+        max_tokens: 最大 token 数
+
+    Returns:
+        截断后的结果
+    """
+    return _truncate_text(
+        result,
+        max_tokens,
+        f"\n\n[工具返回内容过长，已截断。原始内容约 {_estimate_tokens(result)} tokens]",
+    )
+
+
+def _truncate_messages_to_fit(
+    messages: List[Any],
+    max_tokens: int,
+    reserved_tokens: int = RESERVED_OUTPUT_TOKENS,
+) -> List[Any]:
+    """
+    截断消息列表以适应上下文限制
+
+    策略：
+    1. 保留 SystemMessage 和最新的 HumanMessage（不截断）
+    2. 保留最近的几轮对话
+    3. 截断早期的工具结果和 AI 响应
+
+    Args:
+        messages: 原始消息列表
+        max_tokens: 模型的最大上下文 token 数
+        reserved_tokens: 预留给输出的 token 数
+
+    Returns:
+        截断后的消息列表
+    """
+    from langchain_core.messages import (
+        SystemMessage,
+        HumanMessage,
+        AIMessage,
+        ToolMessage,
+    )
+
+    available_tokens = max_tokens - reserved_tokens
+    current_tokens = _estimate_messages_tokens(messages)
+
+    if current_tokens <= available_tokens:
+        return messages
+
+    logger.warning(
+        f"消息上下文超出限制: {current_tokens} tokens > {available_tokens} available "
+        f"(max={max_tokens}, reserved={reserved_tokens})，将进行截断"
+    )
+
+    # 分类消息
+    system_msgs = []
+    other_msgs = []
+
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            system_msgs.append(msg)
+        else:
+            other_msgs.append(msg)
+
+    # 计算 system 消息占用的 tokens
+    system_tokens = sum(_estimate_message_tokens(m) for m in system_msgs)
+    remaining_tokens = available_tokens - system_tokens
+
+    if remaining_tokens <= 0:
+        # 极端情况：连 system 消息都放不下
+        logger.error("System 消息过长，无法进行有效截断")
+        return messages[:2]  # 至少保留前两条
+
+    # 从后向前保留消息（保留最新的对话）
+    truncated_others = []
+    accumulated_tokens = 0
+
+    for msg in reversed(other_msgs):
+        msg_tokens = _estimate_message_tokens(msg)
+
+        # 如果是 ToolMessage 且太大，先截断内容
+        if isinstance(msg, ToolMessage) and msg_tokens > MAX_TOOL_RESULT_TOKENS:
+            truncated_content = _truncate_tool_result(
+                msg.content, MAX_TOOL_RESULT_TOKENS
+            )
+            msg = ToolMessage(content=truncated_content, tool_call_id=msg.tool_call_id)
+            msg_tokens = _estimate_message_tokens(msg)
+
+        # 如果是 AIMessage 内容太大，也截断
+        if isinstance(msg, AIMessage) and msg_tokens > MAX_TOOL_RESULT_TOKENS:
+            if hasattr(msg, "content") and msg.content:
+                truncated_content = _truncate_text(msg.content, MAX_TOOL_RESULT_TOKENS)
+                # 保留 tool_calls 和其他属性
+                msg = AIMessage(
+                    content=truncated_content,
+                    tool_calls=getattr(msg, "tool_calls", []),
+                    additional_kwargs=getattr(msg, "additional_kwargs", {}),
+                )
+                msg_tokens = _estimate_message_tokens(msg)
+
+        if accumulated_tokens + msg_tokens <= remaining_tokens:
+            truncated_others.insert(0, msg)
+            accumulated_tokens += msg_tokens
+        else:
+            # 无法容纳更多消息
+            # 但要确保至少有一条 HumanMessage
+            has_human = any(isinstance(m, HumanMessage) for m in truncated_others)
+            if isinstance(msg, HumanMessage) and not has_human:
+                # 截断这条 HumanMessage 的内容以适应
+                max_content_tokens = remaining_tokens - accumulated_tokens - 10
+                if max_content_tokens > 100:
+                    truncated_content = _truncate_text(msg.content, max_content_tokens)
+                    msg = HumanMessage(content=truncated_content)
+                    truncated_others.insert(0, msg)
+            break
+
+    result = system_msgs + truncated_others
+    final_tokens = _estimate_messages_tokens(result)
+
+    logger.info(
+        f"消息截断完成: {len(messages)} -> {len(result)} 条, "
+        f"{current_tokens} -> {final_tokens} tokens"
+    )
+
+    return result
 
 
 class AgentGraphBuilder:
@@ -761,12 +1031,23 @@ class AgentGraphBuilder:
                     )
 
                     result_str = str(result)
+
+                    # 截断过长的工具结果，避免上下文爆炸
+                    original_tokens = _estimate_tokens(result_str)
+                    if original_tokens > MAX_TOOL_RESULT_TOKENS:
+                        result_str = _truncate_tool_result(
+                            result_str, MAX_TOOL_RESULT_TOKENS
+                        )
+                        logger.info(
+                            f"工具 {tool_name} 结果已截断: {original_tokens} -> {_estimate_tokens(result_str)} tokens"
+                        )
+
                     tool_messages.append(
                         ToolMessage(content=result_str, tool_call_id=tool_call_id)
                     )
                     logger.debug(f"工具 {tool_name} 执行成功")
 
-                    # 添加工具结果到上下文管理器（中等优先级）
+                    # 添加工具结果到上下文管理器（中等优先级，已截断）
                     self.context_manager.add(
                         content=f"工具 {tool_name} 结果:\n{result_str[:5000]}",
                         source=f"tool:{tool_name}",
@@ -796,8 +1077,35 @@ class AgentGraphBuilder:
 
             llm_start_time = datetime.now()
 
+            # 针对 Kimi/Moonshot 模型，在调用前规范化整个消息列表
+            # 确保所有 AIMessage（特别是有 tool_calls 的）都包含 reasoning_content
+            messages_to_send = _sanitize_messages_for_kimi(current_messages, model_name)
+
+            # 获取模型的上下文限制并截断消息
+            # 从 LLM 客户端获取 max_tokens，如果没有则使用默认值
+            model_max_tokens = getattr(self.langchain_llm, "max_tokens", None)
+            if hasattr(self.langchain_llm, "bound"):
+                # 如果是 RunnableBinding，尝试从 bound 获取
+                model_max_tokens = getattr(
+                    self.langchain_llm.bound, "max_tokens", model_max_tokens
+                )
+
+            # 使用模型配置的 max_tokens 或默认值
+            # 注意：这里的 max_tokens 是输出限制，上下文限制通常更大
+            # 对于 kimi-k2.5，上下文限制是 262144
+            context_limit = DEFAULT_MAX_CONTEXT_TOKENS
+            if "kimi" in model_name.lower() or "moonshot" in model_name.lower():
+                context_limit = 262144  # kimi-k2.5 的上下文限制
+
+            # 截断消息以适应上下文限制
+            messages_to_send = _truncate_messages_to_fit(
+                messages_to_send,
+                max_tokens=context_limit,
+                reserved_tokens=RESERVED_OUTPUT_TOKENS,
+            )
+
             # 调用 LLM 获取下一步响应
-            current_response = await self.langchain_llm.ainvoke(current_messages)
+            current_response = await self.langchain_llm.ainvoke(messages_to_send)
 
             # 规范化 tool_calls.args（某些 LLM 可能返回字符串而非字典）
             current_response = _normalize_tool_calls_args(current_response)

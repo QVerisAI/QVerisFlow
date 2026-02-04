@@ -266,6 +266,7 @@ class WorkflowService:
                 for m in models
                 if query_lower in (m.name or "").lower()
                 or query_lower in (m.description or "").lower()
+                or query_lower in (m.workflow_id or "").lower()  # 也搜索 workflow_id
             ]
 
         return [self._model_to_summary(m) for m in models]
@@ -326,6 +327,27 @@ class WorkflowService:
 
         if result:
             logger.info(f"删除工作流: {workflow_id}")
+
+        return result
+
+    async def delete_workflow_by_id(self, workflow_db_id: str) -> bool:
+        """
+        根据数据库主键删除工作流（零歧义）
+
+        Args:
+            workflow_db_id: 数据库主键 ID
+
+        Returns:
+            是否删除成功
+        """
+        model = await self.workflow_repo.get_by_id(workflow_db_id)
+        if not model:
+            return False
+
+        result = await self.workflow_repo.delete(model.id)
+
+        if result:
+            logger.info(f"删除工作流: {workflow_db_id}")
 
         return result
 

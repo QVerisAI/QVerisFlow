@@ -2566,6 +2566,685 @@ class WorkflowOperationTools:
             logger.warning(f"获取可用工具列表失败: {e}")
             return []
 
+    # ========== 工作流库和 Agent 库管理 ==========
+
+    async def search_workflows(
+        self,
+        query: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        limit: int = 10,
+    ) -> OperationResult:
+        """
+        搜索已保存的工作流
+
+        Args:
+            query: 搜索关键词（可选）
+            tags: 标签过滤（可选）
+            limit: 返回数量限制
+
+        Returns:
+            包含工作流列表的操作结果
+        """
+        import os
+
+        try:
+            # 检查是否启用了数据库
+            if os.getenv("ENABLE_POSTGRES", "false").lower() != "true":
+                return OperationResult(
+                    success=False,
+                    message="数据库未启用，无法搜索工作流。请设置 ENABLE_POSTGRES=true 并配置数据库连接。",
+                    data={"workflows": []},
+                )
+
+            from src.services import WorkflowService
+            from src.services.workflow_service import WorkflowFilters
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import (
+                WorkflowDefinitionRepository,
+                WorkflowExecutionRepository,
+            )
+            from src.storage.config import PostgreSQLConfig
+
+            # 创建数据库连接
+            config = PostgreSQLConfig(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
+            )
+            db = AsyncDatabaseManager(config)
+            await db.connect()
+
+            try:
+                workflow_repo = WorkflowDefinitionRepository(db._session_factory)
+                execution_repo = WorkflowExecutionRepository(db._session_factory)
+                service = WorkflowService(workflow_repo, execution_repo)
+
+                # 构建过滤条件
+                filters = WorkflowFilters(
+                    query=query,
+                    tags=tags,
+                    is_active=True,  # 只搜索激活的工作流
+                    limit=limit,
+                )
+
+                workflows = await service.list_workflows(filters)
+
+                # 格式化结果
+                workflow_list = [
+                    {
+                        "id": w.id,
+                        "workflow_id": w.workflow_id,
+                        "name": w.name,
+                        "description": w.description,
+                        "version": w.version,
+                        "node_count": w.node_count,
+                        "edge_count": w.edge_count,
+                        "tags": w.tags,
+                        "author": w.author,
+                        "created_at": w.created_at,
+                        "updated_at": w.updated_at,
+                    }
+                    for w in workflows
+                ]
+
+                if not workflow_list:
+                    message = "没有找到匹配的工作流。"
+                    if query:
+                        message = f"没有找到包含 '{query}' 的工作流。"
+                else:
+                    message = f"找到 {len(workflow_list)} 个工作流："
+                    for w in workflow_list[:5]:  # 只在消息中显示前5个
+                        message += f"\n- **{w['name']}**: {w['description'][:50] if w['description'] else '无描述'}..."
+
+                return OperationResult(
+                    success=True,
+                    message=message,
+                    data={
+                        "type": "workflow_search_result",
+                        "workflows": workflow_list,
+                        "total": len(workflow_list),
+                    },
+                )
+
+            finally:
+                await db.close()
+
+        except Exception as e:
+            logger.error(f"搜索工作流失败: {e}")
+            return OperationResult(
+                success=False,
+                message=f"搜索工作流失败: {str(e)}",
+                data={"workflows": []},
+            )
+
+    async def load_saved_workflow(
+        self,
+        workflow_id: str,
+    ) -> OperationResult:
+        """
+        加载已保存的工作流到当前会话
+
+        Args:
+            workflow_id: 工作流 ID 或名称
+
+        Returns:
+            操作结果，包含工作流信息和执行历史
+        """
+        import os
+
+        if not workflow_id:
+            return OperationResult(
+                success=False,
+                message="请提供要加载的工作流 ID 或名称。",
+            )
+        workflow_id = workflow_id.strip()
+        workflow_id = workflow_id.strip()
+
+        try:
+            # 检查是否启用了数据库
+            if os.getenv("ENABLE_POSTGRES", "false").lower() != "true":
+                return OperationResult(
+                    success=False,
+                    message="数据库未启用，无法加载工作流。请设置 ENABLE_POSTGRES=true 并配置数据库连接。",
+                )
+
+            from src.services import WorkflowService, AgentService
+            from src.services.workflow_service import WorkflowFilters
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import (
+                WorkflowDefinitionRepository,
+                WorkflowExecutionRepository,
+                AgentRepository,
+            )
+            from src.storage.config import PostgreSQLConfig
+            from src.definitions import WorkflowDefinition, AgentDefinition
+
+            # 创建数据库连接
+            config = PostgreSQLConfig(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
+            )
+            db = AsyncDatabaseManager(config)
+            await db.connect()
+
+            try:
+                workflow_repo = WorkflowDefinitionRepository(db._session_factory)
+                execution_repo = WorkflowExecutionRepository(db._session_factory)
+                agent_repo = AgentRepository(db._session_factory)
+                service = WorkflowService(workflow_repo, execution_repo)
+
+                workflow_detail = None
+                workflow_summary = None  # 保存摘要信息（包含 node_count）
+                loaded_by_db_id = False
+
+                # 1) 尝试按数据库主键 ID 直接加载（支持 "id:xxx" 或直接传入 id）
+                database_id_candidate = (
+                    workflow_id[3:] if workflow_id.startswith("id:") else workflow_id
+                )
+                if database_id_candidate:
+                    logger.info(f"尝试按数据库主键加载工作流: {database_id_candidate}")
+                    workflow_detail = await service.get_workflow_by_id(
+                        database_id_candidate
+                    )
+                    if workflow_detail:
+                        loaded_by_db_id = True
+
+                # 2) 如果未找到，则按 workflow_id / name 进行搜索
+                if not workflow_detail:
+                    filters = WorkflowFilters(query=workflow_id, limit=5)
+                    workflows = await service.list_workflows(filters)
+
+                    if workflows:
+                        # 优先匹配精确的 workflow_id
+                        exact_match = next(
+                            (w for w in workflows if w.workflow_id == workflow_id),
+                            None,
+                        )
+                        if exact_match:
+                            workflow_summary = exact_match
+                            workflow_detail = await service.get_workflow_by_id(
+                                exact_match.id
+                            )
+                        else:
+                            # 多个匹配时拒绝自动选择，要求用户明确指定
+                            if len(workflows) > 1:
+                                return OperationResult(
+                                    success=False,
+                                    message=(
+                                        "找到多个匹配的工作流，请通过唯一 ID 进行加载。"
+                                    ),
+                                    data={
+                                        "type": "workflow_search_result",
+                                        "workflows": [
+                                            {
+                                                "id": w.id,
+                                                "workflow_id": w.workflow_id,
+                                                "name": w.name,
+                                                "description": w.description,
+                                                "version": w.version,
+                                                "node_count": w.node_count,
+                                                "edge_count": w.edge_count,
+                                                "tags": w.tags,
+                                                "author": w.author,
+                                                "created_at": w.created_at,
+                                                "updated_at": w.updated_at,
+                                            }
+                                            for w in workflows
+                                        ],
+                                        "total": len(workflows),
+                                    },
+                                )
+                            workflow_summary = workflows[0]
+                            workflow_detail = await service.get_workflow_by_id(
+                                workflows[0].id
+                            )
+
+                if not workflow_detail:
+                    return OperationResult(
+                        success=False,
+                        message=f"找不到工作流: {workflow_id}",
+                    )
+
+                # 获取执行历史（优先按 workflow_definition_id 精确查询）
+                if loaded_by_db_id:
+                    execution_history = await execution_repo.get_by_workflow(
+                        workflow_definition_id=workflow_detail.id, limit=10
+                    )
+                else:
+                    execution_history = await service.get_execution_history(
+                        workflow_detail.workflow_id, limit=10
+                    )
+
+                # 将工作流加载到 builder
+                definition = workflow_detail.definition
+                workflow = WorkflowDefinition(**definition)
+
+                # ========== 关键修复：加载工作流引用的 Agents ==========
+                # 从工作流节点中提取所有 agent_id
+                agent_ids = set()
+                for node in workflow.nodes:
+                    if node.agent_id:
+                        agent_ids.add(node.agent_id)
+                    # 也检查 config 中的 agent_id（兼容旧格式）
+                    if node.config and node.config.get("agent_id"):
+                        agent_ids.add(node.config.get("agent_id"))
+
+                # 从数据库加载这些 Agents 并注册到 AgentRegistry
+                loaded_agents = []
+                for agent_id in agent_ids:
+                    try:
+                        agent_model = await agent_repo.get_by_agent_id(agent_id)
+                        if agent_model and agent_model.definition_json:
+                            # 从数据库记录构建 AgentDefinition
+                            agent_def = AgentDefinition(**agent_model.definition_json)
+                            loaded_agents.append(agent_def)
+
+                            # 注册到 AgentRegistry（用于执行时查找）
+                            if not self.meta_agent.agent_registry.get_definition(
+                                agent_id
+                            ):
+                                self.meta_agent.agent_registry.register_definition(
+                                    agent_def
+                                )
+                                logger.debug(f"已注册 Agent 到 Registry: {agent_id}")
+                        else:
+                            logger.warning(f"Agent 不存在于数据库: {agent_id}")
+                    except Exception as agent_error:
+                        logger.warning(f"加载 Agent {agent_id} 失败: {agent_error}")
+
+                logger.info(
+                    f"工作流加载完成: {workflow.name}, "
+                    f"已加载 {len(loaded_agents)}/{len(agent_ids)} 个 Agents"
+                )
+
+                # 初始化或更新 builder
+                from .interactive_builder import InteractiveWorkflowBuilder
+
+                if not self._builder:
+                    self._builder = InteractiveWorkflowBuilder(
+                        meta_agent=self.meta_agent,
+                        callback=None,
+                        storage_path=self.storage_path,
+                    )
+
+                self._builder.draft_workflow = workflow
+                # 设置加载的 agents 到 draft_agents
+                self._builder.draft_agents = loaded_agents
+                self._task_description = workflow.description or workflow.name
+
+                # 格式化执行历史
+                def _normalize_status(raw_status: Optional[str]) -> Optional[str]:
+                    if raw_status in ("completed", "success"):
+                        return "success"
+                    return raw_status
+
+                history_list = []
+                for h in execution_history:
+                    # service.get_execution_history 返回 ExecutionSummary
+                    # execution_repo.get_by_workflow 返回 WorkflowExecutionModel
+                    if hasattr(h, "to_dict"):
+                        node_results = h.node_results or {}
+                        nodes_completed = sum(
+                            1
+                            for r in node_results.values()
+                            if r.get("status") == "completed"
+                        )
+                        nodes_failed = sum(
+                            1
+                            for r in node_results.values()
+                            if r.get("status") == "failed"
+                        )
+                        history_list.append(
+                            {
+                                "execution_id": h.id,
+                                "status": _normalize_status(
+                                    h.status.value if h.status else None
+                                ),
+                                "started_at": (
+                                    h.started_at.isoformat() if h.started_at else None
+                                ),
+                                "completed_at": (
+                                    h.completed_at.isoformat()
+                                    if h.completed_at
+                                    else None
+                                ),
+                                "total_duration_ms": h.total_duration_ms,
+                                "nodes_completed": nodes_completed,
+                                "nodes_failed": nodes_failed,
+                            }
+                        )
+                    else:
+                        history_list.append(
+                            {
+                                "execution_id": h.id,
+                                "status": _normalize_status(h.status),
+                                "started_at": h.started_at,
+                                "completed_at": h.completed_at,
+                                "total_duration_ms": h.total_duration_ms,
+                                "nodes_completed": h.nodes_completed,
+                                "nodes_failed": h.nodes_failed,
+                            }
+                        )
+
+                # 从定义中计算节点数
+                node_count = len(workflow.nodes) if workflow.nodes else 0
+                if workflow_summary:
+                    node_count = workflow_summary.node_count
+
+                message = f"✅ 已加载工作流: **{workflow_detail.name}**\n"
+                message += f"- 版本: v{workflow_detail.version}\n"
+                message += f"- 节点数: {node_count}\n"
+                if execution_history:
+                    message += f"- 执行历史: {len(execution_history)} 条记录\n"
+                message += "\n工作流已准备就绪，您可以直接执行或进行修改。"
+
+                return OperationResult(
+                    success=True,
+                    message=message,
+                    data={
+                        "type": "workflow_loaded",
+                        "workflow": {
+                            "id": workflow_detail.id,
+                            "workflow_id": workflow_detail.workflow_id,
+                            "name": workflow_detail.name,
+                            "description": workflow_detail.description,
+                            "version": workflow_detail.version,
+                            "node_count": node_count,
+                        },
+                        "execution_history": history_list,
+                    },
+                    workflow_changed=True,
+                )
+
+            finally:
+                await db.close()
+
+        except Exception as e:
+            logger.error(f"加载工作流失败: {e}")
+            return OperationResult(
+                success=False,
+                message=f"加载工作流失败: {str(e)}",
+            )
+
+    async def search_agents(
+        self,
+        query: Optional[str] = None,
+        domain_type: Optional[str] = None,
+        is_template: Optional[bool] = None,
+        limit: int = 10,
+    ) -> OperationResult:
+        """
+        搜索已保存的 Agent
+
+        Args:
+            query: 搜索关键词（可选）
+            domain_type: 领域类型过滤（可选）
+            is_template: 是否只搜索模板（可选）
+            limit: 返回数量限制
+
+        Returns:
+            包含 Agent 列表的操作结果
+        """
+        import os
+
+        try:
+            # 检查是否启用了数据库
+            if os.getenv("ENABLE_POSTGRES", "false").lower() != "true":
+                return OperationResult(
+                    success=False,
+                    message="数据库未启用，无法搜索 Agent。请设置 ENABLE_POSTGRES=true 并配置数据库连接。",
+                    data={"agents": []},
+                )
+
+            from src.services import AgentService
+            from src.services.agent_service import AgentFilters
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import AgentRepository
+            from src.storage.config import PostgreSQLConfig
+
+            # 创建数据库连接
+            config = PostgreSQLConfig(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
+            )
+            db = AsyncDatabaseManager(config)
+            await db.connect()
+
+            try:
+                agent_repo = AgentRepository(db._session_factory)
+                service = AgentService(agent_repo)
+
+                # 构建过滤条件
+                filters = AgentFilters(
+                    query=query,
+                    domain_type=domain_type,
+                    is_template=is_template,
+                    status="active",  # 只搜索激活的 Agent
+                    limit=limit,
+                )
+
+                agents = await service.list_agents(filters)
+
+                # 格式化结果
+                agent_list = [
+                    {
+                        "id": a.id,
+                        "agent_id": a.agent_id,
+                        "name": a.name,
+                        "description": a.description,
+                        "version": a.version,
+                        "domain_type": a.domain_type,
+                        "execution_type": a.execution_type,
+                        "model_name": a.model_name,
+                        "tags": a.tags,
+                        "is_template": a.is_template,
+                        "created_at": a.created_at,
+                        "updated_at": a.updated_at,
+                    }
+                    for a in agents
+                ]
+
+                if not agent_list:
+                    message = "没有找到匹配的 Agent。"
+                    if query:
+                        message = f"没有找到包含 '{query}' 的 Agent。"
+                else:
+                    message = f"找到 {len(agent_list)} 个 Agent："
+                    for a in agent_list[:5]:  # 只在消息中显示前5个
+                        desc = a["description"][:50] if a["description"] else "无描述"
+                        message += (
+                            f"\n- **{a['name']}** ({a['domain_type']}): {desc}..."
+                        )
+
+                return OperationResult(
+                    success=True,
+                    message=message,
+                    data={
+                        "type": "agent_search_result",
+                        "agents": agent_list,
+                        "total": len(agent_list),
+                    },
+                )
+
+            finally:
+                await db.close()
+
+        except Exception as e:
+            logger.error(f"搜索 Agent 失败: {e}")
+            return OperationResult(
+                success=False,
+                message=f"搜索 Agent 失败: {str(e)}",
+                data={"agents": []},
+            )
+
+    async def add_saved_agent(
+        self,
+        agent_id: str,
+    ) -> OperationResult:
+        """
+        将已保存的 Agent 添加到当前工作流
+
+        Args:
+            agent_id: Agent ID 或名称
+
+        Returns:
+            操作结果
+        """
+        import os
+
+        if not agent_id:
+            return OperationResult(
+                success=False,
+                message="请提供要添加的 Agent ID 或名称。",
+            )
+        agent_id = agent_id.strip()
+
+        # 检查是否有当前工作流
+        if not self._builder or not self._builder.draft_workflow:
+            return OperationResult(
+                success=False,
+                message="请先创建或加载一个工作流，然后再添加 Agent。",
+            )
+
+        try:
+            # 检查是否启用了数据库
+            if os.getenv("ENABLE_POSTGRES", "false").lower() != "true":
+                return OperationResult(
+                    success=False,
+                    message="数据库未启用，无法添加已保存的 Agent。请设置 ENABLE_POSTGRES=true 并配置数据库连接。",
+                )
+
+            from src.services import AgentService
+            from src.services.agent_service import AgentFilters
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import AgentRepository
+            from src.storage.config import PostgreSQLConfig
+            from src.definitions import AgentDefinition
+
+            # 创建数据库连接
+            config = PostgreSQLConfig(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
+            )
+            db = AsyncDatabaseManager(config)
+            await db.connect()
+
+            try:
+                agent_repo = AgentRepository(db._session_factory)
+                service = AgentService(agent_repo)
+
+                agent_detail = None
+
+                # 1) 尝试按数据库主键 ID 直接加载（支持 "id:xxx" 或直接传入 id）
+                database_id_candidate = (
+                    agent_id[3:] if agent_id.startswith("id:") else agent_id
+                )
+                if database_id_candidate:
+                    logger.info(f"尝试按数据库主键加载 Agent: {database_id_candidate}")
+                    agent_detail = await service.get_agent_by_id(database_id_candidate)
+
+                # 2) 如果未找到，则按 agent_id / name 进行搜索
+                if not agent_detail:
+                    agent_detail = await service.get_agent(agent_id)
+
+                    if not agent_detail:
+                        filters = AgentFilters(query=agent_id, limit=5)
+                        agents = await service.list_agents(filters)
+                        if agents:
+                            exact_match = next(
+                                (a for a in agents if a.agent_id == agent_id),
+                                None,
+                            )
+                            if exact_match:
+                                agent_detail = await service.get_agent_by_id(
+                                    exact_match.id
+                                )
+                            else:
+                                if len(agents) > 1:
+                                    return OperationResult(
+                                        success=False,
+                                        message=(
+                                            "找到多个匹配的 Agent，请通过唯一 ID 进行添加。"
+                                        ),
+                                        data={
+                                            "type": "agent_search_result",
+                                            "agents": [
+                                                {
+                                                    "id": a.id,
+                                                    "agent_id": a.agent_id,
+                                                    "name": a.name,
+                                                    "description": a.description,
+                                                    "version": a.version,
+                                                    "domain_type": a.domain_type,
+                                                    "execution_type": a.execution_type,
+                                                    "model_name": a.model_name,
+                                                    "tags": a.tags,
+                                                    "is_template": a.is_template,
+                                                    "created_at": a.created_at,
+                                                    "updated_at": a.updated_at,
+                                                }
+                                                for a in agents
+                                            ],
+                                            "total": len(agents),
+                                        },
+                                    )
+                                agent_detail = await service.get_agent_by_id(
+                                    agents[0].id
+                                )
+
+                if not agent_detail:
+                    return OperationResult(
+                        success=False,
+                        message=f"找不到 Agent: {agent_id}",
+                    )
+
+                # 从数据库定义创建 AgentDefinition
+                agent_def = AgentDefinition(**agent_detail.definition)
+
+                # 添加到工作流的 agents 字典
+                self._builder.draft_workflow.agents[agent_def.agent_id] = agent_def
+
+                message = f"✅ 已将 **{agent_detail.name}** 添加到当前工作流。\n"
+                message += f"- Agent ID: {agent_def.agent_id}\n"
+                message += f"- 领域类型: {agent_detail.domain_type}\n"
+                message += "\n您可以继续添加更多 Agent，或者修改工作流结构。"
+
+                return OperationResult(
+                    success=True,
+                    message=message,
+                    data={
+                        "type": "agent_added",
+                        "agent": {
+                            "id": agent_detail.id,
+                            "agent_id": agent_detail.agent_id,
+                            "name": agent_detail.name,
+                            "description": agent_detail.description,
+                        },
+                    },
+                    workflow_changed=True,
+                )
+
+            finally:
+                await db.close()
+
+        except Exception as e:
+            logger.error(f"添加 Agent 失败: {e}")
+            return OperationResult(
+                success=False,
+                message=f"添加 Agent 失败: {str(e)}",
+            )
+
     # ========== 辅助方法 ==========
 
     def _generate_workflow_structure(self) -> str:

@@ -22,7 +22,7 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose })
 
   const handleLoadWorkflow = (workflow: WorkflowSummary) => {
     wsService.send(WSMessageType.LOAD_WORKFLOW, {
-      workflow_id: workflow.workflowId,
+      workflow_db_id: workflow.id,
     });
     onClose();
   };
@@ -31,7 +31,7 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose })
     e.stopPropagation();
     if (confirm(`确定要删除工作流 "${workflow.name}" 吗？`)) {
       wsService.send(WSMessageType.DELETE_WORKFLOW, {
-        workflow_id: workflow.workflowId,
+        workflow_db_id: workflow.id,
       });
     }
   };

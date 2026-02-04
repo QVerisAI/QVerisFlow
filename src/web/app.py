@@ -61,6 +61,7 @@ async def init_dependencies():
     try:
         from src.config import AppConfigLoader, create_qveris_adapter
         from src.tools.registry import ToolRegistry
+        from src.tools.builtin import register_builtin_tools
         from src.evolution.meta_agent import MetaAgent
         from src.orchestration.workflow_engine import WorkflowEngine
 
@@ -69,6 +70,10 @@ async def init_dependencies():
 
         # 初始化工具注册表
         _tool_registry = ToolRegistry()
+
+        # 注册内置工具（file_ls, file_read, file_write, file_edit, file_append 等）
+        register_builtin_tools(_tool_registry)
+        logger.info("✅ 内置工具已注册")
 
         # 注册 QVeris 工具
         qveris_adapter = create_qveris_adapter(_tool_registry)

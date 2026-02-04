@@ -21,6 +21,8 @@ export function useWebSocket() {
     addExecutionRecord,
     updateExecutionRecord,
     setWorkflowNodeIdMap,
+    setExecutionHistory,
+    setCurrentWorkflowMeta,
   } = useAppStore();
 
   // 连接
@@ -119,6 +121,53 @@ export function useWebSocket() {
         if (agentName) {
           updateOrAddProgressMessage(agentName, message);
           return;
+        }
+      }
+
+      // 如果是工作流加载结果，处理执行历史
+      if (payload.data?.type === 'workflow_loaded') {
+        const loadedData = payload.data as {
+          type: string;
+          workflow?: { id?: string; workflow_id: string; name: string; description?: string };
+          execution_history?: Array<{
+            execution_id: string;
+            status: string;
+            started_at: string;
+            completed_at?: string;
+            total_duration_ms?: number;
+            nodes_completed?: number;
+            nodes_failed?: number;
+          }>;
+        };
+
+        // 更新当前工作流元数据
+        if (loadedData.workflow) {
+          setCurrentWorkflowMeta({
+            id: loadedData.workflow.id || '',
+            workflowId: loadedData.workflow.workflow_id,
+            name: loadedData.workflow.name,
+            description: loadedData.workflow.description || '',
+          });
+        }
+
+        // 更新执行历史
+        if (loadedData.execution_history && loadedData.execution_history.length > 0) {
+          const normalizeStatus = (raw?: string) => {
+            if (raw === 'completed') return 'success';
+            return raw as 'running' | 'success' | 'failed' | 'cancelled';
+          };
+          const records: ExecutionRecord[] = loadedData.execution_history.map((h) => ({
+            executionId: h.execution_id,
+            workflowId: loadedData.workflow?.workflow_id || '',
+            status: normalizeStatus(h.status),
+            startedAt: h.started_at,
+            completedAt: h.completed_at,
+            totalDurationMs: h.total_duration_ms,
+            nodesTotal: (h.nodes_completed || 0) + (h.nodes_failed || 0),
+            nodesCompleted: h.nodes_completed || 0,
+            nodesFailed: h.nodes_failed || 0,
+          }));
+          setExecutionHistory(records);
         }
       }
 
@@ -505,14 +554,47 @@ export function useWebSocket() {
 
     // 工作流已加载
     const unsubWorkflowLoaded = wsService.on(WSMessageType.WORKFLOW_LOADED, (msg) => {
-      const payload = msg.payload as { workflow_id: string; name: string; description: string; message: string };
+      const payload = msg.payload as {
+        id?: string;
+        workflow_id: string;
+        name: string;
+        description: string;
+        message: string;
+        execution_history?: Array<{
+          execution_id: string;
+          status: string;
+          started_at: string;
+          completed_at?: string;
+          total_duration_ms?: number;
+          nodes_completed?: number;
+          nodes_failed?: number;
+        }>;
+      };
       const store = useAppStore.getState();
       store.setCurrentWorkflowMeta({
-        id: '',
+        id: payload.id || '',
         workflowId: payload.workflow_id,
         name: payload.name,
         description: payload.description,
       });
+      if (payload.execution_history) {
+        const normalizeStatus = (raw?: string) => {
+          if (raw === 'completed') return 'success';
+          return raw as 'running' | 'success' | 'failed' | 'cancelled';
+        };
+        const records: ExecutionRecord[] = payload.execution_history.map((h) => ({
+          executionId: h.execution_id,
+          workflowId: payload.workflow_id,
+          status: normalizeStatus(h.status),
+          startedAt: h.started_at,
+          completedAt: h.completed_at,
+          totalDurationMs: h.total_duration_ms,
+          nodesTotal: (h.nodes_completed || 0) + (h.nodes_failed || 0),
+          nodesCompleted: h.nodes_completed || 0,
+          nodesFailed: h.nodes_failed || 0,
+        }));
+        store.setExecutionHistory(records);
+      }
       addMessage({
         role: 'system',
         content: `✅ ${payload.message}`,

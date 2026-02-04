@@ -173,10 +173,8 @@ class QVerisClient:
         # HTTP 客户端（延迟初始化）
         self._client: Optional[httpx.AsyncClient] = None
 
-        if not self.api_key:
-            logger.warning(
-                "QVeris API Key 未设置。请设置 QVERIS_API_KEY 环境变量或传入 api_key 参数。"
-            )
+        # 配置校验：未配置直接报错，避免掩盖问题
+        self._check_api_key()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """获取或创建 HTTP 客户端"""
@@ -184,7 +182,11 @@ class QVerisClient:
             headers = {"Content-Type": "application/json"}
             # 只有当 API Key 非空时才添加 Authorization 头
             if self.api_key:
+                logger.debug(f"QVeris API Key: {self.api_key}")
                 headers["Authorization"] = f"Bearer {self.api_key}"
+            else:
+                logger.debug(f"QVeris API Key未设置")
+
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
                 headers=headers,
@@ -193,10 +195,14 @@ class QVerisClient:
         return self._client
 
     def _check_api_key(self) -> None:
-        """检查 API Key 是否已配置，未配置则抛出异常"""
+        """检查 API Key / base_url 是否已配置，未配置则抛出异常"""
         if not self.api_key:
             raise QVerisAPIError(
                 "QVeris API Key 未配置。请设置 QVERIS_API_KEY 环境变量或在 config/app_config.yaml 中配置。"
+            )
+        if not self.base_url or not self.base_url.startswith("http"):
+            raise QVerisAPIError(
+                "QVeris base_url 未配置或无效。请设置 QVERIS_BASE_URL 或在 config/app_config.yaml 中配置。"
             )
 
     async def close(self):
@@ -284,7 +290,7 @@ class QVerisClient:
         self,
         query: str,
         limit: int = 20,
-        use_cache: bool = True,
+        use_cache: bool = False,
     ) -> QVerisSearchResult:
         """
         搜索工具
@@ -302,7 +308,7 @@ class QVerisClient:
         Raises:
             QVerisAPIError: API 调用失败时
         """
-        # 检查 API Key
+        # 检查 API Key / base_url
         self._check_api_key()
 
         # 检查缓存
@@ -325,6 +331,9 @@ class QVerisClient:
         last_error = None
         for attempt in range(self.max_retries):
             try:
+                logger.debug(
+                    f"QVeris 搜索 endpoint: {self.DEFAULT_BASE_URL}/search, 请求: {payload}"
+                )
                 response = await client.post("/search", json=payload)
                 response.raise_for_status()
                 data = response.json()

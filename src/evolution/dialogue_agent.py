@@ -420,6 +420,98 @@ class DialogueAgent:
                 },
             },
         },
+        # ========== 工作流库和 Agent 库管理工具 ==========
+        {
+            "type": "function",
+            "function": {
+                "name": "search_workflows",
+                "description": "搜索已保存的工作流。当用户说'查找工作流'、'列出工作流'、'有哪些工作流'、'显示工作流库'、'打开工作流列表'时调用此函数。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "搜索关键词，用于匹配工作流名称或描述（可选）",
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "标签过滤，只返回包含指定标签的工作流（可选）",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回数量限制，默认 10",
+                            "default": 10,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "load_saved_workflow",
+                "description": "加载已保存的工作流到当前会话。当用户说'加载XXX工作流'、'打开XXX工作流'、'使用XXX工作流'时调用此函数。加载后会自动获取该工作流的执行历史。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "workflow_id": {
+                            "type": "string",
+                            "description": "工作流的 ID 或名称。可以是完整 ID，也可以是工作流名称（会模糊匹配）",
+                        },
+                    },
+                    "required": ["workflow_id"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_agents",
+                "description": "搜索已保存的 Agent。当用户说'查找Agent'、'列出Agent'、'有哪些Agent'、'显示Agent库'、'打开Agent列表'时调用此函数。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "搜索关键词，用于匹配 Agent 名称或描述（可选）",
+                        },
+                        "domain_type": {
+                            "type": "string",
+                            "description": "领域类型过滤，如 'finance'、'data_analysis' 等（可选）",
+                        },
+                        "is_template": {
+                            "type": "boolean",
+                            "description": "是否只搜索模板 Agent（可选）",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回数量限制，默认 10",
+                            "default": 10,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_saved_agent",
+                "description": "将已保存的 Agent 添加到当前工作流。当用户说'使用XXX Agent'、'添加已有的XXX'、'把XXX Agent加入工作流'时调用此函数。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Agent 的 ID 或名称。可以是完整 ID，也可以是 Agent 名称（会模糊匹配）",
+                        },
+                    },
+                    "required": ["agent_id"],
+                },
+            },
+        },
     ]
 
     def __init__(
@@ -462,6 +554,11 @@ class DialogueAgent:
             "get_agent_definition": self._handle_get_agent_definition,
             "regenerate_agent": self._handle_regenerate_agent,
             "iterate_plan": self._handle_iterate_plan,
+            # 工作流库和 Agent 库管理
+            "search_workflows": self._handle_search_workflows,
+            "load_saved_workflow": self._handle_load_saved_workflow,
+            "search_agents": self._handle_search_agents,
+            "add_saved_agent": self._handle_add_saved_agent,
         }
 
     def _default_system_prompt(self) -> str:
@@ -480,6 +577,12 @@ class DialogueAgent:
 - 回滚到之前的检查点（rollback_to_checkpoint）
 - 保存工作流（save_workflow）
 - 执行工作流（execute_workflow）
+
+### 工作流库和 Agent 库管理
+- **搜索工作流（search_workflows）** - 查找已保存的工作流
+- **加载工作流（load_saved_workflow）** - 加载已保存的工作流到当前会话
+- **搜索 Agent（search_agents）** - 查找已保存的 Agent
+- **添加已保存的 Agent（add_saved_agent）** - 将库中的 Agent 添加到当前工作流
 
 ## 工作流构建流程
 1. 规划阶段：用户描述任务，系统生成工作流规划（包含多个 Agent 规格）
@@ -526,6 +629,28 @@ class DialogueAgent:
 当用户说"执行规划"、"执行"、"运行"时：
 - 如果当前阶段是 `plan`，需要先批准规划（approve_current_state）
 - 如果当前阶段是 `workflow`，直接执行（execute_workflow）
+
+## 工作流库和 Agent 库使用
+当用户想要查看或使用已保存的工作流和 Agent 时：
+
+**搜索工作流：**
+- 用户说"查找工作流"、"列出所有工作流"、"有哪些工作流"、"工作流库"
+  → search_workflows()
+
+**加载工作流：**
+- 用户说"加载XXX工作流"、"打开XXX"、"使用XXX工作流"
+  → load_saved_workflow(workflow_id="XXX")
+- 加载后会自动获取该工作流的执行历史，用户可以查看之前的执行记录
+
+**搜索 Agent：**
+- 用户说"查找Agent"、"列出Agent"、"Agent库"、"有哪些可用的Agent"
+  → search_agents()
+
+**添加已保存的 Agent：**
+- 用户说"使用XXX Agent"、"添加已有的XXX"、"把库里的XXX加入"
+  → add_saved_agent(agent_id="XXX")
+
+**重要**：搜索结果会以卡片形式展示，用户可以点击卡片来加载工作流或添加 Agent。
 
 ## Agent 命名规范（重要）
 - **技术名称 (name)**：用于系统内部引用的英文标识，如 `DataCollectorAgent`、`TrendAnalyzer`
@@ -637,15 +762,24 @@ class DialogueAgent:
         execution_keywords = ["执行", "执行工作流", "运行", "运行工作流", "开始执行"]
         if msg in execution_keywords:
             logger.info(f"直接处理执行命令: {user_message}")
+
+            # 先记录用户消息
+            self.conversation_history.append({"role": "user", "content": user_message})
+
+            # 执行工作流（执行过程中的状态更新通过 event_callback 实时推送）
             result = await self.ops.execute_workflow()
 
-            self.conversation_history.append({"role": "user", "content": user_message})
+            # ========== 关键修复 ==========
+            # 不再发送 "工作流执行完成" 消息，因为 workflow_completed 事件已经通过
+            # _handle_execution_event 发送了完成消息。返回空消息避免重复。
+            # 只记录到对话历史，不返回给用户显示。
             self.conversation_history.append(
                 {"role": "assistant", "content": result.message}
             )
 
+            # 返回空消息（所有状态更新已通过执行事件推送）
             return DialogueResponse(
-                message=result.message,
+                message="",  # 不发送消息，避免与 workflow_completed 事件重复
                 workflow_changed=result.workflow_changed,
                 suggested_actions=["暂停", "停止"] if result.success else [],
             )
@@ -1586,6 +1720,39 @@ class DialogueAgent:
         return await self.ops.iterate_plan(
             user_request=args.get("user_request", ""),
             include_history=args.get("include_history", True),
+        )
+
+    # ========== 工作流库和 Agent 库管理处理器 ==========
+
+    async def _handle_search_workflows(self, args: Dict[str, Any]) -> OperationResult:
+        """搜索已保存的工作流"""
+        return await self.ops.search_workflows(
+            query=args.get("query"),
+            tags=args.get("tags"),
+            limit=args.get("limit", 10),
+        )
+
+    async def _handle_load_saved_workflow(
+        self, args: Dict[str, Any]
+    ) -> OperationResult:
+        """加载已保存的工作流"""
+        return await self.ops.load_saved_workflow(
+            workflow_id=args.get("workflow_id", ""),
+        )
+
+    async def _handle_search_agents(self, args: Dict[str, Any]) -> OperationResult:
+        """搜索已保存的 Agent"""
+        return await self.ops.search_agents(
+            query=args.get("query"),
+            domain_type=args.get("domain_type"),
+            is_template=args.get("is_template"),
+            limit=args.get("limit", 10),
+        )
+
+    async def _handle_add_saved_agent(self, args: Dict[str, Any]) -> OperationResult:
+        """添加已保存的 Agent 到当前工作流"""
+        return await self.ops.add_saved_agent(
+            agent_id=args.get("agent_id", ""),
         )
 
     def clear_history(self) -> None:

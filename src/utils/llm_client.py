@@ -223,14 +223,28 @@ class ClientFactory:
         # 检查是否为 Kimi/Moonshot 模型，如果是，禁用 thinking 模式
         # Kimi 的 thinking 模式会导致 tool calling 场景下的消息格式问题
         # 错误: 'thinking is enabled but reasoning_content is missing in assistant tool call message'
+        # 根据 Moonshot API 官方文档，正确的禁用方式是：
+        # "thinking": {"type": "disabled"}
+        # 参考: https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart#disable-thinking-capability-example
+        #
+        # 重要：kimi-k2.5 模型的 temperature 限制：
+        # - thinking 模式启用时：temperature 必须为 1.0
+        # - thinking 模式禁用时：temperature 必须为 0.6
+        # 任何其他值都会导致 400 错误
         model_lower = model_name.lower() if model_name else ""
-        if "kimi" in model_lower or "moonshot" in model_lower:
-            # 尝试通过 extra_body 禁用 thinking 模式
-            # 根据 Moonshot API 文档，可以通过设置 use_thinking=False 或相关参数来禁用
+        is_kimi = "kimi" in model_lower or "moonshot" in model_lower
+
+        if is_kimi:
+            # 通过 extra_body 禁用 thinking 模式
+            # kimi-k2.5 模型默认启用 thinking，需要显式禁用
             model_kwargs["extra_body"] = {
-                "use_thinking": False,  # 禁用 thinking 模式
+                "thinking": {"type": "disabled"},  # 正确的禁用 thinking 模式参数
             }
-            logger.debug(f"🔄 Kimi/Moonshot 模型检测到，已禁用 thinking 模式")
+            # 禁用 thinking 模式时，temperature 必须为 0.6
+            temperature = 0.6
+            logger.debug(
+                f"🔄 Kimi/Moonshot 模型检测到，已禁用 thinking 模式，temperature 设为 0.6"
+            )
 
         # 构建 ChatOpenAI 参数
         chat_kwargs = {
