@@ -6,7 +6,9 @@ gather_context → take_action → verify_work → (repeat or complete)
 """
 
 import json
+import asyncio
 from typing import Dict, Any, Optional, Callable, Literal, List
+from concurrent.futures import ThreadPoolExecutor
 from src.utils.logger import get_logger
 
 from .agent_state import AgentState
@@ -14,6 +16,9 @@ from .context_manager import ContextManager, TiktokenCounter, SimpleTokenCounter
 from .reference_resolver import ReferenceResolver
 
 logger = get_logger()
+
+# CPU 密集型操作使用的线程池
+_cpu_executor = ThreadPoolExecutor(max_workers=4)
 
 
 def _normalize_tool_calls_args(response: Any) -> Any:
@@ -202,6 +207,22 @@ def _estimate_tokens(text: str) -> int:
 
     estimated_tokens = int(chinese_chars * 1.5 + other_chars * 0.25)
     return max(1, estimated_tokens)
+
+
+async def estimate_tokens_async(text: str) -> int:
+    """
+    异步估算文本的 token 数量（使用线程池）
+
+    对于大量文本处理时使用，避免阻塞事件循环。
+
+    Args:
+        text: 要估算的文本
+
+    Returns:
+        估算的 token 数量
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_cpu_executor, _estimate_tokens, text)
 
 
 def _estimate_message_tokens(message: Any) -> int:
@@ -415,6 +436,34 @@ def _truncate_messages_to_fit(
     return result
 
 
+async def truncate_messages_to_fit_async(
+    messages: List[Any],
+    max_tokens: int,
+    reserved_tokens: int = RESERVED_OUTPUT_TOKENS,
+) -> List[Any]:
+    """
+    异步截断消息列表以适应上下文限制（使用线程池）
+
+    对于大量消息处理时使用，避免阻塞事件循环。
+
+    Args:
+        messages: 原始消息列表
+        max_tokens: 模型的最大上下文 token 数
+        reserved_tokens: 预留给输出的 token 数
+
+    Returns:
+        截断后的消息列表
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _cpu_executor,
+        _truncate_messages_to_fit,
+        messages,
+        max_tokens,
+        reserved_tokens,
+    )
+
+
 class AgentGraphBuilder:
     """
     Agent 图构建器
@@ -443,6 +492,9 @@ class AgentGraphBuilder:
         self.verifier: Optional[BaseVerifier] = verifier
         self.tools = tools or []
         self.tool_registry = tool_registry
+
+        # 进度回调函数（由 BaseAgent.run() 设置，用于发送工具调用等中间状态）
+        self.progress_callback: Optional[Any] = None  # Callable[[str], Awaitable[None]]
 
         # 获取 LangChain 客户端
         self.langchain_llm = (
@@ -1024,6 +1076,13 @@ class AgentGraphBuilder:
 
                 logger.info(f"执行工具调用: {tool_name}({tool_args})")
 
+                # 发送工具调用开始的进度事件
+                if self.progress_callback:
+                    try:
+                        await self.progress_callback(f"调用工具: {tool_name}")
+                    except Exception as cb_err:
+                        logger.warning(f"进度回调失败: {cb_err}")
+
                 # 实际执行工具
                 try:
                     result = await self._execute_single_tool(
@@ -1031,6 +1090,16 @@ class AgentGraphBuilder:
                     )
 
                     result_str = str(result)
+
+                    # 发送工具执行完成的进度事件（包含结果摘要）
+                    if self.progress_callback:
+                        try:
+                            result_summary = self._generate_tool_result_summary(
+                                tool_name, result
+                            )
+                            await self.progress_callback(result_summary)
+                        except Exception as cb_err:
+                            logger.warning(f"进度回调失败: {cb_err}")
 
                     # 截断过长的工具结果，避免上下文爆炸
                     original_tokens = _estimate_tokens(result_str)
@@ -1058,6 +1127,13 @@ class AgentGraphBuilder:
                 except Exception as e:
                     error_msg = f"工具执行错误: {str(e)}"
                     logger.error(f"工具 {tool_name} 执行失败: {e}")
+
+                    # 发送工具执行失败的进度事件
+                    if self.progress_callback:
+                        try:
+                            await self.progress_callback(f"工具 {tool_name} 执行失败")
+                        except Exception as cb_err:
+                            logger.warning(f"进度回调失败: {cb_err}")
 
                     tool_messages.append(
                         ToolMessage(content=error_msg, tool_call_id=tool_call_id)
@@ -1149,6 +1225,68 @@ class AgentGraphBuilder:
             )
 
         return final_content
+
+    def _generate_tool_result_summary(self, tool_name: str, result: Any) -> str:
+        """
+        生成工具执行结果的简短摘要
+
+        Args:
+            tool_name: 工具名称
+            result: 工具执行结果
+
+        Returns:
+            简短的结果摘要字符串
+        """
+        try:
+            if result is None:
+                return f"{tool_name}: 无返回结果"
+
+            # 处理字典类型结果
+            if isinstance(result, dict):
+                # 优先查找常见的摘要字段
+                for key in ["summary", "message", "result", "status", "data"]:
+                    if key in result:
+                        value = result[key]
+                        if isinstance(value, str) and len(value) < 100:
+                            return f"{tool_name}: {value}"
+                        elif isinstance(value, (list, tuple)):
+                            return f"{tool_name}: 获取了 {len(value)} 条数据"
+                        elif isinstance(value, dict):
+                            return f"{tool_name}: 返回 {len(value)} 个字段"
+
+                # 如果有 count 或 total 字段
+                if "count" in result:
+                    return f"{tool_name}: 共 {result['count']} 条"
+                if "total" in result:
+                    return f"{tool_name}: 共 {result['total']} 条"
+
+                # 默认：显示字段数量
+                return f"{tool_name}: 返回 {len(result)} 个字段"
+
+            # 处理列表类型结果
+            if isinstance(result, (list, tuple)):
+                return f"{tool_name}: 获取了 {len(result)} 条数据"
+
+            # 处理字符串结果
+            if isinstance(result, str):
+                if len(result) <= 80:
+                    return f"{tool_name}: {result}"
+                else:
+                    return f"{tool_name}: {result[:77]}..."
+
+            # 处理数字结果
+            if isinstance(result, (int, float)):
+                return f"{tool_name}: {result}"
+
+            # 默认
+            result_str = str(result)
+            if len(result_str) <= 80:
+                return f"{tool_name}: {result_str}"
+            return f"{tool_name}: 执行完成"
+
+        except Exception as e:
+            logger.warning(f"生成工具结果摘要失败: {e}")
+            return f"{tool_name}: 执行完成"
 
     async def _execute_single_tool(
         self, tool_name: str, tool_args: Dict[str, Any], workspace: Any

@@ -12,42 +12,34 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "pyyaml>=6.0",
-    
     # ===== LangGraph / LangChain =====
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
     "langchain-openai>=0.3.0",
-    
     # ===== 异步支持 =====
     "asyncio-throttle>=1.0.2",
     "aiofiles>=23.2.1",
     "aiohttp>=3.9.0",
-    
     # ===== HTTP 客户端 =====
     "httpx>=0.25.0",
     "requests>=2.31.0",
-    
     # ===== 数据库 =====
     "sqlalchemy[asyncio]>=2.0.0",
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
-    
     # ===== 缓存 =====
     "redis>=5.0.0",
-    
     # ===== 日志和监控 =====
     "loguru>=0.7.0",
     "structlog>=23.0.0",
-    
     # ===== 数据验证 =====
     "jsonschema>=4.20.0",
-    
     # ===== Token 计数 =====
     "tiktoken>=0.5.0",
-    
     # ===== LLM 客户端 =====
     "openai>=1.0.0",
     "anthropic>=0.18.0",
+    "python-socketio>=5.16.0",
 ]
 
 [project.optional-dependencies]

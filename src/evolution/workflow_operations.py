@@ -84,6 +84,7 @@ class WorkflowOperationTools:
         # 执行状态
         self._is_executing = False
         self._execution_task = None
+        self._current_workflow_id: Optional[str] = None  # 当前执行的工作流 ID
 
         # 任务描述
         self._task_description: str = ""
@@ -1970,6 +1971,17 @@ class WorkflowOperationTools:
             # 定义事件回调，转发执行事件
             # 注意：不再发送 execution_started/execution_completed，因为 WorkflowEngine 已经发送 workflow_started/workflow_completed
             async def event_callback(event: Dict[str, Any]) -> None:
+                # 保存当前执行的 workflow_id，用于干预操作
+                if event.get("event_type") == "workflow_started":
+                    self._current_workflow_id = event.get("workflow_id")
+                elif event.get("event_type") in (
+                    "workflow_completed",
+                    "workflow_failed",
+                    "workflow_cancelled",
+                ):
+                    # 执行结束时清理 workflow_id（但保留一段时间以便查询）
+                    pass  # 暂时不清理，允许后续查询
+
                 if self._progress_callback:
                     # 直接转发 WorkflowEngine 的事件
                     await self._progress_callback(event)
@@ -2036,23 +2048,137 @@ class WorkflowOperationTools:
 
     async def pause_execution(self) -> OperationResult:
         """暂停执行"""
-        if not self._is_executing:
+        if not self._is_executing or not self._current_workflow_id:
             return OperationResult(success=False, message="没有正在执行的工作流")
 
-        # TODO: 实现暂停逻辑
-        return OperationResult(success=True, message="执行已暂停")
+        if self._workflow_engine:
+            success = await self._workflow_engine.pause(self._current_workflow_id)
+            if success:
+                logger.info(f"工作流已暂停: {self._current_workflow_id}")
+                return OperationResult(
+                    success=True,
+                    message="工作流已暂停，输入'继续'可恢复执行",
+                )
+            return OperationResult(
+                success=False, message="暂停失败，工作流可能不在运行状态"
+            )
+        return OperationResult(success=False, message="工作流引擎未初始化")
 
     async def resume_execution(self) -> OperationResult:
         """恢复执行"""
-        # TODO: 实现恢复逻辑
-        return OperationResult(success=True, message="执行已恢复")
+        if not self._current_workflow_id:
+            return OperationResult(success=False, message="没有可恢复的工作流")
+
+        if self._workflow_engine:
+            # 检查是否真的处于暂停状态
+            if not self._workflow_engine.is_paused(self._current_workflow_id):
+                return OperationResult(
+                    success=False,
+                    message="工作流未处于暂停状态，可能已完成或已恢复",
+                )
+
+            success = await self._workflow_engine.resume_execution(
+                self._current_workflow_id
+            )
+            if success:
+                logger.info(f"工作流已恢复: {self._current_workflow_id}")
+                return OperationResult(success=True, message="工作流已恢复执行")
+            return OperationResult(success=False, message="恢复失败，请重试")
+        return OperationResult(success=False, message="工作流引擎未初始化")
 
     async def stop_execution(self) -> OperationResult:
         """停止执行"""
+        if not self._current_workflow_id:
+            return OperationResult(success=False, message="没有正在执行的工作流")
+
         if self._workflow_engine:
-            # TODO: 实现停止逻辑
+            # 设置取消标志
+            self._workflow_engine._cancel_flags[self._current_workflow_id] = True
             self._is_executing = False
-        return OperationResult(success=True, message="执行已停止")
+            logger.info(f"工作流已停止: {self._current_workflow_id}")
+            return OperationResult(success=True, message="工作流已停止")
+        return OperationResult(success=False, message="工作流引擎未初始化")
+
+    async def skip_node(self, node_id: Optional[str] = None) -> OperationResult:
+        """
+        跳过指定节点
+
+        Args:
+            node_id: 要跳过的节点 ID，如果不指定则尝试跳过当前正在等待的节点
+        """
+        if not self._is_executing or not self._current_workflow_id:
+            return OperationResult(success=False, message="没有正在执行的工作流")
+
+        if not self._workflow_engine:
+            return OperationResult(success=False, message="工作流引擎未初始化")
+
+        # 如果没有指定 node_id，尝试获取当前节点或下一个待执行节点
+        if not node_id:
+            # 从 WorkflowEngine 获取当前或下一个待执行节点
+            # 这里需要 WorkflowEngine 提供相关接口
+            if hasattr(self._workflow_engine, "_current_executing_node"):
+                current_node = self._workflow_engine._current_executing_node.get(
+                    self._current_workflow_id
+                )
+                if current_node:
+                    node_id = current_node
+
+        if not node_id:
+            return OperationResult(
+                success=False,
+                message="请指定要跳过的节点 ID 或名称",
+            )
+
+        success = await self._workflow_engine.skip_node(
+            self._current_workflow_id, node_id
+        )
+        if success:
+            logger.info(f"将跳过节点: {node_id}")
+            return OperationResult(success=True, message=f"将跳过节点: {node_id}")
+        return OperationResult(success=False, message=f"跳过节点失败: {node_id}")
+
+    async def inject_context(self, context: Dict[str, Any]) -> OperationResult:
+        """
+        向正在执行的工作流注入额外上下文
+
+        Args:
+            context: 要注入的上下文数据（键值对）
+        """
+        if not self._is_executing or not self._current_workflow_id:
+            return OperationResult(success=False, message="没有正在执行的工作流")
+
+        if not self._workflow_engine:
+            return OperationResult(success=False, message="工作流引擎未初始化")
+
+        if not context:
+            return OperationResult(success=False, message="请提供要注入的上下文数据")
+
+        # 调用 WorkflowEngine 的 inject_context 方法
+        if hasattr(self._workflow_engine, "inject_context"):
+            success = await self._workflow_engine.inject_context(
+                self._current_workflow_id, context
+            )
+            if success:
+                logger.info(f"已注入上下文: {list(context.keys())}")
+                return OperationResult(
+                    success=True,
+                    message=f"已注入上下文: {list(context.keys())}",
+                )
+            return OperationResult(success=False, message="注入上下文失败")
+        else:
+            # 如果 WorkflowEngine 没有 inject_context 方法，直接存储到 _injected_context
+            if not hasattr(self._workflow_engine, "_injected_context"):
+                self._workflow_engine._injected_context = {}
+            if self._current_workflow_id not in self._workflow_engine._injected_context:
+                self._workflow_engine._injected_context[self._current_workflow_id] = {}
+            self._workflow_engine._injected_context[self._current_workflow_id].update(
+                context
+            )
+            logger.info(f"已注入上下文（直接存储）: {list(context.keys())}")
+            return OperationResult(
+                success=True,
+                message=f"已注入上下文: {list(context.keys())}",
+            )
 
     # ========== 执行历史操作 ==========
 
@@ -2544,8 +2670,14 @@ class WorkflowOperationTools:
 
     def get_execution_status(self) -> Dict[str, Any]:
         """获取执行状态"""
+        is_paused = False
+        if self._workflow_engine and self._current_workflow_id:
+            is_paused = self._workflow_engine.is_paused(self._current_workflow_id)
+
         return {
             "is_executing": self._is_executing,
+            "is_paused": is_paused,
+            "current_workflow_id": self._current_workflow_id,
             "has_workflow": self._builder and self._builder.draft_workflow is not None,
         }
 
@@ -3022,12 +3154,11 @@ class WorkflowOperationTools:
                 agent_repo = AgentRepository(db._session_factory)
                 service = AgentService(agent_repo)
 
-                # 构建过滤条件
+                # 构建过滤条件（不过滤 status，显示所有 Agent）
                 filters = AgentFilters(
                     query=query,
                     domain_type=domain_type,
                     is_template=is_template,
-                    status="active",  # 只搜索激活的 Agent
                     limit=limit,
                 )
 

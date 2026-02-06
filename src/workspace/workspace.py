@@ -468,9 +468,9 @@ class AgentWorkspace:
 
     # ========== 状态管理 ==========
 
-    def save_checkpoint(self, state: Dict[str, Any]) -> str:
+    async def save_checkpoint(self, state: Dict[str, Any]) -> str:
         """
-        保存检查点
+        保存检查点（异步执行）
 
         Args:
             state: 状态字典
@@ -478,20 +478,24 @@ class AgentWorkspace:
         Returns:
             检查点文件路径
         """
+        import asyncio
+
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         checkpoint_file = self.state_dir / f"checkpoint_{timestamp}.json"
 
-        with open(checkpoint_file, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2, default=str)
+        def _sync_write():
+            with open(checkpoint_file, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2, default=str)
 
+        await asyncio.to_thread(_sync_write)
         logger.info(f"检查点已保存: {checkpoint_file}")
         return str(checkpoint_file)
 
-    def load_checkpoint(
+    async def load_checkpoint(
         self, checkpoint_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        加载检查点
+        加载检查点（异步执行）
 
         Args:
             checkpoint_id: 检查点 ID（时间戳），如果为 None 则加载最新的
@@ -499,6 +503,8 @@ class AgentWorkspace:
         Returns:
             状态字典，如果不存在则返回 None
         """
+        import asyncio
+
         if checkpoint_id is None:
             # 加载最新检查点
             checkpoints = sorted(self.state_dir.glob("checkpoint_*.json"))
@@ -511,8 +517,11 @@ class AgentWorkspace:
         if not checkpoint_file.exists():
             return None
 
-        with open(checkpoint_file, "r", encoding="utf-8") as f:
-            return json.load(f)
+        def _sync_read():
+            with open(checkpoint_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        return await asyncio.to_thread(_sync_read)
 
     # ========== 文件操作 ==========
 

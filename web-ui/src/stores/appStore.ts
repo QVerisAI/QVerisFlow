@@ -7,6 +7,7 @@ import type {
   ExecutionRecord,
   WorkflowSummary,
   AgentLibraryItem,
+  RealtimeNodeOutput,
 } from '../types';
 
 interface GenerationProgress {
@@ -31,6 +32,7 @@ interface AppState {
   messages: Message[];
   addMessage: (message: Message) => void;
   updateOrAddProgressMessage: (agentName: string, message: Message) => void;
+  updateMessageById: (messageId: string, updates: Partial<Message>) => void;
   clearMessages: () => void;
 
   // 工作流状态
@@ -44,6 +46,11 @@ interface AppState {
   // 节点执行状态
   nodeStates: Record<string, { status: string; duration?: number }>;
   updateNodeState: (nodeId: string, state: { status: string; duration?: number }) => void;
+
+  // 实时节点输出（用于执行过程中查看节点详情）
+  realtimeNodeOutputs: Record<string, RealtimeNodeOutput>;
+  updateRealtimeNodeOutput: (nodeId: string, output: Partial<RealtimeNodeOutput>) => void;
+  clearRealtimeNodeOutputs: () => void;
 
   // 工作流节点ID映射：workflowNodeId -> frontendNodeId
   workflowNodeIdMap: Record<string, string>;
@@ -91,11 +98,13 @@ interface AppState {
   executionHistory: ExecutionRecord[];
   selectedExecutionId: string | null;  // null = 当前构建模式
   currentExecutionDetail: ExecutionRecord | null;  // 当前查看的执行详情
+  executionDetailLoading: boolean;  // 执行详情加载中
   setExecutionHistory: (history: ExecutionRecord[]) => void;
   selectExecution: (executionId: string | null) => void;
   addExecutionRecord: (record: ExecutionRecord) => void;
   updateExecutionRecord: (executionId: string, updates: Partial<ExecutionRecord>) => void;
   setCurrentExecutionDetail: (detail: ExecutionRecord | null) => void;
+  setExecutionDetailLoading: (loading: boolean) => void;
 
   // === 工作流库 ===
   workflowList: WorkflowSummary[];
@@ -188,6 +197,21 @@ export const useAppStore = create<AppState>((set) => ({
     return { messages: [...state.messages, messageWithId] };
   }),
 
+  // 根据 ID 更新消息
+  updateMessageById: (messageId, updates) => set((state) => {
+    const messageIndex = state.messages.findIndex(m => m.id === messageId);
+    if (messageIndex === -1) {
+      return state;
+    }
+
+    const updatedMessages = [...state.messages];
+    updatedMessages[messageIndex] = {
+      ...updatedMessages[messageIndex],
+      ...updates,
+    };
+    return { messages: updatedMessages };
+  }),
+
   clearMessages: () => set({ messages: [] }),
 
   // 工作流状态
@@ -206,6 +230,19 @@ export const useAppStore = create<AppState>((set) => ({
   updateNodeState: (nodeId, state) => set((prev) => ({
     nodeStates: { ...prev.nodeStates, [nodeId]: state }
   })),
+
+  // 实时节点输出
+  realtimeNodeOutputs: {},
+  updateRealtimeNodeOutput: (nodeId, output) => set((state) => ({
+    realtimeNodeOutputs: {
+      ...state.realtimeNodeOutputs,
+      [nodeId]: {
+        ...state.realtimeNodeOutputs[nodeId],
+        ...output,
+      },
+    },
+  })),
+  clearRealtimeNodeOutputs: () => set({ realtimeNodeOutputs: {} }),
 
   // 工作流节点ID映射
   workflowNodeIdMap: {},
@@ -279,11 +316,14 @@ export const useAppStore = create<AppState>((set) => ({
   executionHistory: [],
   selectedExecutionId: null,
   currentExecutionDetail: null,
+  executionDetailLoading: false,
   setExecutionHistory: (history) => set({ executionHistory: history }),
   selectExecution: (executionId) => set({
     selectedExecutionId: executionId,
     // 切换时清空旧的详情，等待新的详情加载
     currentExecutionDetail: executionId === null ? null : undefined,
+    // 如果选择了执行记录，设置为加载中状态
+    executionDetailLoading: executionId !== null,
   }),
   addExecutionRecord: (record) => set((state) => ({
     executionHistory: [record, ...state.executionHistory].slice(0, 20),  // 保留最近 20 条
@@ -293,7 +333,12 @@ export const useAppStore = create<AppState>((set) => ({
       record.executionId === executionId ? { ...record, ...updates } : record
     ),
   })),
-  setCurrentExecutionDetail: (detail) => set({ currentExecutionDetail: detail }),
+  setCurrentExecutionDetail: (detail) => set({
+    currentExecutionDetail: detail,
+    // 详情加载完成，关闭加载状态
+    executionDetailLoading: false,
+  }),
+  setExecutionDetailLoading: (loading) => set({ executionDetailLoading: loading }),
 
   // === 工作流库 ===
   workflowList: [],

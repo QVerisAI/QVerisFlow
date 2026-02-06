@@ -55,7 +55,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: string;
-  messageType: 'text' | 'execution_event' | 'workflow_update' | 'error' | 'progress';
+  messageType: 'text' | 'execution_event' | 'workflow_update' | 'error' | 'progress' | 'execution_progress' | 'execution_summary';
   data?: Record<string, unknown>;
 }
 
@@ -434,4 +434,62 @@ export interface AgentSearchItem {
   is_template: boolean;
   created_at: string;
   updated_at: string;
+}
+
+// 执行进度节点结果
+export interface ExecutionNodeResult {
+  nodeId: string;
+  nodeName: string;
+  status: 'completed' | 'failed' | 'running' | 'pending';
+  durationMs?: number;
+  outputPreview?: string;   // 简短输出预览（一行）
+  outputSummary?: string;   // 一句话摘要
+  outputMarkdown?: string;  // 完整输出的 Markdown 格式
+  fullOutput?: unknown;     // 完整输出数据
+  error?: string;           // 错误信息
+  runningStatus?: string;   // 运行中的状态描述（如"正在调用工具 xxx"）
+}
+
+// 执行进度（实时更新）
+export interface ExecutionProgress {
+  type: 'execution_progress';
+  executionId: string;
+  workflowId: string;
+  workflowName?: string;
+  status: 'running' | 'completed' | 'failed';
+  progress: number;         // 0-100
+  nodesCompleted: number;
+  totalNodes: number;
+  currentNode: string | null;
+  startedAt: string;
+  nodeResults: ExecutionNodeResult[];
+}
+
+// 执行摘要（执行完成后）
+export interface ExecutionSummary {
+  type: 'execution_summary';
+  executionId: string;
+  workflowId: string;
+  workflowName?: string;
+  status: 'completed' | 'failed';
+  totalDurationMs: number;
+  nodesCompleted: number;
+  nodesFailed: number;
+  totalNodes: number;
+  startedAt: string;
+  completedAt: string;
+  nodeResults: ExecutionNodeResult[];
+  finalOutput?: unknown;           // 最终输出数据
+  finalOutputMarkdown?: string;    // 最终输出 Markdown 格式
+  error?: string;                  // 失败时的错误信息
+}
+
+// 实时节点输出（用于 NodeDetailPanel）
+export interface RealtimeNodeOutput {
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  outputPreview?: string;
+  outputSummary?: string;
+  fullOutput?: unknown;
+  error?: string;
+  runningStatus?: string;   // 运行中的状态描述（如"正在调用工具 xxx"）
 }

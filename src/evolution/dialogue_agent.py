@@ -512,6 +512,65 @@ class DialogueAgent:
                 },
             },
         },
+        # ========== 执行干预工具 ==========
+        {
+            "type": "function",
+            "function": {
+                "name": "pause_execution",
+                "description": "暂停正在执行的工作流。当用户说'暂停'、'等一下'、'先停一下'、'hold on'、'稍等'等时调用。",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "resume_execution",
+                "description": "恢复已暂停的工作流执行。当用户说'继续'、'恢复'、'接着执行'、'resume'、'go on'等时调用。",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "stop_execution",
+                "description": "停止/取消正在执行的工作流。当用户说'停止'、'终止'、'取消执行'、'不要继续了'、'算了'、'abort'等时调用。",
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "skip_node",
+                "description": "跳过当前或指定的节点。当用户说'跳过'、'跳过这个节点'、'略过XXX'、'这个不用执行'等时调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "node_id": {
+                            "type": "string",
+                            "description": "要跳过的节点 ID 或名称（可选，不指定则跳过当前节点）",
+                        }
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "inject_context",
+                "description": "向正在执行的工作流注入额外上下文信息。当用户想要补充信息、修改参数、提供额外数据时调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "context": {
+                            "type": "object",
+                            "description": "要注入的上下文数据（键值对）",
+                        }
+                    },
+                    "required": ["context"],
+                },
+            },
+        },
     ]
 
     def __init__(
@@ -559,6 +618,12 @@ class DialogueAgent:
             "load_saved_workflow": self._handle_load_saved_workflow,
             "search_agents": self._handle_search_agents,
             "add_saved_agent": self._handle_add_saved_agent,
+            # 执行干预
+            "pause_execution": self._handle_pause_execution,
+            "resume_execution": self._handle_resume_execution,
+            "stop_execution": self._handle_stop_execution,
+            "skip_node": self._handle_skip_node,
+            "inject_context": self._handle_inject_context,
         }
 
     def _default_system_prompt(self) -> str:
@@ -898,6 +963,107 @@ class DialogueAgent:
                 workflow_changed=result.workflow_changed,
                 suggested_actions=self._get_suggested_actions_for_stage(),
             )
+
+        # ========== 执行干预命令 ==========
+
+        # 暂停命令
+        pause_keywords = ["暂停", "等一下", "停一下", "pause", "wait", "hold", "稍等"]
+        if msg in pause_keywords:
+            logger.info(f"直接处理暂停命令: {user_message}")
+            result = await self.ops.pause_execution()
+
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append(
+                {"role": "assistant", "content": result.message}
+            )
+
+            return DialogueResponse(
+                message=result.message,
+                workflow_changed=False,
+                suggested_actions=["继续", "停止"] if result.success else [],
+            )
+
+        # 恢复/继续命令（注意：需要区分执行中的"继续"和非执行中的"继续"）
+        resume_keywords = ["继续", "恢复", "接着", "resume", "continue", "go on"]
+        if msg in resume_keywords:
+            # 检查是否正在执行中（如果是，则恢复执行；否则可能是确认操作）
+            status = self.ops.get_execution_status()
+            if status.get("is_executing") or status.get("is_paused"):
+                logger.info(f"直接处理恢复命令: {user_message}")
+                result = await self.ops.resume_execution()
+
+                self.conversation_history.append(
+                    {"role": "user", "content": user_message}
+                )
+                self.conversation_history.append(
+                    {"role": "assistant", "content": result.message}
+                )
+
+                return DialogueResponse(
+                    message=result.message,
+                    workflow_changed=False,
+                    suggested_actions=["暂停", "停止"] if result.success else [],
+                )
+
+        # 停止命令
+        stop_keywords = ["停止", "终止", "取消", "stop", "cancel", "abort", "算了"]
+        if msg in stop_keywords:
+            # 检查是否正在执行中
+            status = self.ops.get_execution_status()
+            if status.get("is_executing"):
+                logger.info(f"直接处理停止命令: {user_message}")
+                result = await self.ops.stop_execution()
+
+                self.conversation_history.append(
+                    {"role": "user", "content": user_message}
+                )
+                self.conversation_history.append(
+                    {"role": "assistant", "content": result.message}
+                )
+
+                return DialogueResponse(
+                    message=result.message,
+                    workflow_changed=False,
+                )
+
+        # 跳过命令（简单形式）
+        skip_keywords = ["跳过", "略过", "skip", "next"]
+        if msg in skip_keywords:
+            logger.info(f"直接处理跳过命令: {user_message}")
+            result = await self.ops.skip_node()  # 跳过当前节点
+
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append(
+                {"role": "assistant", "content": result.message}
+            )
+
+            return DialogueResponse(
+                message=result.message,
+                workflow_changed=False,
+            )
+
+        # 跳过特定节点命令（模式匹配）
+        skip_patterns = ["跳过", "略过", "skip"]
+        for prefix in skip_patterns:
+            if msg.startswith(prefix) and len(msg) > len(prefix):
+                node_id = msg[len(prefix) :].strip()
+                if node_id:
+                    logger.info(
+                        f"直接处理跳过节点命令: {user_message}, node_id={node_id}"
+                    )
+                    result = await self.ops.skip_node(node_id=node_id)
+
+                    self.conversation_history.append(
+                        {"role": "user", "content": user_message}
+                    )
+                    self.conversation_history.append(
+                        {"role": "assistant", "content": result.message}
+                    )
+
+                    return DialogueResponse(
+                        message=result.message,
+                        workflow_changed=False,
+                    )
 
         # 不是直接命令，返回 None 继续 LLM 处理
         return None
@@ -1754,6 +1920,28 @@ class DialogueAgent:
         return await self.ops.add_saved_agent(
             agent_id=args.get("agent_id", ""),
         )
+
+    # ========== 执行干预处理器 ==========
+
+    async def _handle_pause_execution(self, args: Dict[str, Any]) -> OperationResult:
+        """暂停执行"""
+        return await self.ops.pause_execution()
+
+    async def _handle_resume_execution(self, args: Dict[str, Any]) -> OperationResult:
+        """恢复执行"""
+        return await self.ops.resume_execution()
+
+    async def _handle_stop_execution(self, args: Dict[str, Any]) -> OperationResult:
+        """停止执行"""
+        return await self.ops.stop_execution()
+
+    async def _handle_skip_node(self, args: Dict[str, Any]) -> OperationResult:
+        """跳过节点"""
+        return await self.ops.skip_node(node_id=args.get("node_id"))
+
+    async def _handle_inject_context(self, args: Dict[str, Any]) -> OperationResult:
+        """注入上下文"""
+        return await self.ops.inject_context(context=args.get("context", {}))
 
     def clear_history(self) -> None:
         """清除对话历史"""

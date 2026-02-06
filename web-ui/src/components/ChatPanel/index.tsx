@@ -1,17 +1,27 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Send, Loader2, FolderOpen, Bot, Save } from 'lucide-react';
+import { Send, Loader2, FolderOpen, Bot, Plus } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { MessageBubble } from './MessageBubble';
 import { CheckpointList } from './CheckpointList';
 
 export function ChatPanel() {
-  const { messages, isLoading, suggestedActions, checkpoints, mode } = useAppStore();
+  const {
+    messages,
+    isLoading,
+    suggestedActions,
+    checkpoints,
+    mode,
+    setShowWorkflowListPanel,
+    setShowAgentLibraryPanel,
+  } = useAppStore();
   const { sendMessage, sendAction } = useWebSocket();
   const [input, setInput] = useState('');
+  const [showQuickMenu, setShowQuickMenu] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const quickMenuRef = useRef<HTMLDivElement>(null);
   const lastMessageCountRef = useRef(0);
   const isUserScrollingRef = useRef(false);
 
@@ -57,6 +67,20 @@ export function ChatPanel() {
     container.addEventListener('scroll', handleScroll);
     return () => container.removeEventListener('scroll', handleScroll);
   }, []);
+
+  // 点击外部关闭快捷菜单
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (quickMenuRef.current && !quickMenuRef.current.contains(e.target as Node)) {
+        setShowQuickMenu(false);
+      }
+    };
+
+    if (showQuickMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showQuickMenu]);
 
   // 处理发送
   const handleSend = () => {
@@ -127,17 +151,74 @@ export function ChatPanel() {
         className="flex-1 overflow-y-auto p-4 space-y-4"
       >
         {messages.length === 0 ? (
-          <div className="text-center text-gray-400 mt-8">
-            <p>👋 您好！</p>
-            <p className="text-sm mt-2">描述您想创建的工作流，例如：</p>
-            <p className="text-sm mt-1 text-gray-500">
-              "帮我创建一个分析苹果股票的工作流"
-            </p>
+          <div className="flex flex-col items-center justify-center h-full px-6">
+            {/* 欢迎标题 */}
+            <div className="text-center mb-8">
+              <h3 className="text-xl font-medium text-gray-800">开始构建</h3>
+              <p className="text-sm text-gray-500 mt-1">创建新工作流或从库中选择</p>
+            </div>
+
+            {/* 两个主入口 */}
+            <div className="flex gap-4 mb-8">
+              <button
+                onClick={() => setShowWorkflowListPanel(true)}
+                className="flex flex-col items-center gap-2 p-5 w-32 rounded-xl border border-gray-200 hover:border-primary/50 hover:bg-primary/5 transition-all group"
+              >
+                <FolderOpen className="w-7 h-7 text-gray-400 group-hover:text-primary transition-colors" />
+                <span className="text-sm font-medium text-gray-700 group-hover:text-primary">工作流</span>
+              </button>
+              <button
+                onClick={() => setShowAgentLibraryPanel(true)}
+                className="flex flex-col items-center gap-2 p-5 w-32 rounded-xl border border-gray-200 hover:border-primary/50 hover:bg-primary/5 transition-all group"
+              >
+                <Bot className="w-7 h-7 text-gray-400 group-hover:text-primary transition-colors" />
+                <span className="text-sm font-medium text-gray-700 group-hover:text-primary">Agent 库</span>
+              </button>
+            </div>
+
+            {/* 分隔线 */}
+            <div className="flex items-center gap-3 w-full max-w-xs mb-6">
+              <div className="flex-1 h-px bg-gray-200" />
+              <span className="text-xs text-gray-400">或直接描述需求</span>
+              <div className="flex-1 h-px bg-gray-200" />
+            </div>
+
+            {/* 快速开始示例 */}
+            <div className="space-y-2 w-full max-w-sm">
+              {[
+                '帮我创建一个分析苹果股票的工作流',
+                '构建一个自动化数据处理流程',
+                '设计一个多 Agent 协作的研究助手',
+              ].map((example, i) => (
+                <button
+                  key={i}
+                  onClick={() => sendMessage(example)}
+                  className="w-full text-left px-4 py-2.5 text-sm text-gray-600 rounded-lg hover:bg-gray-100 transition-colors"
+                >
+                  "{example}"
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
-          messages.map((message, index) => (
-            <MessageBubble key={message.id || `fallback_${index}`} message={message} />
-          ))
+          messages
+            // 过滤过期的进度类消息（超过 5 分钟）
+            .filter((message) => {
+              const msgData = message.data as { type?: string } | undefined;
+              // 只过滤进度类消息
+              if (msgData?.type === 'agent_generation_progress') {
+                const msgTime = new Date(message.timestamp).getTime();
+                const now = Date.now();
+                const MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟
+                if (now - msgTime > MAX_AGE_MS) {
+                  return false; // 过滤掉过期的进度消息
+                }
+              }
+              return true;
+            })
+            .map((message, index) => (
+              <MessageBubble key={message.id || `fallback_${index}`} message={message} />
+            ))
         )}
 
         {isLoading && (
@@ -177,44 +258,46 @@ export function ChatPanel() {
         )}
       </div>
 
-      {/* 快捷工具栏 */}
-      <div className="px-4 py-2 border-t bg-slate-50 flex items-center gap-2">
-        <button
-          onClick={() => sendMessage("列出所有工作流")}
-          disabled={isLoading}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:opacity-50"
-          title="浏览工作流库"
-        >
-          <FolderOpen className="w-3.5 h-3.5" />
-          <span>工作流库</span>
-        </button>
-        <button
-          onClick={() => sendMessage("列出所有 Agent")}
-          disabled={isLoading}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:opacity-50"
-          title="浏览 Agent 库"
-        >
-          <Bot className="w-3.5 h-3.5" />
-          <span>Agent 库</span>
-        </button>
-        <button
-          onClick={() => sendMessage("保存当前工作流")}
-          disabled={isLoading || mode === 'idle'}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-slate-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          title="保存当前工作流"
-        >
-          <Save className="w-3.5 h-3.5" />
-          <span>保存</span>
-        </button>
-        <div className="flex-1" />
-        <span className="text-[10px] text-slate-400">
-          通过对话搜索和管理
-        </span>
-      </div>
-
       {/* 输入区域 */}
       <div className="p-4 border-t bg-white">
         <div className="flex items-end gap-2">
+          {/* "+"按钮和快捷菜单 */}
+          <div className="relative" ref={quickMenuRef}>
+            <button
+              onClick={() => setShowQuickMenu(!showQuickMenu)}
+              className="p-2 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+              title="快速访问"
+            >
+              <Plus className="w-5 h-5" />
+            </button>
+
+            {/* 弹出菜单 */}
+            {showQuickMenu && (
+              <div className="absolute bottom-full left-0 mb-2 w-36 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-10">
+                <button
+                  onClick={() => {
+                    setShowWorkflowListPanel(true);
+                    setShowQuickMenu(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors"
+                >
+                  <FolderOpen className="w-4 h-4 text-gray-400" />
+                  工作流库
+                </button>
+                <button
+                  onClick={() => {
+                    setShowAgentLibraryPanel(true);
+                    setShowQuickMenu(false);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors"
+                >
+                  <Bot className="w-4 h-4 text-gray-400" />
+                  Agent 库
+                </button>
+              </div>
+            )}
+          </div>
+
           <textarea
             ref={inputRef}
             value={input}

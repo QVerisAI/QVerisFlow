@@ -97,14 +97,14 @@ class IWorkspace(Protocol):
 
     # ========== 状态管理 ==========
 
-    def save_checkpoint(self, state: Dict[str, Any]) -> str:
-        """保存检查点"""
+    async def save_checkpoint(self, state: Dict[str, Any]) -> str:
+        """保存检查点（异步执行）"""
         ...
 
-    def load_checkpoint(
+    async def load_checkpoint(
         self, checkpoint_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """加载检查点"""
+        """加载检查点（异步执行）"""
         ...
 
     # ========== 文件操作 ==========

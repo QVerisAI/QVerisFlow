@@ -4,7 +4,7 @@ Agent 基类
 封装 LangGraph 图，提供简洁的 API 用于执行 Agent。
 """
 
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Callable, Awaitable
 from datetime import datetime
 
 from .agent_graph import AgentGraphBuilder
@@ -90,6 +90,7 @@ class BaseAgent:
         self,
         task_description: Optional[str] = None,
         input_data: Optional[Dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         运行 Agent
@@ -97,10 +98,14 @@ class BaseAgent:
         Args:
             task_description: 任务描述（可选，可从工作空间读取）
             input_data: 输入数据
+            progress_callback: 进度回调函数，用于发送执行中间状态（如工具调用信息）
 
         Returns:
             执行结果
         """
+        # 设置进度回调（供 graph_builder 中的工具执行使用）
+        self.graph_builder.progress_callback = progress_callback
+
         # 获取追踪器和指标收集器
         tracer = get_tracer()
         metrics = get_metrics_collector()

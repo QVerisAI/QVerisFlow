@@ -1,14 +1,96 @@
 import { useEffect, useCallback, useState, useRef } from 'react';
 import { wsService } from '../services/websocket';
 import { useAppStore } from '../stores/appStore';
-import { WSMessageType, type Message, type WorkflowState, type GenerationProgressEvent, type ExecutionRecord } from '../types';
+import { WSMessageType, type Message, type WorkflowState, type GenerationProgressEvent, type ExecutionRecord, type ExecutionProgress, type ExecutionSummary, type ExecutionNodeResult } from '../types';
+import { generateOutputSummary, formatOutputToMarkdown } from '../utils/outputFormatter';
+
+/**
+ * 拓扑排序函数：按执行顺序排列节点，同层级按字母排序
+ * @param nodes 节点列表，包含 nodeId 和 name
+ * @param edges 边列表，包含 source 和 target
+ * @returns 按执行顺序排序的节点 ID 数组
+ */
+function topologicalSort(
+  nodes: Array<{ nodeId: string; name: string }>,
+  edges: Array<{ source: string; target: string }>
+): string[] {
+  // 构建入度和邻接表
+  const inDegree: Record<string, number> = {};
+  const outEdges: Record<string, string[]> = {};
+  const nodeNameMap: Record<string, string> = {};
+
+  nodes.forEach(n => {
+    inDegree[n.nodeId] = 0;
+    outEdges[n.nodeId] = [];
+    nodeNameMap[n.nodeId] = n.name;
+  });
+
+  edges.forEach(e => {
+    if (inDegree[e.target] !== undefined) {
+      inDegree[e.target]++;
+    }
+    if (outEdges[e.source]) {
+      outEdges[e.source].push(e.target);
+    }
+  });
+
+  // BFS 分层拓扑排序
+  const result: string[] = [];
+  // 获取入度为 0 的节点作为起始层，按名称字母排序
+  let currentLayer = nodes
+    .filter(n => inDegree[n.nodeId] === 0)
+    .map(n => n.nodeId)
+    .sort((a, b) => (nodeNameMap[a] || '').localeCompare(nodeNameMap[b] || ''));
+
+  while (currentLayer.length > 0) {
+    result.push(...currentLayer);
+    const nextLayer: string[] = [];
+
+    currentLayer.forEach(id => {
+      outEdges[id]?.forEach(targetId => {
+        inDegree[targetId]--;
+        if (inDegree[targetId] === 0) {
+          nextLayer.push(targetId);
+        }
+      });
+    });
+
+    // 同层节点按名称字母排序
+    currentLayer = nextLayer.sort((a, b) =>
+      (nodeNameMap[a] || '').localeCompare(nodeNameMap[b] || '')
+    );
+  }
+
+  return result;
+}
+
+/**
+ * 事件序列号追踪器
+ * 用于检测事件丢失，每个工作流独立追踪
+ */
+interface EventSequenceTracker {
+  workflowId: string;
+  lastSequence: number;
+  missedEvents: number;
+}
 
 export function useWebSocket() {
   const [isConnected, setIsConnected] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const currentExecutionRef = useRef<ExecutionRecord | null>(null);
+  // 跟踪当前执行进度消息的状态
+  const executionProgressRef = useRef<{
+    messageId: string;
+    progress: ExecutionProgress;
+    nodeResults: Map<string, ExecutionNodeResult>;
+  } | null>(null);
+  // 事件序列号追踪（用于检测事件丢失）
+  const eventSequenceRef = useRef<EventSequenceTracker | null>(null);
   const {
     addMessage,
     updateOrAddProgressMessage,
+    updateMessageById,
     setWorkflowState,
     setHighlightedNodes,
     setSuggestedActions,
@@ -23,7 +105,29 @@ export function useWebSocket() {
     setWorkflowNodeIdMap,
     setExecutionHistory,
     setCurrentWorkflowMeta,
+    updateRealtimeNodeOutput,
+    clearRealtimeNodeOutputs,
   } = useAppStore();
+
+  // 注册 Socket.IO 连接状态回调
+  useEffect(() => {
+    // 连接状态变化回调
+    wsService.setConnectionChangeCallback((connected) => {
+      setIsConnected(connected);
+    });
+
+    // 重连状态变化回调
+    wsService.setReconnectingCallback((reconnecting, attempt) => {
+      setIsReconnecting(reconnecting);
+      setReconnectAttempt(attempt);
+    });
+
+    return () => {
+      // 清理回调
+      wsService.setConnectionChangeCallback(() => { });
+      wsService.setReconnectingCallback(() => { });
+    };
+  }, []);
 
   // 连接
   const connect = useCallback(async (sessionId: string) => {
@@ -61,6 +165,29 @@ export function useWebSocket() {
     wsService.sendUserAction(action, params);
   }, []);
 
+  // 智能保存：已有名称直接保存，否则弹出对话框
+  const smartSave = useCallback(() => {
+    const { currentWorkflowMeta, workflowState, setShowSaveWorkflowDialog } = useAppStore.getState();
+
+    // 检查是否有工作流可保存
+    if (!workflowState?.nodes?.length) {
+      console.log('没有工作流可保存');
+      return;
+    }
+
+    if (currentWorkflowMeta?.name) {
+      // 已有名称，直接保存
+      wsService.send(WSMessageType.SAVE_WORKFLOW, {
+        name: currentWorkflowMeta.name,
+        description: currentWorkflowMeta.description || '',
+        tags: [],
+      });
+    } else {
+      // 首次保存，弹出对话框
+      setShowSaveWorkflowDialog(true);
+    }
+  }, []);
+
   // 设置消息处理器（使用 handlerId 防止重复注册）
   useEffect(() => {
     // 连接成功
@@ -74,6 +201,9 @@ export function useWebSocket() {
       };
 
       console.log('Connected:', payload);
+
+      // 确保连接状态同步
+      setIsConnected(true);
 
       // 获取当前前端消息数量
       const currentMessages = useAppStore.getState().messages;
@@ -117,6 +247,15 @@ export function useWebSocket() {
 
       // 如果是进度消息，使用更新逻辑（同一个 agent 只保留一条卡片）
       if (payload.data?.type === 'agent_generation_progress') {
+        // 过滤过期的进度消息（超过 5 分钟）
+        const msgTime = new Date(msg.timestamp).getTime();
+        const now = Date.now();
+        const MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟
+        if (now - msgTime > MAX_AGE_MS) {
+          console.log('[WS] 忽略过期的进度消息:', msg.timestamp);
+          return;
+        }
+
         const agentName = (payload.data as { agent_name?: string }).agent_name;
         if (agentName) {
           updateOrAddProgressMessage(agentName, message);
@@ -235,6 +374,15 @@ export function useWebSocket() {
 
     // 执行事件
     const unsubExecution = wsService.on(WSMessageType.EXECUTION_EVENT, (msg) => {
+      // 过滤过期的执行事件（超过 5 分钟）
+      const msgTime = new Date(msg.timestamp).getTime();
+      const now = Date.now();
+      const MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟
+      if (now - msgTime > MAX_AGE_MS) {
+        console.log('[WS] 忽略过期的执行事件:', msg.timestamp);
+        return;
+      }
+
       const event = msg.payload as {
         event_type: string;
         workflow_id?: string;
@@ -248,8 +396,48 @@ export function useWebSocket() {
         total_duration_ms?: number;
         error?: string;
         status?: string;
-        data?: Record<string, unknown>
+        data?: Record<string, unknown>;
+        // 事件追踪字段（新增）
+        event_id?: string;
+        sequence?: number;
       };
+
+      // === 事件序列号检测（检测事件丢失）===
+      const workflowId = event.workflow_id || 'unknown';
+      const sequence = event.sequence;
+      const eventId = event.event_id;
+
+      if (sequence !== undefined) {
+        const tracker = eventSequenceRef.current;
+
+        // 重置追踪器（新工作流或 workflow_started 事件）
+        if (event.event_type === 'workflow_started' || tracker?.workflowId !== workflowId) {
+          eventSequenceRef.current = {
+            workflowId,
+            lastSequence: sequence,
+            missedEvents: 0,
+          };
+          console.debug(`[事件追踪] 开始追踪 workflow=${workflowId}, seq=${sequence}`);
+        } else if (tracker) {
+          // 检测序列号跳跃
+          const expectedSeq = tracker.lastSequence + 1;
+          if (sequence > expectedSeq) {
+            const missed = sequence - expectedSeq;
+            tracker.missedEvents += missed;
+            console.warn(
+              `[事件追踪] 检测到事件丢失! workflow=${workflowId}, ` +
+              `expected=${expectedSeq}, got=${sequence}, missed=${missed}, ` +
+              `total_missed=${tracker.missedEvents}`
+            );
+          }
+          tracker.lastSequence = sequence;
+        }
+
+        console.debug(
+          `[事件接收] type=${event.event_type}, node=${event.node_id || ''}, ` +
+          `seq=${sequence}, event_id=${eventId || ''}`
+        );
+      }
 
       // 获取最新的 workflowNodeIdMap（用于将后端 node_id 映射到前端 nodeId）
       const currentNodeIdMap = useAppStore.getState().workflowNodeIdMap;
@@ -290,11 +478,14 @@ export function useWebSocket() {
 
       // === 处理工作流级别的执行事件 ===
 
-      // 执行开始：创建新的执行记录
+      // 执行开始：创建新的执行记录和进度消息
       if (event.event_type === 'execution_started' || event.event_type === 'workflow_started') {
         const totalNodes = (event.data?.total_nodes as number) || event.total_nodes || 0;
+        const executionId = event.workflow_id || `exec_${Date.now()}`;
+        const workflowName = (event.data?.workflow_name as string) || '';
+
         const newRecord: ExecutionRecord = {
-          executionId: event.workflow_id || `exec_${Date.now()}`,
+          executionId,
           workflowId: event.workflow_id || '',
           status: 'running',
           startedAt: new Date().toISOString(),
@@ -304,9 +495,71 @@ export function useWebSocket() {
         };
         currentExecutionRef.current = newRecord;
         addExecutionRecord(newRecord);
+
+        // 清除旧的实时节点输出
+        clearRealtimeNodeOutputs();
+
+        // 获取当前工作流节点列表，按执行顺序初始化节点结果
+        const workflowState = useAppStore.getState().workflowState;
+        const nodeResults: Map<string, ExecutionNodeResult> = new Map();
+
+        if (workflowState?.nodes) {
+          // 使用拓扑排序获取执行顺序
+          const sortedNodeIds = topologicalSort(
+            workflowState.nodes.map(n => ({ nodeId: n.nodeId, name: n.name })),
+            workflowState.edges || []
+          );
+
+          // 按排序后的顺序初始化节点结果
+          sortedNodeIds.forEach(nodeId => {
+            const node = workflowState.nodes?.find(n => n.nodeId === nodeId);
+            if (node) {
+              nodeResults.set(node.nodeId, {
+                nodeId: node.nodeId,
+                nodeName: node.displayName || node.name,
+                status: 'pending',
+              });
+            }
+          });
+        }
+
+        // 创建执行进度消息
+        const progressMessageId = `exec_progress_${executionId}`;
+        const initialProgress: ExecutionProgress = {
+          type: 'execution_progress',
+          executionId,
+          workflowId: event.workflow_id || '',
+          workflowName,
+          status: 'running',
+          progress: 0,
+          nodesCompleted: 0,
+          totalNodes,
+          currentNode: null,
+          startedAt: new Date().toISOString(),
+          nodeResults: Array.from(nodeResults.values()),
+        };
+
+        executionProgressRef.current = {
+          messageId: progressMessageId,
+          progress: initialProgress,
+          nodeResults,
+        };
+
+        // 添加进度消息到聊天区
+        addMessage({
+          id: progressMessageId,
+          role: 'assistant',
+          content: '工作流开始执行...',
+          timestamp: new Date().toISOString(),
+          messageType: 'execution_progress',
+          data: initialProgress as unknown as Record<string, unknown>,
+        });
+
+        // 重置 isLoading 状态，允许用户在执行过程中输入干预指令（暂停/跳过/停止）
+        setIsLoading(false);
       }
 
-      // 执行完成：更新执行记录
+      // 执行完成：更新执行记录，并将进度消息转换为摘要消息
       if (event.event_type === 'execution_completed' || event.event_type === 'workflow_completed') {
         const executionId = currentExecutionRef.current?.executionId || event.workflow_id;
         if (executionId) {
@@ -319,13 +572,50 @@ export function useWebSocket() {
             eventStatus === 'success' ||
             (event.event_type === 'workflow_completed' && eventStatus !== 'failed');
 
+          const completedAt = new Date().toISOString();
+          const totalDurationMs = event.total_duration_ms || (event.data?.total_duration_ms as number) || 0;
+          const nodesCompleted = event.nodes_completed || (event.data?.nodes_completed as number) || 0;
+          const nodesFailed = event.nodes_failed || (event.data?.nodes_failed as number) || 0;
+
           updateExecutionRecord(executionId, {
             status: isSuccess ? 'success' : 'failed',
-            completedAt: new Date().toISOString(),
-            totalDurationMs: event.total_duration_ms || (event.data?.total_duration_ms as number),
-            nodesCompleted: event.nodes_completed || (event.data?.nodes_completed as number) || 0,
-            nodesFailed: event.nodes_failed || (event.data?.nodes_failed as number) || 0,
+            completedAt,
+            totalDurationMs,
+            nodesCompleted,
+            nodesFailed,
           });
+
+          // 将进度消息转换为摘要消息
+          if (executionProgressRef.current) {
+            const { messageId, progress, nodeResults } = executionProgressRef.current;
+            const finalOutput = event.data?.final_output || event.data?.result;
+
+            const summary: ExecutionSummary = {
+              type: 'execution_summary',
+              executionId,
+              workflowId: progress.workflowId,
+              workflowName: progress.workflowName,
+              status: isSuccess ? 'completed' : 'failed',
+              totalDurationMs,
+              nodesCompleted,
+              nodesFailed,
+              totalNodes: progress.totalNodes,
+              startedAt: progress.startedAt,
+              completedAt,
+              nodeResults: Array.from(nodeResults.values()),
+              finalOutput,
+              finalOutputMarkdown: finalOutput ? formatOutputToMarkdown(finalOutput) : undefined,
+            };
+
+            // 更新消息为摘要类型
+            updateMessageById(messageId, {
+              content: isSuccess ? '工作流执行完成' : '工作流执行失败',
+              messageType: 'execution_summary',
+              data: summary as unknown as Record<string, unknown>,
+            });
+
+            executionProgressRef.current = null;
+          }
         }
         currentExecutionRef.current = null;
       }
@@ -334,10 +624,42 @@ export function useWebSocket() {
       if (event.event_type === 'execution_failed' || event.event_type === 'workflow_failed') {
         const executionId = currentExecutionRef.current?.executionId || event.workflow_id;
         if (executionId) {
+          const completedAt = new Date().toISOString();
+          const errorMsg = event.error || (event.data?.error as string) || '执行失败';
+
           updateExecutionRecord(executionId, {
             status: 'failed',
-            completedAt: new Date().toISOString(),
+            completedAt,
           });
+
+          // 将进度消息转换为失败摘要
+          if (executionProgressRef.current) {
+            const { messageId, progress, nodeResults } = executionProgressRef.current;
+
+            const summary: ExecutionSummary = {
+              type: 'execution_summary',
+              executionId,
+              workflowId: progress.workflowId,
+              workflowName: progress.workflowName,
+              status: 'failed',
+              totalDurationMs: 0,
+              nodesCompleted: progress.nodesCompleted,
+              nodesFailed: 1,
+              totalNodes: progress.totalNodes,
+              startedAt: progress.startedAt,
+              completedAt,
+              nodeResults: Array.from(nodeResults.values()),
+              error: errorMsg,
+            };
+
+            updateMessageById(messageId, {
+              content: '工作流执行失败',
+              messageType: 'execution_summary',
+              data: summary as unknown as Record<string, unknown>,
+            });
+
+            executionProgressRef.current = null;
+          }
         }
         currentExecutionRef.current = null;
       }
@@ -346,14 +668,14 @@ export function useWebSocket() {
 
       // 更新节点状态
       if (frontendNodeId) {
-        let status = 'pending';
-        if (event.event_type === 'node_started') status = 'running';
-        else if (event.event_type === 'node_completed') status = 'completed';
-        else if (event.event_type === 'node_failed') status = 'failed';
-        else if (event.event_type === 'node_skipped') status = 'skipped';
+        let nodeStatus: 'pending' | 'running' | 'completed' | 'failed' = 'pending';
+        if (event.event_type === 'node_started') nodeStatus = 'running';
+        else if (event.event_type === 'node_completed') nodeStatus = 'completed';
+        else if (event.event_type === 'node_failed') nodeStatus = 'failed';
+        else if (event.event_type === 'node_skipped') nodeStatus = 'completed';
 
         updateNodeState(frontendNodeId, {
-          status,
+          status: nodeStatus,
           duration: (event.data?.duration_ms as number) || (event.duration_ms as number) || undefined,
         });
 
@@ -364,22 +686,182 @@ export function useWebSocket() {
             totalNodes: (event.data?.total_nodes as number) || event.total_nodes || 0,
             currentNode: frontendNodeId,
           });
+
+          // 更新实时节点输出状态
+          updateRealtimeNodeOutput(frontendNodeId, {
+            status: 'running',
+          });
+
+          // 更新进度消息中的节点状态
+          if (executionProgressRef.current) {
+            const { messageId, progress, nodeResults } = executionProgressRef.current;
+            const nodeName = event.node_name || event.node_id || frontendNodeId;
+
+            nodeResults.set(frontendNodeId, {
+              nodeId: frontendNodeId,
+              nodeName,
+              status: 'running',
+            });
+
+            const newProgress: ExecutionProgress = {
+              ...progress,
+              currentNode: nodeName,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+
+            executionProgressRef.current.progress = newProgress;
+
+            updateMessageById(messageId, {
+              data: newProgress as unknown as Record<string, unknown>,
+            });
+          }
         }
 
-        // 节点完成时更新当前执行记录的进度
+        // 节点完成时更新当前执行记录的进度和进度消息
         if (event.event_type === 'node_completed' && currentExecutionRef.current) {
           const completed = (event.data?.nodes_completed as number) || event.nodes_completed ||
             (currentExecutionRef.current.nodesCompleted + 1);
+          const totalNodes = (event.data?.total_nodes as number) || event.total_nodes ||
+            currentExecutionRef.current.nodesTotal;
+
+          // 同步更新 ref 中的 nodesCompleted（确保下一次节点完成时计算正确）
+          currentExecutionRef.current.nodesCompleted = completed;
+
           updateExecutionRecord(currentExecutionRef.current.executionId, {
             nodesCompleted: completed,
           });
+
+          // 提取输出信息
+          const output = event.data?.output || event.data?.result;
+          const outputPreview = event.data?.output_preview as string | undefined;
+          const outputSummary = event.data?.output_summary as string | undefined;
+          const durationMs = (event.data?.duration_ms as number) || event.duration_ms;
+
+          // 更新实时节点输出
+          updateRealtimeNodeOutput(frontendNodeId, {
+            status: 'completed',
+            outputPreview: outputSummary || outputPreview || (output ? generateOutputSummary(output) : undefined),
+            outputSummary: outputSummary || (output ? generateOutputSummary(output) : undefined),
+            fullOutput: output,
+          });
+
+          // 更新进度消息
+          if (executionProgressRef.current) {
+            const { messageId, progress, nodeResults } = executionProgressRef.current;
+            const nodeName = event.node_name || event.node_id || frontendNodeId;
+
+            nodeResults.set(frontendNodeId, {
+              nodeId: frontendNodeId,
+              nodeName,
+              status: 'completed',
+              durationMs,
+              outputPreview: outputSummary || outputPreview,
+              outputSummary: outputSummary || (output ? generateOutputSummary(output) : undefined),
+              outputMarkdown: output ? formatOutputToMarkdown(output) : undefined,
+              fullOutput: output,
+            });
+
+            const progressPercent = Math.round((completed / totalNodes) * 100);
+            const newProgress: ExecutionProgress = {
+              ...progress,
+              progress: progressPercent,
+              nodesCompleted: completed,
+              currentNode: null,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+
+            executionProgressRef.current.progress = newProgress;
+
+            updateMessageById(messageId, {
+              content: `工作流执行中... (${completed}/${totalNodes})`,
+              data: newProgress as unknown as Record<string, unknown>,
+            });
+          }
         }
 
         // 节点失败时更新失败计数
         if (event.event_type === 'node_failed' && currentExecutionRef.current) {
+          // 同步更新 ref 中的 nodesFailed（确保连续失败时计算正确）
+          currentExecutionRef.current.nodesFailed = currentExecutionRef.current.nodesFailed + 1;
+
           updateExecutionRecord(currentExecutionRef.current.executionId, {
-            nodesFailed: currentExecutionRef.current.nodesFailed + 1,
+            nodesFailed: currentExecutionRef.current.nodesFailed,
           });
+
+          const errorMsg = event.error || (event.data?.error as string) || '执行失败';
+
+          // 更新实时节点输出
+          updateRealtimeNodeOutput(frontendNodeId, {
+            status: 'failed',
+            error: errorMsg,
+          });
+
+          // 更新进度消息
+          if (executionProgressRef.current) {
+            const { messageId, progress, nodeResults } = executionProgressRef.current;
+            const nodeName = event.node_name || event.node_id || frontendNodeId;
+
+            nodeResults.set(frontendNodeId, {
+              nodeId: frontendNodeId,
+              nodeName,
+              status: 'failed',
+              error: errorMsg,
+            });
+
+            const newProgress: ExecutionProgress = {
+              ...progress,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+
+            executionProgressRef.current.progress = newProgress;
+
+            updateMessageById(messageId, {
+              data: newProgress as unknown as Record<string, unknown>,
+            });
+          }
+        }
+
+        // 处理节点进度事件（工具调用等中间状态）
+        if (event.event_type === 'node_progress') {
+          const status = event.status as string || event.data?.status as string || '';
+
+          // 更新实时节点输出的运行状态
+          updateRealtimeNodeOutput(frontendNodeId, {
+            status: 'running',
+            runningStatus: status,
+          });
+
+          // 更新进度消息中的节点状态
+          if (executionProgressRef.current) {
+            const { messageId, progress, nodeResults } = executionProgressRef.current;
+            const existingNode = nodeResults.get(frontendNodeId);
+
+            if (existingNode) {
+              nodeResults.set(frontendNodeId, {
+                ...existingNode,
+                runningStatus: status,
+              });
+            } else {
+              const nodeName = event.node_name || event.node_id || frontendNodeId;
+              nodeResults.set(frontendNodeId, {
+                nodeId: frontendNodeId,
+                nodeName,
+                status: 'running',
+                runningStatus: status,
+              });
+            }
+
+            const newProgress: ExecutionProgress = {
+              ...progress,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+
+            executionProgressRef.current.progress = newProgress;
+
+            updateMessageById(messageId, {
+              data: newProgress as unknown as Record<string, unknown>,
+            });
+          }
         }
       }
 
@@ -393,42 +875,26 @@ export function useWebSocket() {
           currentNode: resolveNodeId(event.node_id),
         });
 
-        // 同步更新执行记录
+        // 同步更新执行记录和 ref
         if (currentExecutionRef.current) {
+          currentExecutionRef.current.nodesCompleted = completed;
           updateExecutionRecord(currentExecutionRef.current.executionId, {
             nodesCompleted: completed,
           });
         }
       }
 
-      // 添加执行消息（过滤重复的 - 后端已通过 on_message 发送了格式化消息）
-      // 这里只处理节点级别的事件作为备份
-      if (['node_started', 'node_completed', 'node_failed', 'tool_call'].includes(event.event_type)) {
-        let content = '';
-        switch (event.event_type) {
-          case 'node_started':
-            content = `📊 [${event.node_name || event.node_id}] 开始执行...`;
-            break;
-          case 'node_completed':
-            content = `✅ [${event.node_name || event.node_id}] 完成! (${((event.data?.duration_ms as number || event.duration_ms || 0) / 1000).toFixed(1)}s)`;
-            break;
-          case 'node_failed':
-            content = `❌ [${event.node_name || event.node_id}] 失败: ${event.data?.error || event.error}`;
-            break;
-          case 'tool_call':
-            content = `   → 调用工具: ${event.data?.tool_id}`;
-            break;
-        }
-
-        if (content) {
-          addMessage({
-            role: 'system',
-            content,
-            timestamp: msg.timestamp,
-            messageType: 'execution_event',
-            data: event.data,
-          });
-        }
+      // 注意：不再为每个节点事件添加单独的消息
+      // 现在使用统一的进度卡片（ExecutionProgressCard）来展示所有节点状态
+      // 只保留工具调用事件作为补充信息
+      if (event.event_type === 'tool_call') {
+        addMessage({
+          role: 'system',
+          content: `   → 调用工具: ${event.data?.tool_id}`,
+          timestamp: msg.timestamp,
+          messageType: 'execution_event',
+          data: event.data,
+        });
       }
     }, 'hook_execution');
 
@@ -479,6 +945,15 @@ export function useWebSocket() {
 
     // Agent 生成进度
     const unsubGenerationProgress = wsService.on(WSMessageType.AGENT_GENERATION_PROGRESS, (msg) => {
+      // 过滤过期的进度消息（超过 5 分钟）
+      const msgTime = new Date(msg.timestamp).getTime();
+      const now = Date.now();
+      const MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟
+      if (now - msgTime > MAX_AGE_MS) {
+        console.log('[WS] 忽略过期的 Agent 生成进度:', msg.timestamp);
+        return;
+      }
+
       const payload = msg.payload as unknown as GenerationProgressEvent;
       setGenerationProgress({
         current: payload.current,
@@ -517,10 +992,18 @@ export function useWebSocket() {
       useAppStore.getState().setExecutionHistory(payload.history || []);
     }, 'hook_execution_history');
 
-    // 执行详情响应
+    // 执行详情响应 - 【关键修复】检查 executionId 匹配，避免响应顺序不一致导致的状态错乱
     const unsubExecutionDetail = wsService.on(WSMessageType.EXECUTION_DETAIL, (msg) => {
       const payload = msg.payload as { executionId: string; detail: ExecutionRecord };
-      useAppStore.getState().setCurrentExecutionDetail(payload.detail || null);
+      const state = useAppStore.getState();
+
+      // 只有当响应的 executionId 与当前选中的执行 ID 匹配时才更新状态
+      // 这避免了快速切换执行记录时，旧请求的响应覆盖新数据的问题
+      if (state.selectedExecutionId === payload.executionId) {
+        state.setCurrentExecutionDetail(payload.detail || null);
+      } else {
+        console.log(`[ExecutionDetail] 忽略过期响应: 期望=${state.selectedExecutionId}, 收到=${payload.executionId}`);
+      }
     }, 'hook_execution_detail');
 
     // 心跳响应
@@ -719,9 +1202,12 @@ export function useWebSocket() {
 
   return {
     isConnected,
+    isReconnecting,
+    reconnectAttempt,
     connect,
     disconnect,
     sendMessage,
     sendAction,
+    smartSave,
   };
 }

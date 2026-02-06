@@ -64,6 +64,24 @@ async def file_ls(path: str = "", _context: Dict = None) -> List[str]:
     """
     workspace = _context.get("workspace") if _context else None
 
+    # 检查路径是否是绝对路径或包含完整的 workspace 路径
+    # 这种情况下应该直接使用该路径，而不是与当前 workspace 拼接
+    if path:
+        path_obj = Path(path)
+        is_absolute_or_full_path = (
+            path_obj.is_absolute()
+            or path.startswith("workspaces/")
+            or "/workspaces/" in path
+            or "/executions/" in path
+        )
+        if is_absolute_or_full_path:
+            target = path_obj
+            if not target.exists():
+                return []
+            if not target.is_dir():
+                return [target.name]  # 如果是文件，返回文件名
+            return sorted([f.name for f in target.iterdir()])
+
     if workspace and hasattr(workspace, "ls"):
         return workspace.ls(path)
 
@@ -129,6 +147,33 @@ async def file_read(
         文件内容
     """
     workspace = _context.get("workspace") if _context else None
+
+    # 检查路径是否是绝对路径或包含完整的 workspace 路径
+    # 这种情况下应该直接使用该路径，而不是与当前 workspace 拼接
+    path_obj = Path(path)
+    is_absolute_or_full_path = (
+        path_obj.is_absolute()
+        or path.startswith("workspaces/")
+        or "/workspaces/" in path
+        or "/executions/" in path
+    )
+
+    # 如果是绝对路径或完整路径，直接读取
+    if is_absolute_or_full_path:
+        file_path = path_obj
+        if not file_path.exists():
+            raise FileNotFoundError(f"文件不存在: {path}。请检查路径是否正确。")
+        if file_path.is_dir():
+            raise IsADirectoryError(
+                f"'{path}' 是一个目录，不能用 file_read 读取。请使用 file_ls 来列出目录内容。"
+            )
+        content = file_path.read_text(encoding="utf-8")
+        if start_line is not None or end_line is not None:
+            lines = content.split("\n")
+            start = (start_line - 1) if start_line else 0
+            end = end_line if end_line else len(lines)
+            return "\n".join(lines[start:end])
+        return content
 
     # 检查是否尝试读取目录
     if workspace:

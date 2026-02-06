@@ -923,6 +923,294 @@ class UnifiedLLMClient:
                     logger.error(f"❌ LLM 调用出现未知错误: {e}")
                     raise
 
+    async def call_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        tool_choice: str = "auto",
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """
+        带工具调用支持的 LLM 调用接口
+
+        使用 OpenAI 原生 Function Calling API 实现可靠的工具调用。
+
+        Args:
+            messages: 消息列表
+            tools: 工具定义列表（OpenAI function 格式）
+            temperature: 温度参数（可选）
+            max_tokens: 最大 token 数（可选）
+            tool_choice: 工具选择策略 ("auto", "none", "required", 或具体工具名)
+            **kwargs: 其他参数
+
+        Returns:
+            包含 content 和 tool_calls 的字典
+        """
+        # 使用传入参数或实例默认值
+        temp = temperature if temperature is not None else self.temperature
+        max_tok = max_tokens if max_tokens is not None else self.max_tokens
+
+        # 根据模型调整参数
+        temp, max_tok = self._adjust_params_for_model(temp, max_tok)
+
+        # 重试循环
+        for attempt in range(self.max_retries):
+            try:
+                logger.debug(f"🔧 LLM 工具调用尝试 {attempt + 1}/{self.max_retries}")
+
+                if self.client_type == "async_openai":
+                    response = await self._call_async_openai_with_tools(
+                        messages=messages,
+                        tools=tools,
+                        temperature=temp,
+                        max_tokens=max_tok,
+                        tool_choice=tool_choice,
+                        **kwargs,
+                    )
+                elif self.client_type == "langchain":
+                    # LangChain 也支持工具调用
+                    response = await self._call_langchain_with_tools(
+                        messages=messages,
+                        tools=tools,
+                        temperature=temp,
+                        max_tokens=max_tok,
+                        **kwargs,
+                    )
+                else:
+                    # 对于不支持原生工具调用的客户端，回退到嵌入式提示
+                    logger.warning(
+                        f"客户端类型 {self.client_type} 不支持原生工具调用，使用提示词方式"
+                    )
+                    return await self._call_with_embedded_tools(
+                        messages=messages,
+                        tools=tools,
+                        temperature=temp,
+                        max_tokens=max_tok,
+                        **kwargs,
+                    )
+
+                # 解析响应
+                result = self._parse_tool_response(response)
+
+                # 记录 token 使用量
+                if self.enable_token_tracking and hasattr(response, "usage"):
+                    self._record_token_usage(response.usage)
+
+                return result
+
+            except (APIConnectionError, APITimeoutError, RateLimitError) as e:
+                if attempt < self.max_retries - 1:
+                    delay = self.retry_base_delay * (2**attempt)
+                    logger.warning(
+                        f"⚠️ 工具调用失败 (尝试 {attempt + 1}/{self.max_retries}): {e}"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"❌ 工具调用最终失败: {e}")
+                    raise
+            except Exception as e:
+                logger.error(f"❌ 工具调用出现错误: {e}")
+                raise
+
+    async def _call_async_openai_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        tool_choice: str = "auto",
+        **kwargs,
+    ) -> Any:
+        """使用 AsyncOpenAI 进行工具调用"""
+        call_kwargs = {
+            "model": self.model_name,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            **kwargs,
+        }
+
+        return await self._async_openai_client.chat.completions.create(**call_kwargs)
+
+    async def _call_langchain_with_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        **kwargs,
+    ) -> Any:
+        """使用 LangChain 进行工具调用"""
+        from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+
+        # 转换消息格式
+        langchain_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                langchain_messages.append(SystemMessage(content=msg["content"]))
+            elif msg["role"] == "user":
+                langchain_messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                langchain_messages.append(AIMessage(content=msg["content"]))
+
+        # 绑定工具到模型
+        model_with_tools = self._langchain_client.bind_tools(tools)
+
+        return await model_with_tools.ainvoke(
+            langchain_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
+
+    async def _call_with_embedded_tools(
+        self,
+        messages: List[Dict[str, str]],
+        tools: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """使用嵌入式提示词进行工具调用（回退方案）"""
+        # 构建工具提示
+        tool_descriptions = []
+        for tool in tools:
+            func = tool.get("function", tool)
+            name = func.get("name", "unknown")
+            desc = func.get("description", "")
+            params = func.get("parameters", {}).get("properties", {})
+            param_desc = ", ".join(
+                [f"{k}: {v.get('description', '')}" for k, v in params.items()]
+            )
+            tool_descriptions.append(f"- {name}: {desc}\n  参数: {param_desc or '无'}")
+
+        tool_prompt = f"""## 可用工具
+当需要执行操作时，使用以下 JSON 格式调用工具：
+<tool_call>
+{{"name": "工具名称", "arguments": {{"参数名": "参数值"}}}}
+</tool_call>
+
+可用工具：
+{chr(10).join(tool_descriptions)}
+"""
+
+        # 增强系统消息
+        enhanced_messages = messages.copy()
+        if enhanced_messages and enhanced_messages[0]["role"] == "system":
+            enhanced_messages[0] = {
+                "role": "system",
+                "content": enhanced_messages[0]["content"] + "\n\n" + tool_prompt,
+            }
+        else:
+            enhanced_messages.insert(0, {"role": "system", "content": tool_prompt})
+
+        # 调用 LLM
+        response = await self.call(
+            messages=enhanced_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            **kwargs,
+        )
+
+        # 解析响应中的工具调用
+        content = ""
+        if hasattr(response, "content"):
+            content = response.content
+        elif hasattr(response, "choices") and response.choices:
+            content = response.choices[0].message.content
+
+        # 解析 <tool_call> 标签
+        tool_calls = self._parse_embedded_tool_calls(content)
+
+        return {
+            "content": content,
+            "tool_calls": tool_calls if tool_calls else None,
+        }
+
+    def _parse_embedded_tool_calls(self, content: str) -> List[Dict]:
+        """解析嵌入式工具调用"""
+        import re
+
+        tool_calls = []
+
+        # 匹配 <tool_call>...</tool_call> 标签
+        pattern = r"<tool_call>\s*(\{.*?\})\s*</tool_call>"
+        matches = re.findall(pattern, content, re.DOTALL)
+
+        for i, match in enumerate(matches):
+            try:
+                data = json.loads(match)
+                if "name" in data:
+                    tool_calls.append(
+                        {
+                            "id": f"call_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": data["name"],
+                                "arguments": json.dumps(
+                                    data.get("arguments", {}), ensure_ascii=False
+                                ),
+                            },
+                        }
+                    )
+            except json.JSONDecodeError:
+                logger.warning(f"无法解析嵌入式工具调用: {match[:100]}...")
+
+        return tool_calls
+
+    def _parse_tool_response(self, response: Any) -> Dict[str, Any]:
+        """解析工具调用响应"""
+        content = ""
+        tool_calls = None
+
+        # AsyncOpenAI 响应格式
+        if hasattr(response, "choices") and response.choices:
+            message = response.choices[0].message
+            content = message.content or ""
+
+            if hasattr(message, "tool_calls") and message.tool_calls:
+                tool_calls = []
+                for tc in message.tool_calls:
+                    tool_calls.append(
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                    )
+
+        # LangChain 响应格式
+        elif hasattr(response, "content"):
+            content = response.content or ""
+
+            if hasattr(response, "tool_calls") and response.tool_calls:
+                tool_calls = []
+                for tc in response.tool_calls:
+                    tool_calls.append(
+                        {
+                            "id": tc.get("id", f"call_{len(tool_calls)}"),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name", ""),
+                                "arguments": json.dumps(
+                                    tc.get("args", {}), ensure_ascii=False
+                                ),
+                            },
+                        }
+                    )
+
+        return {
+            "content": content,
+            "tool_calls": tool_calls,
+        }
+
     async def _call_async_openai(
         self,
         messages: List[Dict[str, str]],

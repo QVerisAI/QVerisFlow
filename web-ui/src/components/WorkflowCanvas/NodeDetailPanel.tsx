@@ -23,7 +23,10 @@ import {
   Copy,
   Check
 } from 'lucide-react';
-import type { NodeInfo, AgentInfo, AgentDefinition, ToolInfo, ModelInfo, NodeExecutionResult } from '../../types';
+import ReactMarkdown from 'react-markdown';
+import type { NodeInfo, AgentInfo, AgentDefinition, ToolInfo, ModelInfo, NodeExecutionResult, RealtimeNodeOutput } from '../../types';
+import { formatOutputToMarkdown } from '../../utils/outputFormatter';
+import { useAppStore } from '../../stores/appStore';
 
 interface NodeDetailPanelProps {
   node?: NodeInfo;
@@ -34,6 +37,8 @@ interface NodeDetailPanelProps {
   state?: { status: string; duration?: number };
   executionResult?: NodeExecutionResult;  // 执行结果（查看历史时）
   isHistoryMode?: boolean;  // 是否在查看历史模式
+  executionDetailLoading?: boolean;  // 执行详情加载中
+  mode?: 'idle' | 'building' | 'executing' | 'completed';  // 当前工作流模式
   onClose: () => void;
   onEdit?: (field: string, value: unknown) => void;
   onOptimize?: (field: string, currentValue: string) => void;
@@ -242,11 +247,56 @@ function CopyButton({ text }: { text: string }) {
 }
 
 // 执行结果面板
-function ExecutionResultPanel({ result }: { result?: import('../../types').NodeExecutionResult }) {
+function ExecutionResultPanel({
+  result,
+  isLoading = false,
+  realtimeOutput,
+}: {
+  result?: import('../../types').NodeExecutionResult;
+  isLoading?: boolean;
+  realtimeOutput?: RealtimeNodeOutput;
+}) {
   const [showInput, setShowInput] = useState(false);
   const [showOutput, setShowOutput] = useState(true);
+  const [viewMode, setViewMode] = useState<'markdown' | 'json'>('markdown');
 
-  if (!result) {
+  // 加载中状态
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-slate-400">
+        <Loader2 className="w-12 h-12 mb-3 opacity-60 animate-spin text-blue-500" />
+        <p className="text-sm text-slate-600">正在加载执行结果...</p>
+        <p className="text-xs mt-1">请稍候</p>
+      </div>
+    );
+  }
+
+  // 实时执行中状态
+  if (realtimeOutput?.status === 'running') {
+    return (
+      <div className="space-y-4">
+        <div className="bg-white rounded-2xl border border-blue-100 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <span className="text-sm font-medium text-slate-600">执行状态</span>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full text-blue-600 bg-blue-50">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              执行中
+            </span>
+          </div>
+          <div className="text-blue-600 animate-pulse text-sm">
+            正在执行...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 合并实时输出和历史结果
+  const output = realtimeOutput?.fullOutput ?? result?.output;
+  const error = realtimeOutput?.error ?? result?.error;
+  const status = realtimeOutput?.status ?? result?.status ?? 'pending';
+
+  if (!result && !realtimeOutput) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-slate-400">
         <Clock className="w-12 h-12 mb-3 opacity-40" />
@@ -258,14 +308,15 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
 
   const statusConfig: Record<string, { label: string; color: string; icon: React.ComponentType<{ className?: string }> }> = {
     success: { label: '成功', color: 'text-emerald-600 bg-emerald-50', icon: CheckCircle },
+    completed: { label: '成功', color: 'text-emerald-600 bg-emerald-50', icon: CheckCircle },
     failed: { label: '失败', color: 'text-red-600 bg-red-50', icon: XCircle },
     skipped: { label: '跳过', color: 'text-amber-600 bg-amber-50', icon: SkipForward },
     running: { label: '运行中', color: 'text-blue-600 bg-blue-50', icon: Loader2 },
     pending: { label: '等待', color: 'text-slate-500 bg-slate-50', icon: Clock },
   };
 
-  const status = statusConfig[result.status] || statusConfig.pending;
-  const StatusIcon = status.icon;
+  const statusInfo = statusConfig[status] || statusConfig.pending;
+  const StatusIcon = statusInfo.icon;
 
   const formatJson = (obj: unknown) => {
     try {
@@ -287,51 +338,125 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
     });
   };
 
+  // 渲染输出内容
+  const renderOutput = () => {
+    if (!output) return null;
+
+    if (viewMode === 'json') {
+      return (
+        <pre className="p-4 bg-slate-50 rounded-xl text-xs font-mono text-slate-700 max-h-96 overflow-y-auto whitespace-pre-wrap break-words">
+          {formatJson(output)}
+        </pre>
+      );
+    }
+
+    // Markdown 渲染
+    const markdownContent = formatOutputToMarkdown(output);
+    return (
+      <div className="p-4 bg-gradient-to-br from-slate-50 to-slate-100 rounded-xl max-h-96 overflow-y-auto">
+        <div className="prose prose-sm max-w-none prose-slate">
+          <ReactMarkdown
+            components={{
+              code: ({ children, className }) => {
+                const isInline = !className;
+                if (isInline) {
+                  return (
+                    <code className="bg-white/70 px-1.5 py-0.5 rounded text-xs font-mono text-slate-700">
+                      {children}
+                    </code>
+                  );
+                }
+                return (
+                  <code className="block bg-slate-800 text-slate-100 p-3 rounded-lg text-xs font-mono overflow-x-auto">
+                    {children}
+                  </code>
+                );
+              },
+              pre: ({ children }) => (
+                <pre className="bg-slate-800 p-3 rounded-lg overflow-auto text-sm my-2">
+                  {children}
+                </pre>
+              ),
+              h1: ({ children }) => (
+                <h1 className="text-base font-bold text-slate-800 mb-2">{children}</h1>
+              ),
+              h2: ({ children }) => (
+                <h2 className="text-sm font-semibold text-slate-800 mb-2">{children}</h2>
+              ),
+              h3: ({ children }) => (
+                <h3 className="text-sm font-semibold text-slate-700 mb-1">{children}</h3>
+              ),
+              p: ({ children }) => (
+                <p className="mb-2 last:mb-0 text-slate-600 leading-relaxed text-sm">{children}</p>
+              ),
+              ul: ({ children }) => (
+                <ul className="list-disc list-inside space-y-1 text-slate-600 mb-2 text-sm">{children}</ul>
+              ),
+              ol: ({ children }) => (
+                <ol className="list-decimal list-inside space-y-1 text-slate-600 mb-2 text-sm">{children}</ol>
+              ),
+              strong: ({ children }) => (
+                <strong className="font-semibold text-slate-800">{children}</strong>
+              ),
+              blockquote: ({ children }) => (
+                <blockquote className="border-l-4 border-blue-300 pl-3 my-2 text-slate-600 italic text-sm">
+                  {children}
+                </blockquote>
+              ),
+            }}
+          >
+            {markdownContent}
+          </ReactMarkdown>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4">
       {/* 执行状态卡片 */}
       <div className="bg-white rounded-2xl border border-slate-100 p-5">
         <div className="flex items-center justify-between mb-4">
           <span className="text-sm font-medium text-slate-600">执行状态</span>
-          <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full ${status.color}`}>
-            <StatusIcon className={`w-3.5 h-3.5 ${result.status === 'running' ? 'animate-spin' : ''}`} />
-            {status.label}
+          <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full ${statusInfo.color}`}>
+            <StatusIcon className={`w-3.5 h-3.5 ${status === 'running' ? 'animate-spin' : ''}`} />
+            {statusInfo.label}
           </span>
         </div>
 
         <div className="grid grid-cols-2 gap-4">
           <div>
             <p className="text-xs text-slate-400 mb-1">开始时间</p>
-            <p className="text-sm text-slate-700">{formatTime(result.startedAt)}</p>
+            <p className="text-sm text-slate-700">{formatTime(result?.startedAt)}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 mb-1">完成时间</p>
-            <p className="text-sm text-slate-700">{formatTime(result.completedAt)}</p>
+            <p className="text-sm text-slate-700">{formatTime(result?.completedAt)}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 mb-1">耗时</p>
             <p className="text-sm text-slate-700">
-              {result.durationMs ? `${(result.durationMs / 1000).toFixed(2)}s` : '-'}
+              {result?.durationMs ? `${(result.durationMs / 1000).toFixed(2)}s` : '-'}
             </p>
           </div>
           <div>
             <p className="text-xs text-slate-400 mb-1">节点 ID</p>
-            <p className="text-sm text-slate-700 font-mono truncate" title={result.nodeId}>
-              {result.nodeId}
+            <p className="text-sm text-slate-700 font-mono truncate" title={result?.nodeId}>
+              {result?.nodeId || '-'}
             </p>
           </div>
         </div>
 
-        {result.error && (
+        {error && (
           <div className="mt-4 p-3 bg-red-50 rounded-xl">
             <p className="text-xs font-medium text-red-600 mb-1">错误信息</p>
-            <p className="text-sm text-red-700">{result.error}</p>
+            <p className="text-sm text-red-700">{error}</p>
           </div>
         )}
       </div>
 
       {/* 输入 */}
-      {result.input !== undefined && (
+      {result?.input !== undefined && (
         <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
           <button
             onClick={() => setShowInput(!showInput)}
@@ -352,7 +477,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
           {showInput && (
             <div className="px-5 pb-5">
               <pre className="p-4 bg-slate-50 rounded-xl text-xs font-mono text-slate-700 max-h-64 overflow-y-auto whitespace-pre-wrap break-words">
-                {formatJson(result.input)}
+                {formatJson(result?.input)}
               </pre>
             </div>
           )}
@@ -360,7 +485,7 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
       )}
 
       {/* 输出 */}
-      {result.output !== undefined && (
+      {output !== undefined && (
         <div className="bg-white rounded-2xl border border-slate-100 overflow-hidden">
           <button
             onClick={() => setShowOutput(!showOutput)}
@@ -372,17 +497,32 @@ function ExecutionResultPanel({ result }: { result?: import('../../types').NodeE
               </div>
               <span className="text-[15px] font-medium text-slate-800">输出结果</span>
             </div>
-            {showOutput ? (
-              <ChevronUp className="w-4 h-4 text-slate-400" />
-            ) : (
-              <ChevronDown className="w-4 h-4 text-slate-400" />
-            )}
+            <div className="flex items-center gap-2">
+              {/* 视图切换 */}
+              <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5" onClick={(e) => e.stopPropagation()}>
+                <button
+                  onClick={() => setViewMode('markdown')}
+                  className={`px-2 py-1 text-xs rounded-md transition-colors ${viewMode === 'markdown' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}
+                >
+                  渲染
+                </button>
+                <button
+                  onClick={() => setViewMode('json')}
+                  className={`px-2 py-1 text-xs rounded-md transition-colors ${viewMode === 'json' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-500'}`}
+                >
+                  JSON
+                </button>
+              </div>
+              {showOutput ? (
+                <ChevronUp className="w-4 h-4 text-slate-400" />
+              ) : (
+                <ChevronDown className="w-4 h-4 text-slate-400" />
+              )}
+            </div>
           </button>
           {showOutput && (
             <div className="px-5 pb-5">
-              <pre className="p-4 bg-slate-50 rounded-xl text-xs font-mono text-slate-700 max-h-96 overflow-y-auto whitespace-pre-wrap break-words">
-                {formatJson(result.output)}
-              </pre>
+              {renderOutput()}
             </div>
           )}
         </div>
@@ -400,6 +540,8 @@ export function NodeDetailPanel({
   state,
   executionResult,
   isHistoryMode = false,
+  executionDetailLoading = false,
+  mode = 'idle',
   onClose,
   onEdit,
   onOptimize,
@@ -408,8 +550,20 @@ export function NodeDetailPanel({
   const [pendingChanges, setPendingChanges] = useState<Record<string, unknown>>({});
   const [isSaving, setIsSaving] = useState(false);
   const [showAddTool, setShowAddTool] = useState(false);
-  // Tab 状态
-  const [activeTab, setActiveTab] = useState<'config' | 'result'>(isHistoryMode ? 'result' : 'config');
+
+  // 获取实时节点输出
+  const realtimeOutput = useAppStore((state) =>
+    node?.nodeId ? state.realtimeNodeOutputs[node.nodeId] : undefined
+  );
+
+  // 判断是否应该显示执行结果 Tab
+  const isExecuting = mode === 'executing';
+  const hasExecutionData = isHistoryMode || executionResult || realtimeOutput;
+
+  // Tab 状态 - 执行中或有执行数据时默认显示结果 Tab
+  const [activeTab, setActiveTab] = useState<'config' | 'result'>(
+    isHistoryMode || isExecuting ? 'result' : 'config'
+  );
 
   if (!node) return null;
 
@@ -517,14 +671,14 @@ export function NodeDetailPanel({
         )}
       </div>
 
-      {/* Tab 切换 - 仅在历史模式或有执行结果时显示 */}
-      {(isHistoryMode || executionResult) && (
+      {/* Tab 切换 - 在历史模式、执行模式或有执行结果时显示 */}
+      {(isHistoryMode || isExecuting || hasExecutionData) && (
         <div className="px-4 pt-4 pb-2 bg-white border-b border-slate-100 flex gap-2">
           <button
             onClick={() => setActiveTab('config')}
             className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${activeTab === 'config'
-                ? 'bg-blue-50 text-blue-700'
-                : 'text-slate-500 hover:bg-slate-50'
+              ? 'bg-blue-50 text-blue-700'
+              : 'text-slate-500 hover:bg-slate-50'
               }`}
           >
             配置
@@ -532,8 +686,8 @@ export function NodeDetailPanel({
           <button
             onClick={() => setActiveTab('result')}
             className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${activeTab === 'result'
-                ? 'bg-blue-50 text-blue-700'
-                : 'text-slate-500 hover:bg-slate-50'
+              ? 'bg-blue-50 text-blue-700'
+              : 'text-slate-500 hover:bg-slate-50'
               }`}
           >
             执行结果
@@ -544,8 +698,12 @@ export function NodeDetailPanel({
       {/* 内容区 */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {/* 执行结果 Tab */}
-        {activeTab === 'result' && (isHistoryMode || executionResult) && (
-          <ExecutionResultPanel result={executionResult} />
+        {activeTab === 'result' && (isHistoryMode || isExecuting || hasExecutionData) && (
+          <ExecutionResultPanel
+            result={executionResult}
+            isLoading={executionDetailLoading}
+            realtimeOutput={realtimeOutput}
+          />
         )}
 
         {/* 配置 Tab */}
@@ -746,8 +904,8 @@ export function NodeDetailPanel({
                   <div
                     key={i}
                     className={`flex items-center justify-between p-3 rounded-xl transition-all ${tool.enabled
-                        ? 'bg-white border border-slate-200 shadow-sm'
-                        : 'bg-slate-100 border border-transparent opacity-60'
+                      ? 'bg-white border border-slate-200 shadow-sm'
+                      : 'bg-slate-100 border border-transparent opacity-60'
                       }`}
                   >
                     <div className="flex-1 min-w-0">
@@ -962,7 +1120,7 @@ export function NodeDetailPanel({
             ) : (
               <Save className="w-4 h-4" />
             )}
-            <span>{isSaving ? '保存中...' : '保存更改'}</span>
+            <span>{isSaving ? '应用中...' : '应用更改'}</span>
           </button>
         </div>
       )}

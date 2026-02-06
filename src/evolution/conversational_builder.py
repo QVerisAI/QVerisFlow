@@ -4,13 +4,14 @@
 使用 LLM Dialogue Agent 提供智能自然语言驱动的工作流构建接口。
 """
 
+import asyncio
+import json
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Callable, Awaitable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-import uuid
-import json
 
 from src.utils.logger import get_logger
 from src.definitions import WorkflowDefinition, AgentDefinition
@@ -27,6 +28,7 @@ from .interactive_builder import (
 )
 from .workflow_operations import WorkflowOperationTools, OperationResult
 from .dialogue_agent import DialogueAgent, DialogueResponse
+from src.orchestration.events import FRONTEND_EXECUTION_EVENTS, is_execution_event
 
 logger = get_logger()
 
@@ -270,20 +272,18 @@ class ConversationalWorkflowBuilder:
             "event_type", "agent_generation_progress"
         )
 
+        # 增强日志追踪
+        event_id = event.get("event_id", "")
+        sequence = event.get("sequence", 0)
+        node_id = event.get("node_id", "")
+        logger.debug(
+            f"[事件接收] type={event_type}, node={node_id}, "
+            f"seq={sequence}, event_id={event_id}"
+        )
+
         # ========== 处理工作流执行事件 ==========
-        if event_type in [
-            "execution_started",
-            "execution_completed",
-            "execution_failed",
-            "workflow_started",
-            "workflow_completed",
-            "workflow_failed",
-            "node_started",
-            "node_completed",
-            "node_failed",
-            "node_skipped",
-            "progress_update",
-        ]:
+        # 使用统一的事件类型常量，避免遗漏
+        if event_type in FRONTEND_EXECUTION_EVENTS:
             await self._handle_execution_event(event)
             return
 
@@ -340,6 +340,15 @@ class ConversationalWorkflowBuilder:
     async def _handle_execution_event(self, event: Dict[str, Any]) -> None:
         """处理工作流执行事件"""
         event_type = event.get("type") or event.get("event_type", "")
+        event_id = event.get("event_id", "")
+        sequence = event.get("sequence", 0)
+        node_id = event.get("node_id", "")
+
+        # 增强日志追踪
+        logger.debug(
+            f"[执行事件处理] type={event_type}, node={node_id}, "
+            f"seq={sequence}, event_id={event_id}"
+        )
 
         # 更新会话模式
         if event_type in ["execution_started", "workflow_started"]:
@@ -377,59 +386,37 @@ class ConversationalWorkflowBuilder:
                 )
 
     def _format_execution_message(self, event: Dict[str, Any]) -> Optional[str]:
-        """格式化执行事件为消息文本"""
+        """格式化执行事件为消息文本
+
+        注意：大部分执行事件已在前端 ExecutionProgressCard 中统一展示，
+        不再单独发送消息，只保留失败事件作为重要提醒。
+        """
         event_type = event.get("type") or event.get("event_type", "")
         # 获取嵌套的 data 字段（WorkflowEngine 的事件数据都在 data 中）
         data = event.get("data", {})
 
-        if event_type in ["execution_started", "workflow_started"]:
-            # total_nodes 可能在顶层（execution_started）或 data 中（workflow_started）
-            total = data.get("total_nodes") or event.get("total_nodes", 0)
-            return f"🚀 开始执行工作流，共 {total} 个节点"
+        # 这些事件已在前端 ExecutionProgressCard 中统一展示，不再单独发送消息
+        if event_type in [
+            "execution_started",
+            "workflow_started",
+            "node_started",
+            "node_completed",
+            "node_skipped",
+            "execution_completed",
+            "workflow_completed",
+            "progress_update",
+        ]:
+            return None
 
-        elif event_type == "node_started":
-            node_name = event.get("node_name", event.get("node_id", "节点"))
-            return f"📊 [{node_name}] 开始执行..."
-
-        elif event_type == "node_completed":
-            node_name = event.get("node_name", event.get("node_id", "节点"))
-            # duration_ms 在 data 中
-            duration = data.get("duration_ms", 0)
-            return f"✅ [{node_name}] 完成! ({duration/1000:.1f}s)"
-
+        # 只保留失败事件的消息（作为重要提醒）
         elif event_type == "node_failed":
             node_name = event.get("node_name", event.get("node_id", "节点"))
-            # error 在 data 中
             error = data.get("error") or event.get("error", "未知错误")
-            return f"❌ [{node_name}] 失败: {error}"
-
-        elif event_type == "node_skipped":
-            node_name = event.get("node_name", event.get("node_id", "节点"))
-            reason = data.get("reason") or event.get("reason", "")
-            return f"⏭️ [{node_name}] 已跳过" + (f": {reason}" if reason else "")
-
-        elif event_type in ["execution_completed", "workflow_completed"]:
-            # execution_completed 字段在顶层，workflow_completed 字段在 data 中
-            status = data.get("status") or event.get("status", "completed")
-            duration = data.get("total_duration_ms") or event.get(
-                "total_duration_ms", 0
-            )
-            nodes_completed = data.get("nodes_completed") or event.get(
-                "nodes_completed", 0
-            )
-            nodes_failed = data.get("nodes_failed") or event.get("nodes_failed", 0)
-            return f"🎉 工作流执行完成！状态: {status}, 耗时: {duration/1000:.1f}s, 成功: {nodes_completed}, 失败: {nodes_failed}"
+            return f"❌ [{node_name}] 执行失败: {error}"
 
         elif event_type in ["execution_failed", "workflow_failed"]:
             error = data.get("error") or event.get("error", "未知错误")
             return f"💥 工作流执行失败: {error}"
-
-        elif event_type == "progress_update":
-            # progress_update 的数据都在 data 中
-            completed = data.get("nodes_completed", 0)
-            total = data.get("total_nodes", 0)
-            progress = data.get("progress", 0)
-            return f"📈 执行进度: {completed}/{total} ({progress:.0f}%)"
 
         return None
 
@@ -852,8 +839,8 @@ class ConversationalWorkflowBuilder:
         """获取对话历史存储文件路径（用于文件备份）"""
         return self.storage_path / "conversation_history.json"
 
-    def _save_to_file(self) -> None:
-        """保存到本地文件（作为备份）"""
+    async def _save_to_file(self) -> None:
+        """保存到本地文件（作为备份）- 异步执行"""
         try:
             file_path = self._get_conversation_file_path()
             history_data = {
@@ -862,23 +849,30 @@ class ConversationalWorkflowBuilder:
                 "messages": [msg.to_dict() for msg in self.conversation_history],
                 "saved_at": datetime.now().isoformat(),
             }
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(history_data, f, ensure_ascii=False, indent=2)
+
+            def _sync_write():
+                with open(file_path, "w", encoding="utf-8") as f:
+                    json.dump(history_data, f, ensure_ascii=False, indent=2)
+
+            await asyncio.to_thread(_sync_write)
             logger.debug(
                 f"对话历史已保存到文件: {len(self.conversation_history)} 条消息"
             )
         except Exception as e:
             logger.error(f"保存对话历史到文件失败: {e}")
 
-    def _load_from_file(self) -> bool:
-        """从本地文件加载"""
+    async def _load_from_file(self) -> bool:
+        """从本地文件加载 - 异步执行"""
         try:
             file_path = self._get_conversation_file_path()
             if not file_path.exists():
                 return False
 
-            with open(file_path, "r", encoding="utf-8") as f:
-                history_data = json.load(f)
+            def _sync_read():
+                with open(file_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+
+            history_data = await asyncio.to_thread(_sync_read)
 
             self.conversation_history = [
                 Message(
@@ -904,11 +898,19 @@ class ConversationalWorkflowBuilder:
 
     def save_conversation_history(self) -> None:
         """持久化对话历史（优先数据库，同时备份到文件）"""
-        import asyncio
         import os
 
-        # 始终保存到文件作为备份
-        self._save_to_file()
+        # 始终保存到文件作为备份（在后台异步执行）
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # 在运行中的事件循环中创建任务
+                asyncio.create_task(self._save_to_file())
+            else:
+                loop.run_until_complete(self._save_to_file())
+        except RuntimeError:
+            # 没有事件循环，同步执行
+            self._save_to_file_sync()
 
         # 如果启用了数据库，异步保存到数据库
         if os.getenv("ENABLE_POSTGRES", "false").lower() == "true":
@@ -923,6 +925,24 @@ class ConversationalWorkflowBuilder:
             except RuntimeError:
                 # 没有事件循环，跳过数据库保存
                 logger.debug("没有事件循环，跳过数据库保存")
+
+    def _save_to_file_sync(self) -> None:
+        """同步保存到文件（备用方法）"""
+        try:
+            file_path = self._get_conversation_file_path()
+            history_data = {
+                "session_id": self.session_id,
+                "mode": self.mode.value,
+                "messages": [msg.to_dict() for msg in self.conversation_history],
+                "saved_at": datetime.now().isoformat(),
+            }
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(history_data, f, ensure_ascii=False, indent=2)
+            logger.debug(
+                f"对话历史已保存到文件(同步): {len(self.conversation_history)} 条消息"
+            )
+        except Exception as e:
+            logger.error(f"保存对话历史到文件失败: {e}")
 
     async def _save_to_database(self) -> bool:
         """异步保存到数据库"""
@@ -982,7 +1002,6 @@ class ConversationalWorkflowBuilder:
         Returns:
             是否成功加载
         """
-        import asyncio
         import os
 
         # 如果启用了数据库，优先从数据库加载
@@ -994,7 +1013,7 @@ class ConversationalWorkflowBuilder:
                     future = asyncio.ensure_future(self._load_from_database())
                     # 这里不能直接等待，需要在外部处理
                     # 暂时回退到文件加载
-                    return self._load_from_file()
+                    return self._load_from_file_sync()
                 else:
                     result = loop.run_until_complete(self._load_from_database())
                     if result:
@@ -1003,7 +1022,39 @@ class ConversationalWorkflowBuilder:
                 pass
 
         # 回退到文件加载
-        return self._load_from_file()
+        return self._load_from_file_sync()
+
+    def _load_from_file_sync(self) -> bool:
+        """同步从本地文件加载（备用方法）"""
+        try:
+            file_path = self._get_conversation_file_path()
+            if not file_path.exists():
+                return False
+
+            with open(file_path, "r", encoding="utf-8") as f:
+                history_data = json.load(f)
+
+            self.conversation_history = [
+                Message(
+                    role=msg["role"],
+                    content=msg["content"],
+                    timestamp=msg.get("timestamp", ""),
+                    message_type=msg.get("message_type", "text"),
+                    data=msg.get("data"),
+                )
+                for msg in history_data.get("messages", [])
+            ]
+
+            mode_str = history_data.get("mode", "idle")
+            self.mode = SessionMode(mode_str)
+
+            logger.info(
+                f"对话历史已从文件恢复(同步): {len(self.conversation_history)} 条消息, 模式: {self.mode.value}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"从文件加载对话历史失败: {e}")
+            return False
 
     async def _load_from_database(self) -> bool:
         """异步从数据库加载"""
@@ -1068,15 +1119,15 @@ class ConversationalWorkflowBuilder:
             if result:
                 return True
 
-        # 回退到文件加载
-        return self._load_from_file()
+        # 回退到文件加载（异步）
+        return await self._load_from_file()
 
     async def save_conversation_history_async(self) -> None:
         """异步保存对话历史（推荐在异步环境中使用）"""
         import os
 
-        # 始终保存到文件作为备份
-        self._save_to_file()
+        # 始终保存到文件作为备份（异步）
+        await self._save_to_file()
 
         # 如果启用了数据库，保存到数据库
         if os.getenv("ENABLE_POSTGRES", "false").lower() == "true":

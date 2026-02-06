@@ -1,226 +1,163 @@
+/**
+ * Socket.IO 服务
+ * 
+ * 替代原有 WebSocket 服务，保持 API 兼容。
+ * Socket.IO 提供：
+ * - 内置健壮的心跳机制
+ * - 自动重连（指数退避）
+ * - 断网期间消息缓冲
+ * - 传输层自动降级（WebSocket → Long Polling）
+ */
+
+import { io, Socket } from 'socket.io-client';
 import { WSMessageType, type WSMessage } from '../types';
 
 type MessageHandler = (message: WSMessage) => void;
 
-class WebSocketService {
-  private ws: WebSocket | null = null;
+class SocketIOService {
+  private socket: Socket | null = null;
   private handlers: Map<WSMessageType, Set<MessageHandler>> = new Map();
-  private handlerIds: Map<string, MessageHandler> = new Map(); // 用于去重
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 20;  // 增加重连次数
-  private reconnectDelay = 1000;
+  private handlerIds: Map<string, MessageHandler> = new Map();
   private sessionId: string | null = null;
-  private intentionalDisconnect = false;  // 标记是否为主动断开
-  private isReconnecting = false;  // 防止重复重连
+  private intentionalDisconnect = false;
 
-  // 心跳机制 - 更频繁的心跳以保持连接
-  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-  private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
-  private readonly HEARTBEAT_INTERVAL = 15000;  // 15秒发送一次心跳（更频繁）
-  private readonly HEARTBEAT_TIMEOUT = 8000;    // 8秒内未收到响应视为断开
-  private lastPongTime = 0;
-
-  // 连接状态回调
+  // 连接状态回调（保持与原接口兼容）
   private onConnectionChange: ((connected: boolean) => void) | null = null;
+  private onReconnectingChange: ((reconnecting: boolean, attempt: number) => void) | null = null;
 
   get isConnected(): boolean {
-    return this.ws?.readyState === WebSocket.OPEN;
+    return this.socket?.connected ?? false;
   }
 
   setConnectionChangeCallback(callback: (connected: boolean) => void): void {
     this.onConnectionChange = callback;
   }
 
+  setReconnectingCallback(callback: (reconnecting: boolean, attempt: number) => void): void {
+    this.onReconnectingChange = callback;
+  }
+
   connect(sessionId: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      // 如果正在重连，等待重连完成
-      if (this.isReconnecting) {
-        console.log('正在重连中，跳过连接请求');
-        resolve();
-        return;
-      }
-
       // 如果已连接到相同的 session，跳过
-      if (this.ws?.readyState === WebSocket.OPEN && this.sessionId === sessionId) {
-        console.log('已连接到相同会话，跳过');
+      if (this.socket?.connected && this.sessionId === sessionId) {
+        console.log('Socket.IO: 已连接到相同会话，跳过');
         resolve();
         return;
       }
 
       // 关闭旧连接
-      if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
-        this.ws.close(1000, 'New connection');
+      if (this.socket) {
+        this.socket.disconnect();
+        this.socket = null;
       }
 
       this.sessionId = sessionId;
-      this.intentionalDisconnect = false;  // 重置标记
+      this.intentionalDisconnect = false;
 
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      // 构建连接 URL
+      const protocol = window.location.protocol === 'https:' ? 'https' : 'http';
       const host = window.location.host;
-      const url = `${protocol}//${host}/ws/${sessionId}`;
+      const url = `${protocol}://${host}`;
 
-      console.log('Connecting to WebSocket:', url);
+      console.log('Socket.IO: 连接到', url, '会话:', sessionId);
 
-      this.ws = new WebSocket(url);
+      // 创建 Socket.IO 连接
+      this.socket = io(url, {
+        // 认证信息
+        auth: {
+          session_id: sessionId,
+        },
+        // Socket.IO 内置重连配置
+        reconnection: true,
+        reconnectionAttempts: Infinity,  // 无限重试
+        reconnectionDelay: 1000,         // 初始延迟 1s
+        reconnectionDelayMax: 30000,     // 最大延迟 30s
+        // 超时配置
+        timeout: 20000,
+        // 传输配置（优先 WebSocket，自动降级为 polling）
+        transports: ['websocket', 'polling'],
+      });
 
+      // 连接超时处理
       const connectionTimeout = setTimeout(() => {
-        if (this.ws?.readyState !== WebSocket.OPEN) {
-          console.warn('WebSocket 连接超时');
-          this.ws?.close();
+        if (!this.socket?.connected) {
+          console.warn('Socket.IO: 连接超时');
+          this.socket?.disconnect();
           reject(new Error('Connection timeout'));
         }
-      }, 10000);  // 10秒连接超时
+      }, 20000);
 
-      this.ws.onopen = () => {
+      // 连接成功
+      this.socket.on('connect', () => {
         clearTimeout(connectionTimeout);
-        console.log('WebSocket connected');
-        this.reconnectAttempts = 0;
-        this.isReconnecting = false;
-        this.startHeartbeat();
+        console.log('Socket.IO: 已连接');
         this.onConnectionChange?.(true);
         resolve();
-      };
+      });
 
-      this.ws.onclose = (event) => {
-        clearTimeout(connectionTimeout);
-        console.log('WebSocket closed:', event.code, event.reason);
-        this.stopHeartbeat();
+      // 断开连接
+      this.socket.on('disconnect', (reason) => {
+        console.log('Socket.IO: 断开连接，原因:', reason);
         this.onConnectionChange?.(false);
+      });
 
-        // 只有非主动断开时才重连
-        if (!this.intentionalDisconnect) {
-          this.handleReconnect();
-        }
-      };
+      // 重连中
+      this.socket.io.on('reconnect_attempt', (attempt) => {
+        console.log(`Socket.IO: 正在重连... 尝试 ${attempt}`);
+        this.onReconnectingChange?.(true, attempt);
+      });
 
-      this.ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        // 不要在这里 reject，让 onclose 处理重连
-      };
+      // 重连成功
+      this.socket.io.on('reconnect', () => {
+        console.log('Socket.IO: 重连成功');
+        this.onReconnectingChange?.(false, 0);
+        this.onConnectionChange?.(true);
+      });
 
-      this.ws.onmessage = (event) => {
-        try {
-          const message: WSMessage = JSON.parse(event.data);
-          this.dispatch(message);
-        } catch (e) {
-          console.error('Failed to parse WebSocket message:', e);
-        }
-      };
+      // 重连失败
+      this.socket.io.on('reconnect_failed', () => {
+        console.error('Socket.IO: 重连失败');
+        this.onReconnectingChange?.(false, 0);
+      });
+
+      // 错误处理
+      this.socket.on('connect_error', (error) => {
+        console.error('Socket.IO: 连接错误:', error.message);
+        // 不在这里 reject，让 Socket.IO 自动重连
+      });
+
+      // 注册所有消息类型的监听器
+      this.registerEventListeners();
+    });
+  }
+
+  private registerEventListeners(): void {
+    if (!this.socket) return;
+
+    // 为每个消息类型注册监听器
+    const eventTypes = Object.values(WSMessageType);
+
+    eventTypes.forEach((eventType) => {
+      this.socket!.on(eventType, (data: WSMessage) => {
+        this.dispatch(data);
+      });
     });
   }
 
   disconnect(): void {
-    this.intentionalDisconnect = true;  // 标记为主动断开
-    this.stopHeartbeat();
-    if (this.ws) {
-      this.ws.close(1000, 'Client disconnect');  // 使用正常关闭代码
-      this.ws = null;
+    this.intentionalDisconnect = true;
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
     }
   }
 
-  // 启动心跳
-  private startHeartbeat(): void {
-    this.stopHeartbeat();
-    this.lastPongTime = Date.now();
-
-    // 立即发送第一个心跳
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.send(WSMessageType.PING, { timestamp: Date.now() });
-    }
-
-    // 定期发送心跳
-    this.heartbeatInterval = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.send(WSMessageType.PING, { timestamp: Date.now() });
-
-        // 设置超时检测 - 如果在超时时间内没有收到 pong，视为断开
-        if (this.heartbeatTimeout) {
-          clearTimeout(this.heartbeatTimeout);
-        }
-        this.heartbeatTimeout = setTimeout(() => {
-          // 检查是否在超时时间内收到了 pong
-          const timeSinceLastPong = Date.now() - this.lastPongTime;
-          // 只有当超过心跳间隔时才判定为超时（说明上一次 ping 没有收到 pong）
-          if (timeSinceLastPong > this.HEARTBEAT_INTERVAL) {
-            console.warn(`心跳超时 (${timeSinceLastPong}ms)，连接可能已断开，尝试重连`);
-            // 标记为需要重连
-            this.intentionalDisconnect = false;
-            // 强制关闭并触发重连
-            this.ws?.close(4000, 'Heartbeat timeout');
-          }
-        }, this.HEARTBEAT_TIMEOUT);
-      } else {
-        console.warn('WebSocket 未连接，停止心跳');
-        this.stopHeartbeat();
-        // 触发重连
-        if (!this.intentionalDisconnect) {
-          this.handleReconnect();
-        }
-      }
-    }, this.HEARTBEAT_INTERVAL);
-  }
-
-  // 停止心跳
-  private stopHeartbeat(): void {
-    if (this.heartbeatInterval) {
-      clearInterval(this.heartbeatInterval);
-      this.heartbeatInterval = null;
-    }
-    if (this.heartbeatTimeout) {
-      clearTimeout(this.heartbeatTimeout);
-      this.heartbeatTimeout = null;
-    }
-  }
-
-  // 处理 pong 响应
-  handlePong(): void {
-    this.lastPongTime = Date.now();
-    if (this.heartbeatTimeout) {
-      clearTimeout(this.heartbeatTimeout);
-      this.heartbeatTimeout = null;
-    }
-  }
-
-  private handleReconnect(): void {
-    if (this.isReconnecting) {
-      console.log('已在重连中，跳过');
-      return;
-    }
-
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('Max reconnect attempts reached');
-      this.isReconnecting = false;
-      return;
-    }
-
-    this.isReconnecting = true;
-    this.reconnectAttempts++;
-
-    // 使用指数退避，但设置最大延迟为 30 秒
-    const delay = Math.min(
-      this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1),
-      30000
-    );
-
-    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    setTimeout(() => {
-      if (this.sessionId && !this.intentionalDisconnect) {
-        this.isReconnecting = false;  // 在尝试连接前重置
-        this.connect(this.sessionId).catch((error) => {
-          console.error('Reconnect failed:', error);
-          // 重连失败，继续尝试
-          this.handleReconnect();
-        });
-      } else {
-        this.isReconnecting = false;
-      }
-    }, delay);
-  }
+  // ==================== 发送方法（保持与原接口兼容）====================
 
   send(type: WSMessageType, payload: Record<string, unknown>): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.error('WebSocket is not connected');
+    if (!this.socket?.connected) {
+      console.error('Socket.IO: 未连接');
       return;
     }
 
@@ -230,7 +167,8 @@ class WebSocketService {
       timestamp: new Date().toISOString(),
     };
 
-    this.ws.send(JSON.stringify(message));
+    // Socket.IO 使用事件名发送
+    this.socket.emit(type, message);
   }
 
   sendChatMessage(content: string): void {
@@ -334,6 +272,14 @@ class WebSocketService {
     this.handlerIds.clear();
   }
 
+  /**
+   * 兼容原有 handlePong 方法
+   * Socket.IO 自动处理心跳，此方法保留仅用于接口兼容
+   */
+  handlePong(): void {
+    // Socket.IO 自动处理心跳，无需手动实现
+  }
+
   private dispatch(message: WSMessage): void {
     const handlers = this.handlers.get(message.type);
     if (handlers) {
@@ -360,5 +306,5 @@ class WebSocketService {
   }
 }
 
-// 单例导出
-export const wsService = new WebSocketService();
+// 单例导出（保持与原接口兼容）
+export const wsService = new SocketIOService();

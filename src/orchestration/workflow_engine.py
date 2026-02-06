@@ -36,8 +36,17 @@ from ..interfaces.workflow import (
     WorkflowStatus,
 )
 from ..utils.safe_eval import safe_eval_condition, safe_eval_expression
+from .events import (
+    ExecutionEventType,
+    EXECUTION_EVENT_TYPES,
+    EventSequenceGenerator,
+    generate_event_id,
+)
 
 logger = get_logger()
+
+# 事件历史缓存的最大大小（每个工作流）
+MAX_EVENT_HISTORY_SIZE = 100
 
 
 @dataclass
@@ -217,6 +226,12 @@ class WorkflowEngine(IWorkflowEngine):
         self._injected_context: Dict[str, Dict[str, Any]] = {}
         # 事件回调: workflow_id -> callback
         self._event_callbacks: Dict[str, Callable] = {}
+
+        # === 事件追踪支持 ===
+        # 事件序列号生成器
+        self._event_sequence = EventSequenceGenerator()
+        # 事件历史缓存: workflow_id -> List[event]
+        self._event_history: Dict[str, List[Dict[str, Any]]] = {}
 
     def _get_or_create_llm_client(self, llm_config: ModelConfig) -> Any:
         """
@@ -651,6 +666,10 @@ class WorkflowEngine(IWorkflowEngine):
                                 "output_preview": self._truncate_output(
                                     node_result.output
                                 ),
+                                "output_summary": self._generate_output_summary(
+                                    node_result.output
+                                ),
+                                "output": node_result.output,  # 完整输出供前端渲染
                             },
                         },
                     )
@@ -743,6 +762,7 @@ class WorkflowEngine(IWorkflowEngine):
                                 ]
                             ),
                             "total_nodes": len(result.node_results),
+                            "final_output": result.final_output,  # 最终输出供前端渲染
                         },
                     },
                 )
@@ -794,41 +814,228 @@ class WorkflowEngine(IWorkflowEngine):
         return result
 
     async def _emit_event(self, workflow_id: str, event: Dict[str, Any]) -> None:
-        """推送事件到回调"""
+        """
+        推送事件到回调
+
+        自动添加事件元数据：
+        - event_id: 唯一事件 ID
+        - sequence: 事件序列号（用于检测丢失和保证顺序）
+
+        Args:
+            workflow_id: 工作流 ID
+            event: 事件数据
+        """
+        # 添加事件元数据（向后兼容，不覆盖已有字段）
+        if "event_id" not in event:
+            event["event_id"] = generate_event_id()
+        if "sequence" not in event:
+            event["sequence"] = self._event_sequence.next(workflow_id)
+
+        event_type = event.get("event_type", "unknown")
+        node_id = event.get("node_id", "")
+        sequence = event.get("sequence", 0)
+
+        # 增强日志追踪
+        logger.debug(
+            f"[事件发送] workflow={workflow_id}, type={event_type}, "
+            f"node={node_id}, seq={sequence}, event_id={event.get('event_id')}"
+        )
+
+        # 缓存事件历史（用于重放）
+        if workflow_id not in self._event_history:
+            self._event_history[workflow_id] = []
+        history = self._event_history[workflow_id]
+        history.append(event.copy())
+        # 限制历史大小，移除最早的事件
+        if len(history) > MAX_EVENT_HISTORY_SIZE:
+            self._event_history[workflow_id] = history[-MAX_EVENT_HISTORY_SIZE:]
+
+        # 推送事件到回调
         callback = self._event_callbacks.get(workflow_id)
         if callback:
             try:
                 await callback(event)
             except Exception as e:
-                logger.warning(f"事件回调失败: {e}")
+                logger.warning(
+                    f"事件回调失败: type={event_type}, node={node_id}, "
+                    f"seq={sequence}, error={e}"
+                )
+        else:
+            logger.debug(f"[事件发送] 无回调注册: workflow={workflow_id}")
 
-    def _truncate_output(self, output: Any, max_length: int = 200) -> Any:
-        """截断输出用于预览"""
+    def get_event_history(
+        self, workflow_id: str, since_sequence: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        获取事件历史（用于重放或补发）
+
+        Args:
+            workflow_id: 工作流 ID
+            since_sequence: 从指定序列号之后开始（不包含该序列号）
+
+        Returns:
+            事件列表，按序列号升序排列
+        """
+        history = self._event_history.get(workflow_id, [])
+        if since_sequence > 0:
+            return [e for e in history if e.get("sequence", 0) > since_sequence]
+        return list(history)
+
+    def clear_event_history(self, workflow_id: str) -> None:
+        """
+        清理工作流的事件历史和序列号
+
+        在工作流执行完成后调用，释放内存。
+
+        Args:
+            workflow_id: 工作流 ID
+        """
+        if workflow_id in self._event_history:
+            del self._event_history[workflow_id]
+        self._event_sequence.reset(workflow_id)
+        logger.debug(f"[事件清理] workflow={workflow_id} 事件历史已清理")
+
+    def _truncate_output(self, output: Any, max_length: int = 500) -> Any:
+        """截断输出用于预览，保留结构化信息"""
         if output is None:
             return None
 
         if isinstance(output, str):
-            return output[:max_length] + "..." if len(output) > max_length else output
+            if len(output) > max_length:
+                return output[:max_length] + "..."
+            return output
 
         if isinstance(output, dict):
-            return {
-                k: self._truncate_output(v, max_length // 2)
-                for k, v in list(output.items())[:5]
-            }
+            # 提取关键字段用于摘要
+            summary_fields = [
+                "recommendation",
+                "summary",
+                "result",
+                "conclusion",
+                "建议",
+                "摘要",
+                "结果",
+                "结论",
+                "answer",
+                "答案",
+            ]
+            for field in summary_fields:
+                if field in output:
+                    value = output[field]
+                    if isinstance(value, str):
+                        return (
+                            f"{field}: {value[:max_length]}"
+                            if len(value) > max_length
+                            else f"{field}: {value}"
+                        )
+                    return {field: value}
+
+            # 返回简化的 dict 预览
+            preview = {}
+            for k, v in list(output.items())[:5]:
+                if isinstance(v, str):
+                    preview[k] = v[:100] + "..." if len(v) > 100 else v
+                elif isinstance(v, (dict, list)):
+                    preview[k] = f"[{type(v).__name__}]"
+                else:
+                    preview[k] = v
+            return preview
 
         if isinstance(output, list):
-            return output[:3] if len(output) > 3 else output
+            if len(output) > 10:
+                return f"[{len(output)} 项]"
+            return output[:5] if len(output) > 5 else output
 
         return output
 
-    def _cleanup_streaming_state(self, workflow_id: str) -> None:
-        """清理流式执行状态"""
+    def _generate_output_summary(self, output: Any) -> str:
+        """生成输出的一句话摘要"""
+        if output is None:
+            return "无输出"
+
+        if isinstance(output, str):
+            trimmed = output.strip()
+            if not trimmed:
+                return "空输出"
+            # 取第一行或前80个字符
+            first_line = trimmed.split("\n")[0]
+            if len(first_line) > 80:
+                return first_line[:77] + "..."
+            return first_line
+
+        if isinstance(output, (int, float)):
+            return f"结果: {output}"
+
+        if isinstance(output, bool):
+            return "成功" if output else "失败"
+
+        if isinstance(output, list):
+            return f"返回 {len(output)} 项结果"
+
+        if isinstance(output, dict):
+            # 智能提取关键信息
+            highlight_fields = ["recommendation", "suggestion", "建议", "推荐"]
+            for field in highlight_fields:
+                if field in output:
+                    value = output[field]
+                    if isinstance(value, str):
+                        return (
+                            f"建议: {value[:60]}..."
+                            if len(value) > 60
+                            else f"建议: {value}"
+                        )
+                    return f"建议: {value}"
+
+            summary_fields = [
+                "summary",
+                "conclusion",
+                "result",
+                "摘要",
+                "结论",
+                "结果",
+                "answer",
+                "答案",
+            ]
+            for field in summary_fields:
+                if field in output:
+                    value = str(output[field])
+                    return value[:80] + "..." if len(value) > 80 else value
+
+            error_fields = ["error", "exception", "错误", "异常"]
+            for field in error_fields:
+                if field in output:
+                    return f"错误: {output[field]}"
+
+            # 返回字段数量
+            keys = list(output.keys())
+            if not keys:
+                return "空对象"
+            if len(keys) <= 3:
+                return ", ".join(keys)
+            return f"包含 {len(keys)} 个字段"
+
+        return str(output)[:80]
+
+    def _cleanup_streaming_state(self, workflow_id: str, force: bool = False) -> None:
+        """清理流式执行状态
+
+        Args:
+            workflow_id: 工作流 ID
+            force: 是否强制清理（即使处于暂停状态）
+        """
+        # 如果处于暂停状态且非强制，保留暂停相关状态以支持恢复
+        is_paused = self._pause_flags.get(workflow_id, False)
+
         if workflow_id in self._cancel_flags:
             del self._cancel_flags[workflow_id]
-        if workflow_id in self._pause_flags:
-            del self._pause_flags[workflow_id]
-        if workflow_id in self._pause_events:
-            del self._pause_events[workflow_id]
+
+        # 暂停状态下保留 _pause_flags 和 _pause_events 以支持恢复
+        if force or not is_paused:
+            if workflow_id in self._pause_flags:
+                del self._pause_flags[workflow_id]
+            if workflow_id in self._pause_events:
+                del self._pause_events[workflow_id]
+
         if workflow_id in self._skip_nodes:
             del self._skip_nodes[workflow_id]
         if workflow_id in self._modified_inputs:
@@ -873,7 +1080,8 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否成功
         """
-        if workflow_id not in self._pause_flags:
+        # 检查暂停标志是否存在且为 True
+        if not self._pause_flags.get(workflow_id, False):
             return False
 
         self._pause_flags[workflow_id] = False
@@ -882,6 +1090,30 @@ class WorkflowEngine(IWorkflowEngine):
 
         logger.info(f"工作流 {workflow_id} 已恢复")
         return True
+
+    def is_paused(self, workflow_id: str) -> bool:
+        """
+        检查工作流是否处于暂停状态
+
+        Args:
+            workflow_id: 工作流 ID
+
+        Returns:
+            是否处于暂停状态
+        """
+        return self._pause_flags.get(workflow_id, False)
+
+    def is_running(self, workflow_id: str) -> bool:
+        """
+        检查工作流是否正在运行
+
+        Args:
+            workflow_id: 工作流 ID
+
+        Returns:
+            是否正在运行
+        """
+        return self._running_workflows.get(workflow_id) == WorkflowStatus.RUNNING
 
     async def skip_node(self, workflow_id: str, node_id: str) -> bool:
         """
@@ -1670,9 +1902,27 @@ class WorkflowEngine(IWorkflowEngine):
                 )
                 task_description += f"\n输入参数: {input_summary}"
 
+        # 创建进度回调函数，用于发送节点执行中间状态
+        workflow_id = context.get("workflow_id", "")
+
+        async def progress_callback(status: str) -> None:
+            """发送节点进度事件"""
+            await self._emit_event(
+                workflow_id,
+                {
+                    "event_type": "node_progress",
+                    "workflow_id": workflow_id,
+                    "node_id": node.node_id,
+                    "node_name": node.name,
+                    "status": status,
+                    "timestamp": datetime.now().isoformat(),
+                },
+            )
+
         result = await agent.run(
             task_description=task_description,
             input_data=node_input.get("input_data", node_input),
+            progress_callback=progress_callback,
         )
 
         # 在结果中添加工作空间路径，供下游节点使用

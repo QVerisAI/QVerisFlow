@@ -21,6 +21,12 @@ export default defineConfig({
         target: 'ws://localhost:8000',
         ws: true,
       },
+      // Socket.IO 代理
+      '/socket.io': {
+        target: 'ws://localhost:8000',
+        ws: true,
+        changeOrigin: true,
+      },
     },
   },
 })

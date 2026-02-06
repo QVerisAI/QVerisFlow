@@ -22,7 +22,19 @@ function App() {
     setShowAgentLibraryPanel,
     setShowSaveWorkflowDialog,
   } = useAppStore();
-  const { connect, isConnected } = useWebSocket();
+  const { connect, isConnected, isReconnecting, reconnectAttempt, smartSave } = useWebSocket();
+
+  // 全局快捷键：Cmd/Ctrl + S 保存工作流
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+        e.preventDefault();
+        smartSave();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [smartSave]);
 
   // 可调节宽度状态（默认 675px，约为原来的 1.5 倍）
   const [panelWidth, setPanelWidth] = useState(675);
@@ -110,6 +122,13 @@ function App() {
   return (
     <ReactFlowProvider>
       <div className="h-screen flex flex-col bg-gray-50">
+        {/* 重连状态提示 */}
+        {isReconnecting && (
+          <div className="bg-yellow-500 text-white text-center py-2 text-sm animate-pulse">
+            🔄 正在重连... (尝试 {reconnectAttempt})
+          </div>
+        )}
+
         {/* 顶部导航 */}
         <Header />
 
@@ -141,38 +160,18 @@ function App() {
         </div>
 
         {/* 底部状态栏 */}
-        <div className="h-8 bg-gray-100 border-t flex items-center justify-between px-4 text-xs text-gray-500">
-          <div className="flex items-center">
-            <span className={`w-2 h-2 rounded-full mr-2 ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
-            <span>{isConnected ? '已连接' : '未连接'}</span>
-            <span className="mx-2">|</span>
-            <span>会话: {sessionId?.slice(0, 20)}...</span>
-          </div>
-
-          {/* 快捷按钮 */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowWorkflowListPanel(true)}
-              className="px-2 py-1 hover:bg-gray-200 rounded text-gray-600 hover:text-gray-900 transition-colors"
-              title="打开工作流列表"
-            >
-              📋 工作流
-            </button>
-            <button
-              onClick={() => setShowAgentLibraryPanel(true)}
-              className="px-2 py-1 hover:bg-gray-200 rounded text-gray-600 hover:text-gray-900 transition-colors"
-              title="打开 Agent 库"
-            >
-              🤖 Agent 库
-            </button>
-            <button
-              onClick={() => setShowSaveWorkflowDialog(true)}
-              className="px-2 py-1 hover:bg-gray-200 rounded text-gray-600 hover:text-gray-900 transition-colors"
-              title="保存当前工作流"
-            >
-              💾 保存
-            </button>
-          </div>
+        <div className="h-7 bg-gray-100 border-t flex items-center px-4 text-xs text-gray-500">
+          <span className={`w-2 h-2 rounded-full mr-2 ${isConnected ? 'bg-green-500' :
+            isReconnecting ? 'bg-yellow-500 animate-pulse' :
+              'bg-red-500'
+            }`} />
+          <span>{
+            isConnected ? '已连接' :
+              isReconnecting ? `重连中 (${reconnectAttempt})` :
+                '未连接'
+          }</span>
+          <span className="mx-2">|</span>
+          <span>会话: {sessionId?.slice(0, 20)}...</span>
         </div>
 
         {/* 弹窗 */}

@@ -117,6 +117,7 @@ export function WorkflowCanvas() {
     executionProgress,
     selectedExecutionId,
     currentExecutionDetail,
+    executionDetailLoading,
   } = useAppStore();
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
 
@@ -357,6 +358,8 @@ export function WorkflowCanvas() {
           onOptimize={handleOptimize}
           executionResult={selectedNodeExecutionResult}
           isHistoryMode={isHistoryMode}
+          executionDetailLoading={executionDetailLoading}
+          mode={workflowState?.mode}
         />
       )}
     </div>

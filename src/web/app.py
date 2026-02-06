@@ -2,6 +2,7 @@
 FastAPI 应用入口
 
 对话式工作流构建器 Web UI 后端。
+支持 Socket.IO 和传统 WebSocket 两种通信方式。
 """
 
 # Load .env file FIRST before any other imports that might use environment variables
@@ -9,24 +10,31 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 from pathlib import Path
 from contextlib import asynccontextmanager
 import asyncio
 import uuid
 import traceback
+import time
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import HTMLResponse
+    import socketio
 except ImportError:
     raise ImportError("请安装 web 依赖: pip install -e '.[web]'")
 
 from src.utils.logger import get_logger
 
 logger = get_logger()
+
+# Socket.IO 服务器实例（全局）
+sio: Optional[socketio.AsyncServer] = None
+sio_manager: Optional[Any] = None
+sio_handlers: Dict[str, Any] = {}
 
 # 全局依赖（延迟初始化）
 _meta_agent: Optional[Any] = None
@@ -117,8 +125,209 @@ async def lifespan(app: FastAPI):
     logger.info("应用正在关闭...")
 
 
-def create_app() -> FastAPI:
-    """创建 FastAPI 应用"""
+def create_app():
+    """创建 FastAPI 应用（包装为 Socket.IO ASGI 应用）"""
+    global sio, sio_manager, sio_handlers
+
+    # =============== Socket.IO 配置 ===============
+    sio = socketio.AsyncServer(
+        async_mode="asgi",
+        cors_allowed_origins="*",
+        ping_interval=25,  # Socket.IO 内置心跳间隔（秒）
+        ping_timeout=60,  # 心跳超时时间（秒）
+        max_http_buffer_size=10 * 1024 * 1024,  # 10MB
+        logger=False,
+        engineio_logger=False,
+    )
+
+    # 导入 Socket.IO 相关模块
+    from src.web.socketio.manager import SocketIOConnectionManager
+    from src.web.socketio.handlers import SocketIOHandler, session_manager
+    from src.evolution.conversational_builder import ConversationalWorkflowBuilder
+
+    sio_manager = SocketIOConnectionManager(sio)
+    sio_handlers = {}
+
+    # =============== Socket.IO 事件注册 ===============
+
+    @sio.event
+    async def connect(sid, environ, auth):
+        """Socket.IO 连接事件"""
+        # 获取 session_id
+        session_id = None
+        if auth:
+            session_id = auth.get("session_id")
+
+        if not session_id:
+            # 从 query string 获取
+            query = environ.get("QUERY_STRING", "")
+            for param in query.split("&"):
+                if param.startswith("session_id="):
+                    session_id = param.split("=")[1]
+                    break
+
+        if not session_id:
+            # 生成新的 session_id
+            from datetime import datetime
+
+            session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+        user_id = auth.get("user_id") if auth else None
+
+        # 注册连接
+        await sio_manager.connect(sid, session_id, user_id)
+
+        # 获取或创建会话
+        builder = await session_manager.get_session(session_id)
+        is_reconnect = builder is not None
+
+        if not builder:
+            storage_path = Path("./workspaces") / session_id
+            builder = ConversationalWorkflowBuilder(
+                meta_agent=_meta_agent,
+                tool_registry=_tool_registry,
+                llm_client=_llm_client,
+                workflow_engine=_workflow_engine,
+                storage_path=storage_path,
+                session_id=session_id,
+            )
+            await builder.init_dependencies()
+            await session_manager.create_session(session_id, builder)
+            logger.info(f"Socket.IO 创建新会话: {session_id}")
+        else:
+            if not builder._initialized:
+                await builder.init_dependencies()
+            logger.debug(f"Socket.IO 复用现有会话: {session_id}")
+
+        # 创建 handler
+        handler = SocketIOHandler(sio, sio_manager, sid, session_id, builder)
+        sio_handlers[sid] = handler
+
+        # 发送连接成功消息
+        history_count = len(builder.conversation_history)
+        await sio.emit(
+            "connected",
+            {
+                "type": "connected",
+                "payload": {
+                    "session_id": session_id,
+                    "message": "连接成功" if not is_reconnect else "重新连接成功",
+                    "is_reconnect": is_reconnect,
+                    "history_count": history_count,
+                    "mode": builder.mode.value if hasattr(builder, "mode") else "idle",
+                },
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            },
+            room=sid,
+        )
+
+        # 发送初始工作流状态
+        initial_state = builder._get_workflow_state()
+        if initial_state:
+            await sio.emit(
+                "workflow_update",
+                {
+                    "type": "workflow_update",
+                    "payload": initial_state,
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                },
+                room=sid,
+            )
+
+        logger.info(f"Socket.IO 连接: sid={sid}, session={session_id}")
+
+    @sio.event
+    async def disconnect(sid):
+        """Socket.IO 断开事件"""
+        if sid in sio_handlers:
+            await sio_handlers[sid].cleanup()
+            del sio_handlers[sid]
+        await sio_manager.disconnect(sid)
+        logger.info(f"Socket.IO 断开: sid={sid}")
+
+    # =============== 业务事件路由 ===============
+
+    @sio.on("chat_message")
+    async def on_chat_message(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_chat_message(data)
+
+    @sio.on("user_action")
+    async def on_user_action(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_user_action(data)
+
+    @sio.on("load_workflow")
+    async def on_load_workflow(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_load_workflow(data)
+
+    @sio.on("save_workflow")
+    async def on_save_workflow(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_save_workflow(data)
+
+    @sio.on("list_workflows")
+    async def on_list_workflows(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_list_workflows(data)
+
+    @sio.on("delete_workflow")
+    async def on_delete_workflow(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_delete_workflow(data)
+
+    @sio.on("update_agent")
+    async def on_update_agent(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_update_agent(data)
+
+    @sio.on("optimize_prompt")
+    async def on_optimize_prompt(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_optimize_prompt(data)
+
+    @sio.on("list_agents")
+    async def on_list_agents(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_list_agents(data)
+
+    @sio.on("reuse_agent")
+    async def on_reuse_agent(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_reuse_agent(data)
+
+    @sio.on("get_agent_templates")
+    async def on_get_agent_templates(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_get_agent_templates(data)
+
+    @sio.on("get_execution_history")
+    async def on_get_execution_history(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_get_execution_history(data)
+
+    @sio.on("get_execution_detail")
+    async def on_get_execution_detail(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_get_execution_detail(data)
+
+    @sio.on("sync_messages")
+    async def on_sync_messages(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_sync_messages(data)
+
+    @sio.on("subscribe")
+    async def on_subscribe(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_subscribe(data)
+
+    @sio.on("unsubscribe")
+    async def on_unsubscribe(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_unsubscribe(data)
+
+    # =============== FastAPI 应用 ===============
 
     app = FastAPI(
         title="对话式工作流构建器",
@@ -151,16 +360,20 @@ def create_app() -> FastAPI:
     app.include_router(agents_router, prefix="/api")
     app.include_router(executions_router, prefix="/api")
 
-    # WebSocket 端点
+    # =============== 保留传统 WebSocket 端点（向后兼容）===============
+
     @app.websocket("/ws/{session_id}")
     async def websocket_endpoint(
         websocket: WebSocket,
         session_id: str,
         user_id: Optional[str] = Query(None),
     ):
-        """WebSocket 连接端点"""
+        """传统 WebSocket 连接端点（向后兼容）"""
         from src.web.websocket.manager import manager
-        from src.web.websocket.handlers import WebSocketHandler, session_manager
+        from src.web.websocket.handlers import (
+            WebSocketHandler,
+            session_manager as ws_session_manager,
+        )
         from src.evolution.conversational_builder import ConversationalWorkflowBuilder
 
         # 连接
@@ -168,10 +381,10 @@ def create_app() -> FastAPI:
 
         try:
             # 获取或创建会话
-            builder = await session_manager.get_session(session_id)
+            builder = await ws_session_manager.get_session(session_id)
 
             if not builder:
-                # 创建新的构建器（传入 session_id 以便从数据库恢复）
+                # 创建新的构建器
                 storage_path = Path("./workspaces") / session_id
                 builder = ConversationalWorkflowBuilder(
                     meta_agent=_meta_agent,
@@ -179,17 +392,15 @@ def create_app() -> FastAPI:
                     llm_client=_llm_client,
                     workflow_engine=_workflow_engine,
                     storage_path=storage_path,
-                    session_id=session_id,  # 传入 session_id 用于数据库恢复
+                    session_id=session_id,
                 )
-                # 异步初始化（从数据库加载会话历史）
                 await builder.init_dependencies()
-                await session_manager.create_session(session_id, builder)
-                logger.info(f"创建新会话: {session_id}")
+                await ws_session_manager.create_session(session_id, builder)
+                logger.info(f"WebSocket 创建新会话: {session_id}")
             else:
-                # 已有会话，确保已初始化
                 if not builder._initialized:
                     await builder.init_dependencies()
-                logger.debug(f"复用现有会话: {session_id}")
+                logger.debug(f"WebSocket 复用现有会话: {session_id}")
 
             # 创建处理器并处理连接
             handler = WebSocketHandler(
@@ -208,7 +419,6 @@ def create_app() -> FastAPI:
         finally:
             await manager.disconnect(session_id)
 
-    # 快速创建会话的 WebSocket 端点
     @app.websocket("/ws/new")
     async def websocket_new_session(
         websocket: WebSocket,
@@ -221,7 +431,6 @@ def create_app() -> FastAPI:
             f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         )
 
-        # 重定向到带 session_id 的端点
         await websocket_endpoint(websocket, session_id, user_id)
 
     # 健康检查
@@ -234,6 +443,7 @@ def create_app() -> FastAPI:
             "tool_registry": _tool_registry is not None,
             "llm_client": _llm_client is not None,
             "workflow_engine": _workflow_engine is not None,
+            "socketio": sio is not None,
         }
 
     # 静态文件（前端）
@@ -303,7 +513,10 @@ def create_app() -> FastAPI:
             </html>
             """
 
-    return app
+    # 【关键】包装为 Socket.IO ASGI 应用
+    socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
+
+    return socket_app
 
 
 # 应用实例
