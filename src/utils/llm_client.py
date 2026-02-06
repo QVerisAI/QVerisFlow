@@ -207,6 +207,9 @@ class ClientFactory:
         timeout: Optional[float] = None,
         max_retries: int = 3,
         use_cache: bool = False,  # 默认禁用 ChatOpenAI 缓存，避免状态累积问题
+        thinking: Optional[
+            bool
+        ] = None,  # Kimi thinking 模式: None=自动, True=启用, False=禁用
     ) -> ChatOpenAI:
         """
         创建 LangChain ChatOpenAI 客户端
@@ -215,9 +218,16 @@ class ClientFactory:
         - 每次创建全新的 ChatOpenAI 实例
         - 不传入 HTTP 客户端，让 ChatOpenAI 自己管理连接
         - 完全避免任何可能的状态累积
+
+        Kimi/Moonshot 模型特殊处理：
+        - thinking=True: 启用 thinking 模式，temperature 必须为 1.0
+        - thinking=False: 禁用 thinking 模式，temperature 必须为 0.6
+        - thinking=None: 默认禁用 thinking 模式（工具调用场景更稳定）
         """
         # ChatOpenAI 实例缓存（仅在明确启用时使用）
-        chat_cache_key = f"langchain_{base_url}_{model_name}_{temperature}_{max_tokens}"
+        chat_cache_key = (
+            f"langchain_{base_url}_{model_name}_{temperature}_{max_tokens}_{thinking}"
+        )
         if use_cache and chat_cache_key in cls._client_cache:
             logger.debug(f"使用缓存的 LangChain 客户端: {model_name}")
             return cls._client_cache[chat_cache_key]
@@ -231,31 +241,38 @@ class ClientFactory:
         # 准备额外的模型参数
         model_kwargs = {}
 
-        # 检查是否为 Kimi/Moonshot 模型，如果是，禁用 thinking 模式
-        # Kimi 的 thinking 模式会导致 tool calling 场景下的消息格式问题
-        # 错误: 'thinking is enabled but reasoning_content is missing in assistant tool call message'
-        # 根据 Moonshot API 官方文档，正确的禁用方式是：
-        # "thinking": {"type": "disabled"}
-        # 参考: https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart#disable-thinking-capability-example
-        #
-        # 重要：kimi-k2.5 模型的 temperature 限制：
-        # - thinking 模式启用时：temperature 必须为 1.0
-        # - thinking 模式禁用时：temperature 必须为 0.6
-        # 任何其他值都会导致 400 错误
+        # 检查是否为 Kimi/Moonshot 模型
+        # Kimi 模型对 thinking 模式和 temperature 有严格要求：
+        # - thinking 启用时：temperature 必须为 1.0
+        # - thinking 禁用时：temperature 必须为 0.6
+        # 参考: https://platform.moonshot.ai/docs/guide/kimi-k2-5-quickstart
         model_lower = model_name.lower() if model_name else ""
         is_kimi = "kimi" in model_lower or "moonshot" in model_lower
 
         if is_kimi:
-            # 通过 extra_body 禁用 thinking 模式
-            # kimi-k2.5 模型默认启用 thinking，需要显式禁用
-            model_kwargs["extra_body"] = {
-                "thinking": {"type": "disabled"},  # 正确的禁用 thinking 模式参数
-            }
-            # 禁用 thinking 模式时，temperature 必须为 0.6
-            temperature = 0.6
-            logger.debug(
-                f"🔄 Kimi/Moonshot 模型检测到，已禁用 thinking 模式，temperature 设为 0.6"
-            )
+            # 确定 thinking 模式（默认禁用，因为工具调用场景更稳定）
+            enable_thinking = thinking if thinking is not None else False
+
+            if enable_thinking:
+                # 启用 thinking 模式
+                model_kwargs["extra_body"] = {
+                    "thinking": {"type": "enabled", "budget_tokens": 10000},
+                }
+                # thinking 模式启用时，temperature 必须为 1.0
+                temperature = 1.0
+                logger.debug(
+                    f"🧠 Kimi/Moonshot 模型启用 thinking 模式，temperature 设为 1.0"
+                )
+            else:
+                # 禁用 thinking 模式
+                model_kwargs["extra_body"] = {
+                    "thinking": {"type": "disabled"},
+                }
+                # thinking 模式禁用时，temperature 必须为 0.6
+                temperature = 0.6
+                logger.debug(
+                    f"🔄 Kimi/Moonshot 模型禁用 thinking 模式，temperature 设为 0.6"
+                )
 
         # 构建 ChatOpenAI 参数
         chat_kwargs = {
@@ -388,6 +405,8 @@ class UnifiedLLMClient:
         enable_token_tracking: bool = True,
         # ==== HTTP 客户端配置（可选） ====
         http_config: Optional[Dict[str, Any]] = None,
+        # ==== Kimi/Moonshot thinking 模式 ====
+        thinking: Optional[bool] = None,  # None=自动检测, True=启用, False=禁用
         # ==== 其他参数 ====
         **kwargs,
     ):
@@ -427,6 +446,7 @@ class UnifiedLLMClient:
         self.retry_base_delay = retry_base_delay
         self.enable_token_tracking = enable_token_tracking
         self.http_config = http_config or {}
+        self.thinking = thinking  # Kimi/Moonshot thinking 模式
         self.kwargs = kwargs
 
         # Token 追踪器
@@ -462,6 +482,7 @@ class UnifiedLLMClient:
                 max_tokens=self.max_tokens,
                 timeout=self.timeout,
                 max_retries=self.max_retries,
+                thinking=self.thinking,
             )
             self._litellm_model = None
 
@@ -1268,6 +1289,7 @@ class UnifiedLLMClient:
                 timeout=self.timeout,
                 max_retries=self.max_retries,
                 use_cache=False,  # 禁用 ChatOpenAI 缓存
+                thinking=self.thinking,  # 传递 thinking 参数
             )
 
         # 向后兼容：返回缓存的客户端（不推荐）
@@ -1284,6 +1306,7 @@ class UnifiedLLMClient:
             timeout=self.timeout,
             max_retries=self.max_retries,
             use_cache=False,
+            thinking=self.thinking,  # 传递 thinking 参数
         )
 
     def get_async_openai_client(self) -> AsyncOpenAI:

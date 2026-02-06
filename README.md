@@ -1,4 +1,4 @@
-# QVerisGen
+# QVerisFlow
 
 基于 LangGraph 的多智能体框架，支持对话式工作流构建、可视化画布编辑、智能 Agent 生成和实时执行监控。
 

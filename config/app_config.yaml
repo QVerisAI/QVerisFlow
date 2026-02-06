@@ -1,0 +1,217 @@
+
+# 日志配置
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+
+# ============================================================
+# 多模型配置（新格式）
+# 每个模型独立配置 api_key、base_url
+# ============================================================
+models:
+  qwen-vl-plus:
+    api_key: ${QWEN_API_KEY:}
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model_name: "qwen3-vl-plus"
+    max_retries: 3
+    retry_delay: 5
+    type: "multimodal"
+    max_tokens: 32768
+    temperature: 0.3
+    capabilities:
+      - vision
+      - reasoning
+    cost_tier: "low"
+
+  qwen-plus:
+    api_key: ${QWEN_API_KEY:}
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model_name: "qwen-plus"
+    max_retries: 3
+    retry_delay: 5
+    type: "language"
+    max_tokens: 32768
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+    cost_tier: "low"
+
+  qwen-max:
+    api_key: ${QWEN_API_KEY:}
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model_name: "qwen3-max"
+    max_retries: 3
+    retry_delay: 5
+    type: "language"
+    max_tokens: 65536
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+      - long_context
+    cost_tier: "medium"
+
+  gpt-5.2:
+    api_key: ${OPENAI_API_KEY:}
+    base_url: "https://openrouter.ai/api/v1"
+    model_name: "openai/gpt-5.2"
+    max_retries: 3
+    retry_delay: 5
+    type: "multimodal"
+    max_tokens: 128000
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+      - vision
+    cost_tier: "high"
+
+  glm-4.7:
+    api_key: ${GLM_API_KEY:}
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    model_name: "glm-4.7"
+    max_retries: 3
+    retry_delay: 5
+    type: "language"
+    max_tokens: 128000
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+    cost_tier: "low"
+
+  deepseek-r1:
+    api_key: ${DEEPSEEK_API_KEY:}
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model_name: "deepseek-r1"
+    max_retries: 3
+    retry_delay: 5
+    type: "language"
+    max_tokens: 16384
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+      - long_context
+      - deep_thinking
+    cost_tier: "medium"
+
+  deepseek-v3.2:
+    api_key: ${DEEPSEEK_API_KEY:}
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model_name: "deepseek-v3.2"
+    max_retries: 3
+    retry_delay: 5
+    type: "language"
+    max_tokens: 65536
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+      - long_context
+    cost_tier: "medium"
+
+  kimi-k2.5:
+    api_key: ${KIMI_API_KEY:}
+    base_url: "https://api.moonshot.cn/v1"
+    model_name: "kimi-k2.5"
+    max_retries: 3
+    retry_delay: 5
+    type: "multimodal"
+    thinking: false
+    max_tokens: 65536
+    temperature: 0.6
+    capabilities:
+      - reasoning
+      - coding
+      - vision
+      - long_context
+    cost_tier: "medium"
+
+  kimi-k2.5-thinking:
+    api_key: ${KIMI_API_KEY:}
+    base_url: "https://api.moonshot.cn/v1"
+    model_name: "kimi-k2.5"
+    max_retries: 3
+    retry_delay: 5
+    type: "multimodal"
+    thinking: true
+    max_tokens: 65536
+    temperature: 1.0
+    capabilities:
+      - reasoning
+      - coding
+      - vision
+      - long_context
+    cost_tier: "medium"
+
+  minimax-m2.1:
+    api_key: ${MINIMAX_API_KEY:}
+    base_url: "https://api.minimax.chat/v1"
+    model_name: "minimax/minimax-m2.1"
+    max_retries: 3
+    retry_delay: 5
+    type: "language"
+    max_tokens: 65536
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+      - long_context
+    cost_tier: "low"
+
+  claude-sonnet-4.5:
+    api_key: ${ANTHROPIC_API_KEY:}
+    base_url: "https://openrouter.ai/api/v1"
+    model_name: "anthropic/claude-sonnet-4.5"
+    max_retries: 3
+    retry_delay: 5
+    type: "language"
+    max_tokens: 128000
+    temperature: 0.3
+    capabilities:
+      - reasoning
+      - coding
+      - long_context
+    cost_tier: "high"
+
+  embedding:
+    api_key: ${EMBEDDING_API_KEY:}
+    base_url: "https://api.siliconflow.cn/v1"
+    model_name: "BAAI/bge-m3"
+    dim: 1024
+    encoding_format: "float"
+    type: "embedding"
+
+
+default_model: ${DEFAULT_MODEL:kimi-k2.5}
+
+
+# QVeris 远程工具配置
+# 文档: https://qveris.ai/docs
+qveris:
+  enabled: true  # 是否启用 QVeris 集成
+  api_key: ${QVERIS_API_KEY:}  # QVeris API Key（从环境变量读取）
+  base_url: ${QVERIS_BASE_URL:https://qveris.ai/api/v1}  # QVeris API 基础 URL
+  default_limit: 20  # 默认搜索结果数量（1-100）
+  cache_ttl: 3600  # 搜索结果缓存时间（秒）
+  max_response_size: 20480  # 最大响应大小（字节）
+  timeout: 60  # API 请求超时时间（秒）
+  max_retries: 3  # API 请求最大重试次数
+  # 是否自动注册发现的工具为本地代理工具
+  # 建议保持为 false，让 Agent 按照 QVeris 设计模式工作：
+  # 1. 使用 qveris_search_tools 搜索工具
+  # 2. 使用 qveris_execute_tool 执行选定的工具
+  # 自动注册可能导致工具名称过长（超过 LLM 的 64 字符限制）
+  auto_register_discovered: false
+
+
+# 调试配置
+debug:
+  enabled: false
+  save_raw_content: false
+  save_llm_responses: false
+  verbose_logging: false
+  mock_mode: false  # 模拟模式（不调用 LLM）

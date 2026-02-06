@@ -437,11 +437,15 @@ class AppConfigLoader:
         """
         解析环境变量占位符
 
-        支持格式: ${VAR_NAME:default_value}
+        支持格式:
+        - ${VAR_NAME} - 无默认值
+        - ${VAR_NAME:default_value} - 带默认值
+        - ${VAR_NAME:-default_value} - shell 风格，带 - 的默认值
         """
         import re
 
-        pattern = r"\$\{([^}:]+)(?::([^}]*))?\}"
+        # 支持 ${VAR_NAME}, ${VAR_NAME:default}, ${VAR_NAME:-default} 格式
+        pattern = r"\$\{([^}:]+)(?::-?([^}]*))?\}"
 
         def replace(match):
             var_name = match.group(1)
@@ -531,10 +535,10 @@ class AppConfigLoader:
     ):
         """
         创建 UnifiedLLMClient 实例
-        
+
         支持三种方式（按优先级）：
         1. 指定 model_name（使用 models 配置）
-        2. 使用 model_selection.default（如果配置了）
+        2. 使用 default_model 或 model_selection.default（如果配置了）
         3. 旧方式：使用 tier（使用 openai.models 配置，向后兼容）
 
         Args:
@@ -547,18 +551,42 @@ class AppConfigLoader:
             UnifiedLLMClient 实例
         """
         from src.utils.llm_client import UnifiedLLMClient
-        
-        # 如果未指定 model_name，尝试从 model_selection.default 获取
-        if not model_name and self.has_models_config():
-            model_selection = self.get_model_selection_config()
-            default_model = model_selection.get("default")
+
+        # 检查是否使用新格式配置
+        use_new_format = self.has_models_config()
+
+        # 如果未指定 model_name，尝试从 default_model 或 model_selection.default 获取
+        if not model_name and use_new_format:
+            # 首先检查顶层 default_model
+            if self._config is None:
+                self.load()
+            default_model = self._config.get("default_model")
+
+            # 如果没有，检查 model_selection.default
+            if not default_model:
+                model_selection = self.get_model_selection_config()
+                default_model = model_selection.get("default")
+
             if default_model:
                 model_name = default_model
-        
+
         # 使用新的 model_name 方式
-        if model_name and self.has_models_config():
+        if use_new_format:
             models_config = self.get_models_config()
-            
+
+            # 如果没有指定 model_name，使用第一个可用的非 embedding 模型
+            if not model_name:
+                for key, config in models_config.items():
+                    if config.get("type") != "embedding":
+                        model_name = key
+                        logger.warning(
+                            f"未指定默认模型，使用第一个可用模型: {model_name}"
+                        )
+                        break
+
+            if not model_name:
+                raise ValueError("无法确定默认模型，请在配置中设置 default_model")
+
             # 查找模型配置
             model_config = None
             if model_name in models_config:
@@ -569,11 +597,13 @@ class AppConfigLoader:
                     if config.get("model_name") == model_name or key in model_name:
                         model_config = config
                         break
-            
+
             if model_config:
                 # 使用新格式配置
                 kwargs = {
-                    "provider": self._get_provider_from_url(model_config.get("base_url", "")),
+                    "provider": self._get_provider_from_url(
+                        model_config.get("base_url", "")
+                    ),
                     "base_url": model_config.get("base_url", ""),
                     "api_key": model_config.get("api_key", ""),
                     "model_name": model_config.get("model_name", model_name),
@@ -582,14 +612,22 @@ class AppConfigLoader:
                     "max_tokens": model_config.get("max_tokens", 4096),
                     "max_retries": model_config.get("max_retries", 3),
                 }
+                # 支持 Kimi/Moonshot thinking 模式配置
+                if "thinking" in model_config:
+                    kwargs["thinking"] = model_config.get("thinking")
                 kwargs.update(override_kwargs)
                 return UnifiedLLMClient(**kwargs)
-        
-        # 回退到旧的 tier 方式
+            else:
+                available = [
+                    k for k, v in models_config.items() if v.get("type") != "embedding"
+                ]
+                raise ValueError(f"未知的模型: {model_name}。可用模型: {available}")
+
+        # 回退到旧的 tier 方式（仅当没有新格式配置时）
         openai_config = self.get_openai_config()
         model_config = self.get_model_config(tier)
         http_config = openai_config.get("http_client", {})
-        
+
         # 从 URL 推断 provider，而不是硬编码
         base_url = openai_config.get("base_url", "https://openrouter.ai/api/v1")
         provider = self._get_provider_from_url(base_url)
@@ -612,7 +650,7 @@ class AppConfigLoader:
         kwargs.update(override_kwargs)
 
         return UnifiedLLMClient(**kwargs)
-    
+
     def _get_provider_from_url(self, base_url: str) -> str:
         """从 URL 推断提供商"""
         if "dashscope" in base_url:
@@ -623,6 +661,10 @@ class AppConfigLoader:
             return "zhipu"
         elif "siliconflow" in base_url:
             return "siliconflow"
+        elif "moonshot" in base_url:
+            return "moonshot"
+        elif "minimax" in base_url:
+            return "minimax"
         else:
             return "openai_compatible"
 
@@ -634,25 +676,35 @@ class AppConfigLoader:
     def get_models_config(self) -> Dict[str, Any]:
         """
         获取多模型配置部分（新格式）
-        
+
         Returns:
             模型配置字典，键为模型名称，值为模型配置
         """
         if self._config is None:
             self.load()
         return self._config.get("models", {})
-    
+
     def get_model_selection_config(self) -> Dict[str, Any]:
         """
         获取模型选择策略配置
-        
+
         Returns:
             模型选择策略配置字典
         """
         if self._config is None:
             self.load()
-        return self._config.get("model_selection", {})
-    
+
+        # 如果配置了 model_selection，直接返回
+        if "model_selection" in self._config:
+            return self._config["model_selection"]
+
+        # 如果没有 model_selection，但有 default_model，构造一个兼容的返回值
+        default_model = self._config.get("default_model")
+        if default_model:
+            return {"default": default_model}
+
+        return {}
+
     def has_models_config(self) -> bool:
         """检查是否存在新格式的 models 配置"""
         if self._config is None:
@@ -750,13 +802,13 @@ def get_app_config_loader() -> AppConfigLoader:
 class ModelRegistry:
     """
     模型注册表 - 管理多个 LLM 模型配置
-    
+
     支持：
     - 每个模型独立的 api_key、base_url 配置
     - 按模型名称创建 LLM 客户端
     - 客户端缓存（避免重复创建）
     - 智能模型选择（根据任务复杂度和能力需求）
-    
+
     配置格式示例（config/app_config.yaml）:
     ```yaml
     models:
@@ -776,13 +828,15 @@ class ModelRegistry:
         cost_tier: "high"
     ```
     """
-    
+
     _instance: Optional["ModelRegistry"] = None
-    
-    def __init__(self, models_config: Dict[str, Any], selection_config: Dict[str, Any] = None):
+
+    def __init__(
+        self, models_config: Dict[str, Any], selection_config: Dict[str, Any] = None
+    ):
         """
         初始化模型注册表
-        
+
         Args:
             models_config: 模型配置字典
             selection_config: 模型选择策略配置
@@ -790,9 +844,11 @@ class ModelRegistry:
         self._models = models_config
         self._selection_config = selection_config or {}
         self._clients: Dict[str, Any] = {}  # 客户端缓存
-        
-        logger.info(f"✅ ModelRegistry 初始化完成，可用模型: {list(self._models.keys())}")
-    
+
+        logger.info(
+            f"✅ ModelRegistry 初始化完成，可用模型: {list(self._models.keys())}"
+        )
+
     @classmethod
     def get_instance(cls) -> "ModelRegistry":
         """获取模型注册表单例"""
@@ -803,29 +859,29 @@ class ModelRegistry:
             selection_config = loader.get_model_selection_config()
             cls._instance = cls(models_config, selection_config)
         return cls._instance
-    
+
     @classmethod
     def reset_instance(cls) -> None:
         """重置单例（主要用于测试）"""
         cls._instance = None
-    
+
     def get_model_config(self, model_name: str) -> Dict[str, Any]:
         """
         获取指定模型的配置
-        
+
         Args:
             model_name: 模型名称（如 "qwen-plus", "deepseek-v3"）
-            
+
         Returns:
             模型配置字典
-            
+
         Raises:
             ValueError: 如果模型不存在
         """
         # 尝试直接匹配
         if model_name in self._models:
             return self._models[model_name]
-        
+
         # 尝试模糊匹配（支持带前缀的模型名，如 "deepseek/deepseek-v3"）
         for key, config in self._models.items():
             if config.get("model_name") == model_name:
@@ -833,10 +889,10 @@ class ModelRegistry:
             # 检查模型名是否包含在 key 中
             if key in model_name or model_name in key:
                 return config
-        
+
         available = list(self._models.keys())
         raise ValueError(f"未知的模型: {model_name}。可用模型: {available}")
-    
+
     def get_available_models(
         self,
         type_filter: str = None,
@@ -844,11 +900,11 @@ class ModelRegistry:
     ) -> List[str]:
         """
         获取符合条件的可用模型列表
-        
+
         Args:
             type_filter: 类型过滤（如 "language", "multimodal", "embedding"）
             capability_filter: 能力过滤（如 ["reasoning", "coding"]）
-            
+
         Returns:
             符合条件的模型名称列表
         """
@@ -857,21 +913,21 @@ class ModelRegistry:
             # 排除 embedding 模型（除非明确请求）
             if config.get("type") == "embedding" and type_filter != "embedding":
                 continue
-                
+
             # 类型过滤
             if type_filter and config.get("type") != type_filter:
                 continue
-            
+
             # 能力过滤
             if capability_filter:
                 capabilities = config.get("capabilities", [])
                 if not all(cap in capabilities for cap in capability_filter):
                     continue
-            
+
             result.append(name)
-        
+
         return result
-    
+
     def create_client(
         self,
         model_name: str,
@@ -881,25 +937,25 @@ class ModelRegistry:
     ) -> Any:
         """
         为指定模型创建 LLM 客户端
-        
+
         Args:
             model_name: 模型名称
             client_type: 客户端类型（async_openai, langchain, litellm）
             use_cache: 是否使用缓存
             **override_kwargs: 覆盖默认配置的参数
-            
+
         Returns:
             UnifiedLLMClient 实例
         """
         from src.utils.llm_client import UnifiedLLMClient
-        
+
         # 缓存键
         cache_key = f"{model_name}:{client_type}"
-        
+
         # 检查缓存
         if use_cache and cache_key in self._clients:
             return self._clients[cache_key]
-        
+
         # 获取模型配置
         try:
             config = self.get_model_config(model_name)
@@ -908,7 +964,7 @@ class ModelRegistry:
             default_model = self._selection_config.get("default", "qwen-plus")
             logger.warning(f"模型 {model_name} 未配置，使用默认模型 {default_model}")
             config = self.get_model_config(default_model)
-        
+
         # 构建参数
         kwargs = {
             "provider": self._get_provider_from_url(config.get("base_url", "")),
@@ -920,20 +976,24 @@ class ModelRegistry:
             "max_tokens": config.get("max_tokens", 4096),
             "max_retries": config.get("max_retries", 3),
         }
-        
+
+        # 支持 Kimi/Moonshot thinking 模式配置
+        if "thinking" in config:
+            kwargs["thinking"] = config.get("thinking")
+
         # 应用覆盖参数
         kwargs.update(override_kwargs)
-        
+
         # 创建客户端
         client = UnifiedLLMClient(**kwargs)
-        
+
         # 缓存
         if use_cache:
             self._clients[cache_key] = client
-        
+
         logger.info(f"✅ 创建 LLM 客户端: {model_name} ({client_type})")
         return client
-    
+
     def _get_provider_from_url(self, base_url: str) -> str:
         """从 URL 推断提供商"""
         if "dashscope" in base_url:
@@ -944,9 +1004,13 @@ class ModelRegistry:
             return "zhipu"
         elif "siliconflow" in base_url:
             return "siliconflow"
+        elif "moonshot" in base_url:
+            return "moonshot"
+        elif "minimax" in base_url:
+            return "minimax"
         else:
             return "openai_compatible"
-    
+
     def select_model(
         self,
         task_complexity: str = "medium",
@@ -955,33 +1019,33 @@ class ModelRegistry:
     ) -> str:
         """
         智能选择合适的模型
-        
+
         Args:
             task_complexity: 任务复杂度（"simple", "medium", "complex", "multimodal"）
             required_capabilities: 所需能力列表
             prefer_low_cost: 是否优先选择低成本模型
-            
+
         Returns:
             推荐的模型名称
         """
         # 使用配置中的偏好设置
         if prefer_low_cost is None:
             prefer_low_cost = self._selection_config.get("prefer_low_cost", True)
-        
+
         # 首先检查复杂度映射
         complexity_mapping = self._selection_config.get("complexity_mapping", {})
         if task_complexity in complexity_mapping:
             suggested = complexity_mapping[task_complexity]
             if suggested in self._models:
                 return suggested
-        
+
         # 根据能力过滤
         candidates = self.get_available_models(capability_filter=required_capabilities)
-        
+
         if not candidates:
             # 回退到默认模型
             return self._selection_config.get("default", "qwen-plus")
-        
+
         # 按成本排序
         if prefer_low_cost:
             cost_order = {"low": 0, "medium": 1, "high": 2}
@@ -990,21 +1054,21 @@ class ModelRegistry:
                     self._models.get(m, {}).get("cost_tier", "medium"), 1
                 )
             )
-        
+
         return candidates[0]
-    
+
     def get_default_model(self) -> str:
         """获取默认模型名称"""
         return self._selection_config.get("default", "qwen-plus")
-    
+
     def get_fallback_model(self) -> str:
         """获取备用模型名称"""
         return self._selection_config.get("fallback", "deepseek-v3")
-    
+
     def get_models_info(self) -> List[Dict[str, Any]]:
         """
         获取所有模型的信息列表（用于提示模板）
-        
+
         Returns:
             模型信息列表，包含名称、类型、能力、成本等
         """
@@ -1012,16 +1076,18 @@ class ModelRegistry:
         for name, config in self._models.items():
             if config.get("type") == "embedding":
                 continue
-            result.append({
-                "name": name,
-                "model_name": config.get("model_name", name),
-                "type": config.get("type", "language"),
-                "capabilities": config.get("capabilities", []),
-                "cost_tier": config.get("cost_tier", "medium"),
-                "max_tokens": config.get("max_tokens", 4096),
-            })
+            result.append(
+                {
+                    "name": name,
+                    "model_name": config.get("model_name", name),
+                    "type": config.get("type", "language"),
+                    "capabilities": config.get("capabilities", []),
+                    "cost_tier": config.get("cost_tier", "medium"),
+                    "max_tokens": config.get("max_tokens", 4096),
+                }
+            )
         return result
-    
+
     def clear_cache(self) -> None:
         """清除客户端缓存"""
         self._clients.clear()
@@ -1041,20 +1107,20 @@ def create_llm_client_by_name(
 ) -> Any:
     """
     便捷函数：按模型名创建 LLM 客户端
-    
+
     Args:
         model_name: 模型名称（如 "qwen-plus", "deepseek-v3"）
         client_type: 客户端类型
         config_path: 配置文件路径（可选）
         **kwargs: 覆盖默认配置
-        
+
     Returns:
         UnifiedLLMClient 实例
     """
     if config_path:
         get_app_config_loader().load(config_path)
         ModelRegistry.reset_instance()
-    
+
     return get_model_registry().create_client(model_name, client_type, **kwargs)
 
 
