@@ -386,37 +386,35 @@ class ConversationalWorkflowBuilder:
                 )
 
     def _format_execution_message(self, event: Dict[str, Any]) -> Optional[str]:
-        """格式化执行事件为消息文本
-
-        注意：大部分执行事件已在前端 ExecutionProgressCard 中统一展示，
-        不再单独发送消息，只保留失败事件作为重要提醒。
-        """
+        """格式化执行事件为消息文本。仅对完成/失败返回消息，其余由进度卡片展示。"""
         event_type = event.get("type") or event.get("event_type", "")
-        # 获取嵌套的 data 字段（WorkflowEngine 的事件数据都在 data 中）
         data = event.get("data", {})
 
-        # 这些事件已在前端 ExecutionProgressCard 中统一展示，不再单独发送消息
-        if event_type in [
-            "execution_started",
-            "workflow_started",
-            "node_started",
-            "node_completed",
-            "node_skipped",
-            "execution_completed",
-            "workflow_completed",
-            "progress_update",
-        ]:
+        # 执行开始：不发消息，卡片出现即表示开始
+        if event_type in ("execution_started", "workflow_started"):
             return None
 
-        # 只保留失败事件的消息（作为重要提醒）
-        elif event_type == "node_failed":
-            node_name = event.get("node_name", event.get("node_id", "节点"))
-            error = data.get("error") or event.get("error", "未知错误")
-            return f"❌ [{node_name}] 执行失败: {error}"
+        # 执行完成：发送结论（使用 final_narrative）
+        if event_type in ("execution_completed", "workflow_completed"):
+            narrative = data.get("final_narrative")
+            return narrative if isinstance(narrative, str) else None
 
-        elif event_type in ["execution_failed", "workflow_failed"]:
+        # 节点完成：不发消息，卡片内展示
+        if event_type == "node_completed":
+            return None
+
+        if event_type in ("node_started", "node_skipped", "progress_update"):
+            return None
+
+        # 失败事件：保留通知
+        if event_type == "node_failed":
+            node_name = event.get("node_name") or event.get("node_id") or "节点"
             error = data.get("error") or event.get("error", "未知错误")
-            return f"💥 工作流执行失败: {error}"
+            return f"[{node_name}] 执行失败: {error}"
+
+        if event_type in ("execution_failed", "workflow_failed"):
+            error = data.get("error") or event.get("error", "未知错误")
+            return f"工作流执行失败: {error}"
 
         return None
 

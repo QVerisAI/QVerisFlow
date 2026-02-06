@@ -49,6 +49,41 @@ logger = get_logger()
 MAX_EVENT_HISTORY_SIZE = 100
 
 
+class StreamBatcher:
+    """将流式 token 按间隔或最小字符数批量发送，避免前端收到过于频繁的事件"""
+
+    def __init__(
+        self,
+        flush_callback: Callable[[str, str], Awaitable[None]],
+        interval: float = 0.1,
+        min_chars: int = 20,
+    ):
+        self._flush_callback = flush_callback
+        self._interval = interval
+        self._min_chars = min_chars
+        self._buffer: Dict[str, str] = {}  # type -> accumulated content
+        self._last_flush: Dict[str, float] = {}
+        self._flush_task: Optional[asyncio.Task] = None
+
+    async def add(self, chunk_type: str, content: str) -> None:
+        if not content:
+            return
+        self._buffer[chunk_type] = self._buffer.get(chunk_type, "") + content
+        self._last_flush[chunk_type] = asyncio.get_event_loop().time()
+        if len(self._buffer[chunk_type]) >= self._min_chars:
+            await self._flush(chunk_type)
+
+    async def _flush(self, chunk_type: str) -> None:
+        text = self._buffer.pop(chunk_type, "")
+        self._last_flush.pop(chunk_type, None)
+        if text:
+            await self._flush_callback(chunk_type, text)
+
+    async def flush_all(self) -> None:
+        for chunk_type in list(self._buffer.keys()):
+            await self._flush(chunk_type)
+
+
 @dataclass
 class NodeExecutionResult:
     """节点执行结果"""
@@ -653,6 +688,24 @@ class WorkflowEngine(IWorkflowEngine):
                 # 推送节点完成事件
                 if node_result.status == "success":
                     node_outputs[node_id] = node_result.output
+                    out_summary, out_narrative, out_highlights = (
+                        self._extract_narrative_fields(node_result.output)
+                    )
+                    # 提取用户可见的输出（过滤技术字段）
+                    user_facing_output = self._extract_user_facing_output(
+                        node_result.output
+                    )
+                    data_payload = {
+                        "duration_ms": node_result.duration_ms,
+                        "output_preview": self._truncate_output(user_facing_output),
+                        "output_summary": out_summary
+                        or self._generate_output_summary(user_facing_output),
+                        "output": user_facing_output,
+                    }
+                    if out_narrative is not None:
+                        data_payload["output_narrative"] = out_narrative
+                    if out_highlights is not None:
+                        data_payload["output_highlights"] = out_highlights
                     await self._emit_event(
                         workflow_id,
                         {
@@ -661,16 +714,7 @@ class WorkflowEngine(IWorkflowEngine):
                             "node_id": node_id,
                             "node_name": node.name,
                             "timestamp": datetime.now().isoformat(),
-                            "data": {
-                                "duration_ms": node_result.duration_ms,
-                                "output_preview": self._truncate_output(
-                                    node_result.output
-                                ),
-                                "output_summary": self._generate_output_summary(
-                                    node_result.output
-                                ),
-                                "output": node_result.output,  # 完整输出供前端渲染
-                            },
+                            "data": data_payload,
                         },
                     )
                 elif node_result.status == "failed":
@@ -744,26 +788,39 @@ class WorkflowEngine(IWorkflowEngine):
 
             # 推送完成事件
             if result.status == WorkflowStatus.COMPLETED:
+                final_out = result.final_output
+                final_summary, final_narrative, final_highlights = (
+                    self._extract_narrative_fields(
+                        final_out if isinstance(final_out, dict) else None
+                    )
+                )
+                data_payload = {
+                    "status": "completed",
+                    "total_duration_ms": result.total_duration_ms,
+                    "nodes_completed": len(
+                        [
+                            r
+                            for r in result.node_results.values()
+                            if r.status == "success"
+                        ]
+                    ),
+                    "total_nodes": len(result.node_results),
+                    "final_output": result.final_output,
+                }
+                if final_narrative is not None:
+                    data_payload["final_narrative"] = final_narrative
+                if final_highlights is not None:
+                    data_payload["final_highlights"] = final_highlights
+                if final_summary is not None and final_narrative is None:
+                    data_payload["final_narrative"] = final_summary
                 await self._emit_event(
                     workflow_id,
                     {
                         "event_type": "workflow_completed",
                         "workflow_id": workflow_id,
-                        "status": "completed",  # 添加明确的 status 字段
+                        "status": "completed",
                         "timestamp": completed_at.isoformat(),
-                        "data": {
-                            "status": "completed",  # 同时在 data 中也添加
-                            "total_duration_ms": result.total_duration_ms,
-                            "nodes_completed": len(
-                                [
-                                    r
-                                    for r in result.node_results.values()
-                                    if r.status == "success"
-                                ]
-                            ),
-                            "total_nodes": len(result.node_results),
-                            "final_output": result.final_output,  # 最终输出供前端渲染
-                        },
+                        "data": data_payload,
                     },
                 )
             elif result.status == WorkflowStatus.FAILED:
@@ -947,6 +1004,72 @@ class WorkflowEngine(IWorkflowEngine):
             return output[:5] if len(output) > 5 else output
 
         return output
+
+    def _extract_narrative_fields(self, output: Any) -> tuple:
+        """从 agent 输出中提取 summary / narrative / highlights（标准输出格式）"""
+        if output is None or not isinstance(output, dict):
+            return (None, None, None)
+        # Agent.run() 返回 { result: { summary, narrative, data, highlights }, ... }，优先从 result 取
+        inner = (
+            output.get("result") if isinstance(output.get("result"), dict) else output
+        )
+        summary = inner.get("summary")
+        narrative = inner.get("narrative")
+        highlights = inner.get("highlights")
+        if not isinstance(summary, str):
+            summary = None
+        if not isinstance(narrative, str):
+            narrative = None
+        if not isinstance(highlights, list):
+            highlights = None
+        else:
+            highlights = [str(h) for h in highlights]
+        return (summary, narrative, highlights)
+
+    # 技术字段黑名单（对用户无意义）
+    _TECHNICAL_FIELDS = {
+        "agent_id",
+        "task_id",
+        "workspace_path",
+        "_workspace_path",
+        "duration_ms",
+        "success",
+        "verification_score",
+        "iterations",
+        "output_files",
+    }
+
+    def _extract_user_facing_output(self, output: Any) -> Any:
+        """
+        提取用户关心的输出数据，过滤技术字段
+
+        从 Agent 输出中提取用户真正需要的数据，过滤掉
+        agent_id, task_id, workspace_path 等技术元数据
+        """
+        if not isinstance(output, dict):
+            return output
+
+        # 优先使用 result 字段（Agent 标准输出格式）
+        result = output.get("result")
+        if isinstance(result, dict):
+            # 如果 result 有 data 字段，优先返回结构化的用户数据
+            data = result.get("data")
+            if data is not None:
+                return {
+                    "summary": result.get("summary"),
+                    "narrative": result.get("narrative"),
+                    "data": data,
+                    "highlights": result.get("highlights"),
+                }
+            # 否则返回整个 result（已经是用户数据）
+            return result
+
+        # 过滤技术字段
+        return {
+            k: v
+            for k, v in output.items()
+            if k.lower() not in self._TECHNICAL_FIELDS and not k.startswith("_")
+        }
 
     def _generate_output_summary(self, output: Any) -> str:
         """生成输出的一句话摘要"""
@@ -1905,25 +2028,62 @@ class WorkflowEngine(IWorkflowEngine):
         # 创建进度回调函数，用于发送节点执行中间状态
         workflow_id = context.get("workflow_id", "")
 
-        async def progress_callback(status: str) -> None:
-            """发送节点进度事件"""
+        async def progress_callback(status) -> None:
+            """发送节点进度事件；支持字符串（兼容）或结构化 dict（node_activity）"""
+            if isinstance(status, dict):
+                await self._emit_event(
+                    workflow_id,
+                    {
+                        "event_type": "node_activity",
+                        "workflow_id": workflow_id,
+                        "node_id": node.node_id,
+                        "node_name": node.name,
+                        "timestamp": datetime.now().isoformat(),
+                        "data": status,
+                    },
+                )
+            else:
+                await self._emit_event(
+                    workflow_id,
+                    {
+                        "event_type": "node_progress",
+                        "workflow_id": workflow_id,
+                        "node_id": node.node_id,
+                        "node_name": node.name,
+                        "status": str(status),
+                        "timestamp": datetime.now().isoformat(),
+                    },
+                )
+
+        async def _emit_stream(chunk_type: str, content: str) -> None:
+            event_type = "node_thinking" if chunk_type == "reasoning" else "node_stream"
             await self._emit_event(
                 workflow_id,
                 {
-                    "event_type": "node_progress",
+                    "event_type": event_type,
                     "workflow_id": workflow_id,
                     "node_id": node.node_id,
                     "node_name": node.name,
-                    "status": status,
                     "timestamp": datetime.now().isoformat(),
+                    "data": {"content": content},
                 },
             )
+
+        batcher = StreamBatcher(_emit_stream, interval=0.1, min_chars=20)
+
+        async def stream_callback(chunk: Dict[str, Any]) -> None:
+            ctype = chunk.get("type", "content")
+            content = chunk.get("content", "") or ""
+            if ctype in ("reasoning", "content") and content:
+                await batcher.add(ctype, content)
 
         result = await agent.run(
             task_description=task_description,
             input_data=node_input.get("input_data", node_input),
             progress_callback=progress_callback,
+            stream_callback=stream_callback,
         )
+        await batcher.flush_all()
 
         # 在结果中添加工作空间路径，供下游节点使用
         if isinstance(result, dict):

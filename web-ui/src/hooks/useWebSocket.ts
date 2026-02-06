@@ -1,7 +1,7 @@
 import { useEffect, useCallback, useState, useRef } from 'react';
 import { wsService } from '../services/websocket';
 import { useAppStore } from '../stores/appStore';
-import { WSMessageType, type Message, type WorkflowState, type GenerationProgressEvent, type ExecutionRecord, type ExecutionProgress, type ExecutionSummary, type ExecutionNodeResult } from '../types';
+import { WSMessageType, type Message, type WorkflowState, type GenerationProgressEvent, type ExecutionRecord, type ExecutionProgress, type ExecutionSummary, type ExecutionNodeResult, type NodeActivity } from '../types';
 import { generateOutputSummary, formatOutputToMarkdown } from '../utils/outputFormatter';
 
 /**
@@ -589,6 +589,8 @@ export function useWebSocket() {
           if (executionProgressRef.current) {
             const { messageId, progress, nodeResults } = executionProgressRef.current;
             const finalOutput = event.data?.final_output || event.data?.result;
+            const finalNarrative = event.data?.final_narrative as string | undefined;
+            const finalHighlights = event.data?.final_highlights as string[] | undefined;
 
             const summary: ExecutionSummary = {
               type: 'execution_summary',
@@ -605,6 +607,8 @@ export function useWebSocket() {
               nodeResults: Array.from(nodeResults.values()),
               finalOutput,
               finalOutputMarkdown: finalOutput ? formatOutputToMarkdown(finalOutput) : undefined,
+              finalNarrative: finalNarrative ?? undefined,
+              finalHighlights: finalHighlights ?? undefined,
             };
 
             // 更新消息为摘要类型
@@ -735,6 +739,8 @@ export function useWebSocket() {
           const output = event.data?.output || event.data?.result;
           const outputPreview = event.data?.output_preview as string | undefined;
           const outputSummary = event.data?.output_summary as string | undefined;
+          const outputNarrative = event.data?.output_narrative as string | undefined;
+          const outputHighlights = event.data?.output_highlights as string[] | undefined;
           const durationMs = (event.data?.duration_ms as number) || event.duration_ms;
 
           // 更新实时节点输出
@@ -758,6 +764,8 @@ export function useWebSocket() {
               outputPreview: outputSummary || outputPreview,
               outputSummary: outputSummary || (output ? generateOutputSummary(output) : undefined),
               outputMarkdown: output ? formatOutputToMarkdown(output) : undefined,
+              outputNarrative: outputNarrative ?? undefined,
+              outputHighlights: outputHighlights ?? undefined,
               fullOutput: output,
             });
 
@@ -821,9 +829,71 @@ export function useWebSocket() {
           }
         }
 
+        // 处理节点思考/流式内容（node_thinking, node_stream）
+        if (event.event_type === 'node_thinking' || event.event_type === 'node_stream') {
+          const content = (event.data?.content as string) || '';
+          if (!content || !executionProgressRef.current) return;
+          const { messageId, progress, nodeResults } = executionProgressRef.current;
+          const nodeName = (event.node_name || event.node_id || frontendNodeId) ?? '';
+          const existingNode = nodeResults.get(frontendNodeId);
+          const key = event.event_type === 'node_thinking' ? 'thinkingContent' : 'streamContent';
+          const prev = existingNode?.[key as keyof typeof existingNode] as string | undefined;
+          const next = (prev ?? '') + content;
+          if (existingNode) {
+            nodeResults.set(frontendNodeId, { ...existingNode, [key]: next, status: 'running' });
+          } else {
+            nodeResults.set(frontendNodeId, {
+              nodeId: frontendNodeId,
+              nodeName,
+              status: 'running',
+              [key]: next,
+            });
+          }
+          const newProgress: ExecutionProgress = { ...progress, nodeResults: Array.from(nodeResults.values()) };
+          executionProgressRef.current.progress = newProgress;
+          updateMessageById(messageId, { data: newProgress as unknown as Record<string, unknown> });
+        }
+
+        // 处理节点活动（node_activity：工具开始/结果、思考、决策等）
+        if (event.event_type === 'node_activity') {
+          const data = event.data as { type?: string; message?: string; tool_name?: string } | undefined;
+          const activityMessage = data?.message ?? '';
+          if (!executionProgressRef.current) return;
+          const { messageId, progress, nodeResults } = executionProgressRef.current;
+          const nodeName = event.node_name || event.node_id || frontendNodeId;
+          const existingNode = nodeResults.get(frontendNodeId);
+          const activity: NodeActivity = {
+            type: (data?.type ?? 'thinking') as NodeActivity['type'],
+            message: activityMessage,
+            timestamp: new Date().toISOString(),
+            toolName: data?.tool_name,
+          };
+          const activities = [...(existingNode?.activities ?? []), activity];
+          if (existingNode) {
+            nodeResults.set(frontendNodeId, {
+              ...existingNode,
+              status: 'running',
+              runningStatus: activityMessage,
+              activities,
+            });
+          } else {
+            nodeResults.set(frontendNodeId, {
+              nodeId: frontendNodeId,
+              nodeName,
+              status: 'running',
+              runningStatus: activityMessage,
+              activities,
+            });
+          }
+          updateRealtimeNodeOutput(frontendNodeId, { status: 'running', runningStatus: activityMessage });
+          const newProgress: ExecutionProgress = { ...progress, nodeResults: Array.from(nodeResults.values()) };
+          executionProgressRef.current.progress = newProgress;
+          updateMessageById(messageId, { data: newProgress as unknown as Record<string, unknown> });
+        }
+
         // 处理节点进度事件（工具调用等中间状态）
         if (event.event_type === 'node_progress') {
-          const status = event.status as string || event.data?.status as string || '';
+          const status = event.status as string || event.data?.status as string || (event.data as { status?: string })?.status as string || '';
 
           // 更新实时节点输出的运行状态
           updateRealtimeNodeOutput(frontendNodeId, {

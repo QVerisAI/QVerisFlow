@@ -805,6 +805,7 @@ class DialogueAgent:
             "是的",
             "对",
             "行",
+            "看起来不错",
         ]
 
         if msg in approval_keywords:
@@ -824,7 +825,14 @@ class DialogueAgent:
             )
 
         # 执行命令
-        execution_keywords = ["执行", "执行工作流", "运行", "运行工作流", "开始执行"]
+        execution_keywords = [
+            "执行",
+            "执行工作流",
+            "运行",
+            "运行工作流",
+            "开始执行",
+            "试试看效果",
+        ]
         if msg in execution_keywords:
             logger.info(f"直接处理执行命令: {user_message}")
 
@@ -850,7 +858,7 @@ class DialogueAgent:
             )
 
         # 保存命令
-        save_keywords = ["保存", "保存工作流"]
+        save_keywords = ["保存", "保存工作流", "先保存下来"]
         if msg in save_keywords:
             logger.info(f"直接处理保存命令: {user_message}")
             result = await self.ops.save_workflow()
@@ -1069,17 +1077,19 @@ class DialogueAgent:
         return None
 
     def _get_suggested_actions_for_stage(self) -> List[str]:
-        """根据当前阶段返回建议操作"""
+        """根据当前阶段返回建议操作（自然语言，最多 3 个）"""
         stage = self.ops.get_current_stage()
+        max_actions = 3
 
         if stage == "plan":
-            return ["确认规划", "修改规划", "添加 Agent", "重新生成"]
+            actions = ["看起来不错", "我想调整一下", "重新生成"]
         elif stage == "agent":
-            return ["确认 Agents", "修改 Agent", "重新生成", "回滚"]
+            actions = ["看起来不错", "我想调整一下", "重新生成"]
         elif stage == "workflow":
-            return ["执行工作流", "保存工作流", "修改", "回滚"]
+            actions = ["试试看效果", "先保存下来", "我想调整一下"]
         else:
             return []
+        return actions[:max_actions]
 
     def _build_messages(self, user_message: str) -> List[Dict[str, str]]:
         """构建消息列表"""

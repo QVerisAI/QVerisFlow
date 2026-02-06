@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react';
 import { ChevronDown, CheckCircle, XCircle, Loader2, Clock, Settings } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
 import { wsService } from '../services/websocket';
-import { WSMessageType, type ExecutionRecord } from '../types';
+import { WSMessageType } from '../types';
 
 interface ExecutionSelectorProps {
   className?: string;

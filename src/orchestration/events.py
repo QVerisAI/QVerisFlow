@@ -27,6 +27,9 @@ class ExecutionEventType(str, Enum):
     NODE_FAILED = "node_failed"
     NODE_SKIPPED = "node_skipped"
     NODE_PROGRESS = "node_progress"  # 节点执行中间状态（如工具调用）
+    NODE_THINKING = "node_thinking"  # Agent 推理/思考 token 流
+    NODE_STREAM = "node_stream"  # Agent 内容 token 流
+    NODE_ACTIVITY = "node_activity"  # 富活动更新（工具使用、决策等）
 
     # 进度更新事件
     PROGRESS_UPDATE = "progress_update"
@@ -53,6 +56,9 @@ FRONTEND_EXECUTION_EVENTS: Set[str] = {
     ExecutionEventType.NODE_FAILED.value,
     ExecutionEventType.NODE_SKIPPED.value,
     ExecutionEventType.NODE_PROGRESS.value,
+    ExecutionEventType.NODE_THINKING.value,
+    ExecutionEventType.NODE_STREAM.value,
+    ExecutionEventType.NODE_ACTIVITY.value,
     ExecutionEventType.PROGRESS_UPDATE.value,
     # 兼容旧事件名
     ExecutionEventType.EXECUTION_STARTED.value,

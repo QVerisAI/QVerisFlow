@@ -436,6 +436,15 @@ export interface AgentSearchItem {
   updated_at: string;
 }
 
+// 节点活动项（富进度展示）
+export interface NodeActivity {
+  type: 'tool_start' | 'tool_result' | 'thinking' | 'decision' | 'iteration' | 'tool_failed';
+  message: string;
+  timestamp?: string;
+  toolName?: string;
+  detail?: string;
+}
+
 // 执行进度节点结果
 export interface ExecutionNodeResult {
   nodeId: string;
@@ -445,10 +454,16 @@ export interface ExecutionNodeResult {
   outputPreview?: string;   // 简短输出预览（一行）
   outputSummary?: string;   // 一句话摘要
   outputMarkdown?: string;  // 完整输出的 Markdown 格式
+  outputNarrative?: string; // 自然语言叙述（面向非技术用户）
+  outputHighlights?: string[]; // 关键发现列表
   fullOutput?: unknown;     // 完整输出数据
   error?: string;           // 错误信息
   runningStatus?: string;   // 运行中的状态描述（如"正在调用工具 xxx"）
+  thinkingContent?: string; // 累积的思考 token
+  streamContent?: string;   // 累积的流式输出
+  activities?: NodeActivity[]; // 活动日志（工具调用、决策等）
 }
+
 
 // 执行进度（实时更新）
 export interface ExecutionProgress {
@@ -481,6 +496,8 @@ export interface ExecutionSummary {
   nodeResults: ExecutionNodeResult[];
   finalOutput?: unknown;           // 最终输出数据
   finalOutputMarkdown?: string;    // 最终输出 Markdown 格式
+  finalNarrative?: string;        // 自然语言结论（一句话或短段）
+  finalHighlights?: string[];     // 关键发现列表
   error?: string;                  // 失败时的错误信息
 }
 

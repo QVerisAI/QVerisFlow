@@ -91,6 +91,7 @@ class BaseAgent:
         task_description: Optional[str] = None,
         input_data: Optional[Dict[str, Any]] = None,
         progress_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        stream_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         运行 Agent
@@ -99,12 +100,14 @@ class BaseAgent:
             task_description: 任务描述（可选，可从工作空间读取）
             input_data: 输入数据
             progress_callback: 进度回调函数，用于发送执行中间状态（如工具调用信息）
+            stream_callback: 流式回调，用于发送 LLM 思考/内容 token（dict: type, content）
 
         Returns:
             执行结果
         """
         # 设置进度回调（供 graph_builder 中的工具执行使用）
         self.graph_builder.progress_callback = progress_callback
+        self.graph_builder.stream_callback = stream_callback
 
         # 获取追踪器和指标收集器
         tracer = get_tracer()

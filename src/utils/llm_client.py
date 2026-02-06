@@ -19,7 +19,8 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, Dict, List, Literal, Optional, Type, Union
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Type, Union
 
 import httpx
 from langchain_openai import ChatOpenAI
@@ -31,6 +32,7 @@ from openai import (
 )
 from pydantic import BaseModel
 
+from src.utils.json_utils import optimize_json_response as _optimize_json_response_impl
 from src.utils.logger import get_logger
 from src.utils.token_usage_tracker import (
     ModelCallMetrics,
@@ -38,6 +40,15 @@ from src.utils.token_usage_tracker import (
 )
 
 logger = get_logger()
+
+
+@dataclass
+class LLMStreamChunk:
+    """流式输出块，用于前端实时展示思考/内容"""
+
+    type: str  # "reasoning" | "content" | "tool_call" | "done"
+    content: str
+    tool_call: Optional[Dict[str, Any]] = None
 
 
 def _get_proxy_config() -> Optional[Dict[str, str]]:
@@ -487,278 +498,9 @@ class UnifiedLLMClient:
         """
         优化 JSON 响应，尝试修复常见的 JSON 格式问题
 
-        实现了 7 种优化策略:
-        1. 移除前缀和后缀（```json、解释文字等）
-        2. 提取 JSON 对象边界
-        3. 修复引号问题
-        4. 截断到最后一个完整对象
-        5. 修复截断的字符串值
-        6. 修复截断的数组内容
-        7. 移除 JSON 前后的解释文字
+        委托给 json_utils.optimize_json_response() 实现
         """
-        if not content:
-            return None
-
-        # 策略 1: 移除可能的前缀和后缀
-        optimized = content.strip()
-
-        # 移除常见的 markdown 代码块标记
-        if optimized.startswith("```json"):
-            optimized = optimized[7:]
-        elif optimized.startswith("```"):
-            optimized = optimized[3:]
-
-        if optimized.endswith("```"):
-            optimized = optimized[:-3]
-
-        optimized = optimized.strip()
-
-        # 移除可能的解释文字（在 JSON 之前）
-        # 查找第一个 { 之前是否有文字
-        first_brace = optimized.find("{")
-        if first_brace > 0:
-            # 检查前面是否有解释文字（如 "Here is the JSON:", "以下是分析结果：" 等）
-            prefix = optimized[:first_brace].strip()
-            if prefix and len(prefix) < 200:  # 合理的前缀长度
-                # 如果前缀看起来像解释文字，移除它
-                if any(
-                    keyword in prefix.lower()
-                    for keyword in [
-                        "json",
-                        "结果",
-                        "输出",
-                        "分析",
-                        "here",
-                        "following",
-                        "below",
-                    ]
-                ):
-                    optimized = optimized[first_brace:]
-
-        # 移除可能的解释文字（在 JSON 之后）
-        last_brace = optimized.rfind("}")
-        if last_brace > 0 and last_brace < len(optimized) - 1:
-            # 检查后面是否有解释文字
-            suffix = optimized[last_brace + 1 :].strip()
-            if suffix and len(suffix) < 200:  # 合理的后缀长度
-                # 如果后缀看起来像解释文字，移除它
-                if any(
-                    keyword in suffix.lower()
-                    for keyword in [
-                        "希望",
-                        "以上",
-                        "注意",
-                        "说明",
-                        "hope",
-                        "above",
-                        "note",
-                    ]
-                ):
-                    optimized = optimized[: last_brace + 1]
-
-        optimized = optimized.strip()
-
-        # 尝试解析
-        try:
-            json.loads(optimized)
-            logger.debug("✅ JSON 优化成功：移除前缀/后缀")
-            return optimized
-        except json.JSONDecodeError:
-            pass
-
-        # 策略 2: 尝试找到 JSON 对象边界
-        json_start = optimized.find("{")
-        json_end = optimized.rfind("}")
-
-        if json_start != -1 and json_end != -1 and json_end > json_start:
-            json_content = optimized[json_start : json_end + 1]
-            try:
-                json.loads(json_content)
-                logger.debug("✅ JSON 优化成功：提取 JSON 对象")
-                return json_content
-            except json.JSONDecodeError:
-                pass
-
-        # 策略 3: 尝试修复常见的 JSON 格式问题
-        try:
-            fixed_content = optimized
-            # 修复键名
-            fixed_content = re.sub(
-                r"([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:", r'\1"\2":', fixed_content
-            )
-            # 修复值
-            fixed_content = re.sub(
-                r":\s*([a-zA-Z_][a-zA-Z0-9_]*)(?=\s*[,}])", r': "\1"', fixed_content
-            )
-
-            json.loads(fixed_content)
-            logger.debug("✅ JSON 优化成功：修复引号问题")
-            return fixed_content
-        except json.JSONDecodeError:
-            pass
-
-        # 策略 4: 尝试截断到最后一个完整的 JSON 对象
-        try:
-            # 从后往前找到最后一个完整的 JSON 对象
-            brace_count = 0
-            last_complete_pos = -1
-
-            for i in range(len(optimized) - 1, -1, -1):
-                if optimized[i] == "}":
-                    brace_count += 1
-                elif optimized[i] == "{":
-                    brace_count -= 1
-                    if brace_count == 0:
-                        last_complete_pos = i
-                        break
-
-            if last_complete_pos != -1:
-                truncated = optimized[last_complete_pos:]
-                json.loads(truncated)
-                logger.debug("✅ JSON 优化成功：截断到完整对象")
-                return truncated
-        except json.JSONDecodeError:
-            pass
-
-        # 策略 5: 尝试修复截断的字符串值（在数组或对象中）
-        try:
-            # 如果响应被截断，尝试关闭未完成的字符串、数组或对象
-            fixed_content = optimized
-
-            # 检查是否在字符串中（未闭合的引号）
-            in_string = False
-            escape_next = False
-            last_quote_pos = -1
-
-            for i, char in enumerate(fixed_content):
-                if escape_next:
-                    escape_next = False
-                    continue
-                if char == "\\":
-                    escape_next = True
-                    continue
-                if char == '"':
-                    if not in_string:
-                        in_string = True
-                        last_quote_pos = i
-                    else:
-                        in_string = False
-                        last_quote_pos = -1
-
-            # 如果字符串未闭合，尝试闭合它
-            if in_string and last_quote_pos != -1:
-                # 找到字符串开始的位置
-                string_start = last_quote_pos
-                # 尝试找到这个字符串应该结束的位置（在下一个逗号、冒号、}或]之前）
-                for i in range(string_start + 1, len(fixed_content)):
-                    if fixed_content[i] in [",", ":", "}", "]", "\n"]:
-                        fixed_content = fixed_content[:i] + '"' + fixed_content[i:]
-                        break
-                else:
-                    # 如果没找到，在末尾添加引号
-                    fixed_content = fixed_content + '"'
-
-            # 尝试关闭未完成的数组或对象
-            open_braces = fixed_content.count("{") - fixed_content.count("}")
-            open_brackets = fixed_content.count("[") - fixed_content.count("]")
-
-            # 如果对象未闭合，尝试闭合
-            if open_braces > 0:
-                # 移除末尾可能的未完成内容（如未完成的键值对）
-                # 找到最后一个完整的键值对
-                last_comma = fixed_content.rfind(",")
-                last_colon = fixed_content.rfind(":")
-
-                if last_colon > last_comma:
-                    # 有未完成的键值对，尝试修复
-                    # 找到最后一个冒号后的内容
-                    after_colon = fixed_content[last_colon + 1 :].strip()
-                    if after_colon and not after_colon.endswith(
-                        ('"', "}", "]", "true", "false", "null")
-                    ):
-                        # 可能是未完成的字符串或值，尝试截断到最后一个逗号
-                        if last_comma != -1:
-                            fixed_content = fixed_content[:last_comma] + "}"
-                        else:
-                            fixed_content = fixed_content[:last_colon] + ": null}"
-                    else:
-                        fixed_content = fixed_content + "}" * open_braces
-                else:
-                    fixed_content = fixed_content + "}" * open_braces
-
-            # 如果数组未闭合，尝试闭合
-            if open_brackets > 0:
-                fixed_content = fixed_content + "]" * open_brackets
-
-            # 尝试解析修复后的内容
-            json.loads(fixed_content)
-            logger.debug("✅ JSON 优化成功：修复截断的字符串/对象")
-            return fixed_content
-        except (json.JSONDecodeError, IndexError, ValueError):
-            pass
-
-        # 策略 6: 尝试提取并修复数组内容
-        try:
-            # 查找常见的数组字段（如 "items", "results", "data" 等）
-            array_patterns = [
-                r'"items"\s*:\s*\[',
-                r'"results"\s*:\s*\[',
-                r'"data"\s*:\s*\[',
-                r'"list"\s*:\s*\[',
-            ]
-
-            for pattern in array_patterns:
-                array_match = re.search(pattern, optimized)
-                if array_match:
-                    array_start = array_match.end() - 1  # 包括 '['
-                    # 找到数组的结束位置（可能不完整）
-                    bracket_count = 0
-                    array_end = -1
-
-                    for i in range(array_start, len(optimized)):
-                        if optimized[i] == "[":
-                            bracket_count += 1
-                        elif optimized[i] == "]":
-                            bracket_count -= 1
-                            if bracket_count == 0:
-                                array_end = i
-                                break
-
-                    if array_end == -1:
-                        # 数组未闭合，尝试找到最后一个完整的对象并闭合数组
-                        # 从后往前找最后一个完整的对象
-                        brace_count = 0
-                        last_obj_end = -1
-                        for i in range(len(optimized) - 1, array_start, -1):
-                            if optimized[i] == "}":
-                                brace_count += 1
-                            elif optimized[i] == "{":
-                                brace_count -= 1
-                                if brace_count == 0:
-                                    last_obj_end = i
-                                    break
-
-                        if last_obj_end != -1:
-                            # 构建完整的JSON
-                            before_array = optimized[:array_start]
-                            array_content = optimized[array_start : last_obj_end + 1]
-                            fixed_content = before_array + array_content + "]}"
-                            try:
-                                json.loads(fixed_content)
-                                logger.debug("✅ JSON 优化成功：修复截断的数组")
-                                return fixed_content
-                            except json.JSONDecodeError:
-                                continue
-        except (json.JSONDecodeError, IndexError, ValueError):
-            pass
-
-        # 记录失败信息以便调试
-        content_preview = content[:500] if len(content) > 500 else content
-        logger.warning(f"⚠️ JSON 优化失败：无法修复 JSON 格式")
-        logger.debug(f"响应内容预览（前500字符）: {content_preview}")
-        if len(content) > 500:
-            logger.debug(f"响应内容预览（后500字符）: {content[-500:]}")
-        return None
+        return _optimize_json_response_impl(content)
 
     def _adjust_params_for_model(
         self,
@@ -922,6 +664,133 @@ class UnifiedLLMClient:
                 else:
                     logger.error(f"❌ LLM 调用出现未知错误: {e}")
                     raise
+
+    async def call_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        **kwargs,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """
+        流式调用，逐块返回 reasoning / content，供前端实时展示。
+
+        Yields:
+            LLMStreamChunk: type 为 "reasoning" | "content" | "done"
+        """
+        temp = temperature if temperature is not None else self.temperature
+        max_tok = max_tokens if max_tokens is not None else self.max_tokens
+        temp, max_tok = self._adjust_params_for_model(temp, max_tok)
+
+        try:
+            if self.client_type == "async_openai":
+                async for chunk in self._call_async_openai_stream(
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_tok,
+                    **kwargs,
+                ):
+                    yield chunk
+            elif self.client_type == "langchain":
+                async for chunk in self._call_langchain_stream(
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_tok,
+                    **kwargs,
+                ):
+                    yield chunk
+            else:
+                # litellm / 其他：回退为非流式，最后一次性 yield content
+                response = await self.call(
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_tok,
+                    **kwargs,
+                )
+                content = getattr(response, "content", None) or (
+                    response.choices[0].message.content
+                    if getattr(response, "choices", None)
+                    else None
+                )
+                if content:
+                    yield LLMStreamChunk(type="content", content=str(content))
+            yield LLMStreamChunk(type="done", content="")
+        except Exception as e:
+            logger.error(f"流式调用失败: {e}")
+            raise
+
+    async def _call_langchain_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        **kwargs,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """LangChain 客户端流式调用，提取 reasoning_content 与 content"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        langchain_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                langchain_messages.append(SystemMessage(content=msg["content"]))
+            elif msg["role"] == "user":
+                langchain_messages.append(HumanMessage(content=msg["content"]))
+
+        if not hasattr(self._langchain_client, "astream"):
+            response = await self._langchain_client.ainvoke(
+                langchain_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+            content = getattr(response, "content", "") or ""
+            if content:
+                yield LLMStreamChunk(type="content", content=content)
+            return
+
+        async for chunk in self._langchain_client.astream(
+            langchain_messages, temperature=temperature, max_tokens=max_tokens, **kwargs
+        ):
+            additional = getattr(chunk, "additional_kwargs", None) or {}
+            reasoning = additional.get("reasoning_content") or additional.get(
+                "thinking"
+            )
+            if isinstance(reasoning, str) and reasoning.strip():
+                yield LLMStreamChunk(type="reasoning", content=reasoning)
+            content = getattr(chunk, "content", None) or ""
+            if isinstance(content, str) and content.strip():
+                yield LLMStreamChunk(type="content", content=content)
+
+    async def _call_async_openai_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        **kwargs,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """AsyncOpenAI 客户端流式调用"""
+        stream = await self._async_openai_client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True,
+            **kwargs,
+        )
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if not delta:
+                continue
+            reasoning = getattr(delta, "reasoning_content", None) or getattr(
+                delta, "thinking", None
+            )
+            if isinstance(reasoning, str) and reasoning.strip():
+                yield LLMStreamChunk(type="reasoning", content=reasoning)
+            content = getattr(delta, "content", None) or ""
+            if isinstance(content, str) and content.strip():
+                yield LLMStreamChunk(type="content", content=content)
 
     async def call_with_tools(
         self,

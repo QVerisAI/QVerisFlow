@@ -8,6 +8,7 @@ import WorkflowSearchCard from './WorkflowSearchCard';
 import AgentSearchCard from './AgentSearchCard';
 import ExecutionProgressCard from './ExecutionProgressCard';
 import ExecutionSummaryCard from './ExecutionSummaryCard';
+import ExecutionNarrativeMessage from './ExecutionNarrativeMessage';
 
 interface MessageBubbleProps {
   message: Message;
@@ -76,6 +77,11 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   // 检查是否是执行摘要消息
   const executionSummaryData = message.data?.type === 'execution_summary'
     ? message.data as unknown as ExecutionSummary
+    : undefined;
+
+  // 检查是否是执行叙事消息（流式/活动展示）
+  const executionNarrativeData = message.data?.type === 'execution_narrative'
+    ? message.data as { nodeName?: string; content?: string; isStreaming?: boolean; thinkingContent?: string }
     : undefined;
 
   // 根据消息类型和内容智能选择图标
@@ -206,6 +212,10 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         return 'bg-emerald-50 text-emerald-700 border border-emerald-100 mr-4 text-sm';
       }
       return 'bg-red-50 text-red-700 border border-red-100 mr-4 text-sm';
+    }
+    // 执行叙事消息：系统风格（无气泡、左对齐、哑色、左边框）
+    if (executionNarrativeData) {
+      return 'border-l-2 border-slate-300 bg-slate-50/50 rounded-r-lg mr-4 text-sm shadow-none';
     }
     if (isSystem) {
       return 'bg-gray-100 text-gray-600 mr-8 text-sm';
@@ -346,13 +356,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     );
   };
 
-  // 如果有规划数据、摘要数据、工作流信息卡片、搜索结果或执行进度/摘要，使用更宽的布局
-  const maxWidthClass = (planData || summaryData || workflowInfoData || workflowSearchData || agentSearchData || executionProgressData || executionSummaryData) ? 'max-w-full' : 'max-w-[90%]';
+  // 如果有规划数据、摘要数据、工作流信息卡片、搜索结果或执行进度/摘要/叙事，使用更宽的布局
+  const maxWidthClass = (planData || summaryData || workflowInfoData || workflowSearchData || agentSearchData || executionProgressData || executionSummaryData || executionNarrativeData) ? 'max-w-full' : 'max-w-[90%]';
+
+  // 执行叙事消息：系统风格（左对齐、无气泡、哑色、左边框）
+  const isNarrative = Boolean(executionNarrativeData);
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div className={`flex items-start gap-2 ${maxWidthClass} ${isUser ? 'flex-row-reverse' : ''}`}>
-        {/* 头像 */}
+        {/* 头像（叙事消息使用哑色） */}
         <div className={`
           flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center
           ${isUser ? 'bg-primary text-white' :
@@ -375,18 +388,21 @@ export function MessageBubble({ message }: MessageBubbleProps) {
                         executionSummaryData ? (
                           executionSummaryData.status === 'completed' ? 'bg-emerald-100' : 'bg-red-100'
                         ) :
-                          (progressData?.status === 'completed') ? 'bg-emerald-100' :
-                            (isProgress || progressData) ? 'bg-blue-100' :
-                              'bg-gray-100'}
+                          executionNarrativeData ? 'bg-slate-100' :
+                            (progressData?.status === 'completed') ? 'bg-emerald-100' :
+                              (isProgress || progressData) ? 'bg-blue-100' :
+                                'bg-gray-100'}
         `}>
           {getIcon()}
         </div>
 
         {/* 消息内容 */}
         <div className={`rounded-lg px-3 py-2 flex-1 min-w-0 ${getBubbleStyle()}`}>
-          <div className="text-sm leading-relaxed">
-            {renderContent(getDisplayContent())}
-          </div>
+          {!isNarrative && (
+            <div className="text-sm leading-relaxed">
+              {renderContent(getDisplayContent())}
+            </div>
+          )}
 
           {/* 规划详情卡片 */}
           {planData && <PlanDetailCard plan={planData} />}
@@ -408,6 +424,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
           {/* 执行摘要卡片 */}
           {executionSummaryData && <ExecutionSummaryCard summary={executionSummaryData} />}
+
+          {/* 执行叙事消息（流式/活动展示） */}
+          {executionNarrativeData && (
+            <ExecutionNarrativeMessage
+              nodeName={executionNarrativeData.nodeName ?? ''}
+              content={executionNarrativeData.content ?? ''}
+              isStreaming={executionNarrativeData.isStreaming}
+              thinkingContent={executionNarrativeData.thinkingContent}
+            />
+          )}
 
           {/* 进度条（用于进度消息） */}
           {progressData && progressData.status !== 'completed' && (

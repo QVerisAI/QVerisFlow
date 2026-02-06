@@ -2886,7 +2886,7 @@ class WorkflowOperationTools:
                     if workflow_detail:
                         loaded_by_db_id = True
 
-                # 2) 如果未找到，则按 workflow_id / name 进行搜索
+                # 2) 如果未找到，则按 workflow_id / name 进行模糊搜索
                 if not workflow_detail:
                     filters = WorkflowFilters(query=workflow_id, limit=5)
                     workflows = await service.list_workflows(filters)

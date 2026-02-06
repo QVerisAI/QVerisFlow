@@ -7,7 +7,26 @@
 const HIGHLIGHT_FIELDS = ['recommendation', 'suggestion', '建议', '推荐'];
 const SUMMARY_FIELDS = ['summary', 'conclusion', 'result', '摘要', '结论', '结果'];
 const ERROR_FIELDS = ['error', 'exception', '错误', '异常'];
-const ANALYSIS_FIELDS = ['analysis', 'evaluation', '分析', '评估'];
+
+// 技术字段黑名单（对用户无意义，应在展示时过滤）
+const TECHNICAL_FIELDS = new Set([
+  'agent_id', 'task_id', 'workspace_path', '_workspace_path',
+  'duration_ms', 'success', 'verification_score', 'iterations',
+  'output_files', 'agentid', 'taskid', 'workspacepath',
+  'durationms', 'verificationscore', 'outputfiles'
+]);
+
+/**
+ * 过滤对象中的技术字段
+ */
+function filterTechnicalFields(obj: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([key]) => {
+      const normalizedKey = key.toLowerCase().replace(/_/g, '');
+      return !TECHNICAL_FIELDS.has(normalizedKey) && !key.startsWith('_');
+    })
+  );
+}
 
 /**
  * 检查值是否为简单值（非嵌套对象）
@@ -60,6 +79,33 @@ function formatSimpleValue(value: unknown): string {
       return value.toLocaleString();
     }
     return value.toFixed(4).replace(/\.?0+$/, '');
+  }
+  if (typeof value === 'string') {
+    return value;
+  }
+  // 处理数组
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '(空列表)';
+    if (value.length <= 3 && value.every(item => typeof item !== 'object' || item === null)) {
+      return value.map(formatSimpleValue).join(', ');
+    }
+    return `[${value.length} 项]`;
+  }
+  // 处理对象
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as object);
+    if (keys.length === 0) return '(空)';
+    if (keys.length <= 2) {
+      // 递归格式化，但避免无限递归
+      return keys.map(k => {
+        const v = (value as Record<string, unknown>)[k];
+        if (typeof v === 'object' && v !== null) {
+          return `${k}: {${Object.keys(v as object).length} 字段}`;
+        }
+        return `${k}: ${formatSimpleValue(v)}`;
+      }).join(', ');
+    }
+    return `{${keys.length} 字段}`;
   }
   return String(value);
 }
@@ -262,6 +308,74 @@ export function generateOutputSummary(output: unknown): string {
   return String(output).substring(0, 80);
 }
 
+export interface FormatNodeOutputResult {
+  summary: string;
+  narrative: string | null;
+  highlights: string[] | null;
+  markdown: string;
+}
+
+/**
+ * 将节点输出格式化为三层展示结构（优先使用 narrative 字段）
+ * @param output 节点输出（可为含 summary/narrative/data/highlights 的对象或任意类型）
+ * @returns 用于三层展示的 { summary, narrative, highlights, markdown }
+ */
+export function formatNodeOutput(output: unknown): FormatNodeOutputResult {
+  if (output === null || output === undefined) {
+    return {
+      summary: '无输出',
+      narrative: null,
+      highlights: null,
+      markdown: '*无输出*',
+    };
+  }
+
+  if (typeof output === 'object' && output !== null) {
+    const obj = output as Record<string, unknown>;
+
+    // 过滤技术字段
+    const filteredObj = filterTechnicalFields(obj);
+
+    // 提取 summary，确保是字符串
+    let summary: string | null = null;
+    if (typeof obj.summary === 'string') {
+      summary = obj.summary;
+      // 清洗 markdown 代码块标记
+      if (summary.trim().startsWith('```')) {
+        summary = null;
+      }
+    }
+    if (!summary) {
+      // 从 data 或过滤后的对象生成摘要
+      const dataForSummary = obj.data ?? filteredObj;
+      summary = generateOutputSummary(dataForSummary);
+    }
+
+    const narrative = typeof obj.narrative === 'string' ? obj.narrative : null;
+    const highlights = Array.isArray(obj.highlights)
+      ? (obj.highlights as unknown[]).map((x) => String(x))
+      : null;
+
+    // 优先使用 data 字段，否则使用过滤后的对象
+    const data = obj.data !== undefined ? obj.data : filteredObj;
+    const markdown = formatOutputToMarkdown(data);
+
+    return {
+      summary: summary || '执行完成',
+      narrative: narrative || null,
+      highlights,
+      markdown,
+    };
+  }
+
+  return {
+    summary: generateOutputSummary(output),
+    narrative: null,
+    highlights: null,
+    markdown: formatOutputToMarkdown(output),
+  };
+}
+
 /**
  * 格式化持续时间
  * @param ms 毫秒数
@@ -288,4 +402,188 @@ export function formatDuration(ms: number): string {
 export function formatProgress(completed: number, total: number): number {
   if (total === 0) return 0;
   return Math.round((completed / total) * 100);
+}
+
+/**
+ * 开始节点输入参数的格式化结果
+ */
+export interface StartNodeInputResult {
+  summary: string;  // 一句话摘要，如 "分析标的: 腾讯控股"
+  params: Array<{
+    label: string;  // 参数标签，如 "分析标的"
+    value: string;  // 参数值，如 "腾讯控股 (00700.HK)"
+  }>;
+}
+
+// 常见输入参数的中文映射
+const INPUT_PARAM_LABELS: Record<string, string> = {
+  // 股票/投资相关
+  'stock': '股票',
+  'stock_code': '股票代码',
+  'stock_name': '股票名称',
+  'symbol': '代码',
+  'ticker': '股票代码',
+  'target': '分析标的',
+  'company': '公司',
+  'company_name': '公司名称',
+
+  // 时间相关
+  'date': '日期',
+  'start_date': '开始日期',
+  'end_date': '结束日期',
+  'date_range': '日期范围',
+  'period': '周期',
+  'year': '年份',
+  'quarter': '季度',
+  'month': '月份',
+
+  // 通用参数
+  'query': '查询',
+  'keyword': '关键词',
+  'keywords': '关键词',
+  'topic': '主题',
+  'subject': '主题',
+  'input': '输入',
+  'task': '任务',
+  'instruction': '指令',
+  'prompt': '提示',
+  'question': '问题',
+
+  // 配置相关
+  'limit': '数量限制',
+  'count': '数量',
+  'max_results': '最大结果数',
+  'language': '语言',
+  'region': '地区',
+  'market': '市场',
+};
+
+/**
+ * 获取参数的友好标签
+ */
+function getParamLabel(key: string): string {
+  // 先检查精确匹配
+  const lowerKey = key.toLowerCase();
+  if (INPUT_PARAM_LABELS[lowerKey]) {
+    return INPUT_PARAM_LABELS[lowerKey];
+  }
+
+  // 检查是否包含中文，如果是则直接使用
+  if (/[\u4e00-\u9fa5]/.test(key)) {
+    return key;
+  }
+
+  // 转换 snake_case 为可读格式
+  return formatKeyName(key);
+}
+
+/**
+ * 格式化参数值为可读字符串
+ */
+function formatParamValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '(未指定)';
+  }
+
+  if (typeof value === 'string') {
+    return value || '(空)';
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return formatSimpleValue(value);
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '(空列表)';
+    // 简单值数组：用逗号连接
+    if (value.every(item => typeof item !== 'object' || item === null)) {
+      return value.map(formatSimpleValue).join(', ');
+    }
+    return `${value.length} 项`;
+  }
+
+  if (typeof value === 'object') {
+    const keys = Object.keys(value as object);
+    if (keys.length === 0) return '(空)';
+    if (keys.length <= 3) {
+      // 安全地格式化每个键值对，避免嵌套对象显示为 [object Object]
+      return keys.map(k => {
+        const v = (value as Record<string, unknown>)[k];
+        return `${k}: ${formatSimpleValue(v)}`;
+      }).join(', ');
+    }
+    return `${keys.length} 个字段`;
+  }
+
+  return String(value);
+}
+
+/**
+ * 格式化开始节点的输入参数
+ * @param output 开始节点的 fullOutput
+ * @returns 格式化结果，如果没有用户输入则返回 null
+ */
+export function formatStartNodeInput(output: unknown): StartNodeInputResult | null {
+  if (!output || typeof output !== 'object') {
+    return null;
+  }
+
+  const obj = output as Record<string, unknown>;
+  const context = obj.context as Record<string, unknown> | null;
+
+  if (!context) {
+    return null;
+  }
+
+  // 系统字段列表（不展示给用户）
+  const systemFields = new Set(['workflow_id', 'global_context', 'config']);
+
+  // 提取用户输入参数
+  const userParams: Array<{ label: string; value: string; key: string }> = [];
+
+  for (const [key, value] of Object.entries(context)) {
+    if (systemFields.has(key)) {
+      // 特殊处理 global_context：如果不为空则提取其中的参数
+      if (key === 'global_context' && value && typeof value === 'object') {
+        const gc = value as Record<string, unknown>;
+        for (const [gcKey, gcValue] of Object.entries(gc)) {
+          if (gcValue != null && JSON.stringify(gcValue) !== '{}' && JSON.stringify(gcValue) !== '[]') {
+            userParams.push({
+              key: gcKey,
+              label: getParamLabel(gcKey),
+              value: formatParamValue(gcValue),
+            });
+          }
+        }
+      }
+      continue;
+    }
+
+    // 跳过空值
+    if (value == null || JSON.stringify(value) === '{}' || JSON.stringify(value) === '[]') {
+      continue;
+    }
+
+    userParams.push({
+      key,
+      label: getParamLabel(key),
+      value: formatParamValue(value),
+    });
+  }
+
+  // 如果没有用户输入参数，返回 null
+  if (userParams.length === 0) {
+    return null;
+  }
+
+  // 生成摘要（取第一个参数作为摘要）
+  const primaryParam = userParams[0];
+  const summary = userParams.length === 1
+    ? `${primaryParam.label}: ${primaryParam.value}`
+    : `${primaryParam.label}: ${primaryParam.value} 等 ${userParams.length} 项`;
+
+  return {
+    summary,
+    params: userParams.map(({ label, value }) => ({ label, value })),
+  };
 }

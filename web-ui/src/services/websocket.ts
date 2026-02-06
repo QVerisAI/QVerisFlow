@@ -19,6 +19,7 @@ class SocketIOService {
   private handlers: Map<WSMessageType, Set<MessageHandler>> = new Map();
   private handlerIds: Map<string, MessageHandler> = new Map();
   private sessionId: string | null = null;
+  /** 主动断开时设为 true，用于在 disconnect 事件中区分用户断开与意外断开 */
   private intentionalDisconnect = false;
 
   // 连接状态回调（保持与原接口兼容）
@@ -96,10 +97,12 @@ class SocketIOService {
         resolve();
       });
 
-      // 断开连接
+      // 断开连接（仅对意外断开通知 UI，避免用户主动断开时闪一下“已断开”）
       this.socket.on('disconnect', (reason) => {
         console.log('Socket.IO: 断开连接，原因:', reason);
-        this.onConnectionChange?.(false);
+        if (!this.intentionalDisconnect) {
+          this.onConnectionChange?.(false);
+        }
       });
 
       // 重连中

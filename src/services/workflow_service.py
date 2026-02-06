@@ -261,12 +261,57 @@ class WorkflowService:
 
         if filters.query:
             query_lower = filters.query.lower()
+
+            # 使用 jieba 进行智能中文分词的模糊匹配
+            import jieba
+
+            def fuzzy_match_jieba(
+                query: str, target: str, threshold: float = 0.6
+            ) -> bool:
+                """
+                使用 jieba 分词进行智能模糊匹配
+
+                Args:
+                    query: 用户查询字符串
+                    target: 目标字符串（name/description/workflow_id）
+                    threshold: 关键词匹配比例阈值，默认 60%
+
+                Returns:
+                    是否匹配
+                """
+                if not target:
+                    return False
+
+                target_lower = target.lower()
+                query_lower = query.lower()
+
+                # 1) 完整子串匹配（精确包含）
+                if query_lower in target_lower:
+                    return True
+
+                # 2) jieba 分词匹配（搜索引擎模式，更细粒度）
+                # lcut_for_search 会输出更细的粒度，适合搜索场景
+                query_keywords = jieba.lcut_for_search(query_lower)
+                # 过滤掉单字符和纯标点
+                query_keywords = [
+                    kw for kw in query_keywords if len(kw) > 1 or kw.isalnum()
+                ]
+
+                if not query_keywords:
+                    return False
+
+                # 计算匹配的关键词数量
+                matched_count = sum(1 for kw in query_keywords if kw in target_lower)
+                match_ratio = matched_count / len(query_keywords)
+
+                return match_ratio >= threshold
+
             models = [
                 m
                 for m in models
-                if query_lower in (m.name or "").lower()
-                or query_lower in (m.description or "").lower()
-                or query_lower in (m.workflow_id or "").lower()  # 也搜索 workflow_id
+                if fuzzy_match_jieba(query_lower, m.name)
+                or fuzzy_match_jieba(query_lower, m.description)
+                or fuzzy_match_jieba(query_lower, m.workflow_id)
             ]
 
         return [self._model_to_summary(m) for m in models]

@@ -10,6 +10,7 @@ import asyncio
 from typing import Dict, Any, Optional, Callable, Literal, List
 from concurrent.futures import ThreadPoolExecutor
 from src.utils.logger import get_logger
+from src.utils.json_utils import extract_structured_output
 
 from .agent_state import AgentState
 from .context_manager import ContextManager, TiktokenCounter, SimpleTokenCounter
@@ -495,6 +496,8 @@ class AgentGraphBuilder:
 
         # 进度回调函数（由 BaseAgent.run() 设置，用于发送工具调用等中间状态）
         self.progress_callback: Optional[Any] = None  # Callable[[str], Awaitable[None]]
+        # 流式回调（发送 LLM 思考/内容 token，dict: type "reasoning"|"content", content）
+        self.stream_callback: Optional[Any] = None  # Callable[[Dict], Awaitable[None]]
 
         # 获取 LangChain 客户端
         self.langchain_llm = (
@@ -790,9 +793,16 @@ class AgentGraphBuilder:
         )
 
         try:
-            # 构建消息列表
+            from ..definitions.agent_definition import OUTPUT_FORMAT_INSTRUCTION
+
+            # 构建消息列表（含输出格式要求：summary + narrative + data）
+            system_prompt = (
+                self.definition.build_system_prompt()
+                + "\n\n"
+                + OUTPUT_FORMAT_INSTRUCTION.strip()
+            )
             messages = [
-                SystemMessage(content=self.definition.build_system_prompt()),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=action_prompt),
             ]
 
@@ -801,7 +811,46 @@ class AgentGraphBuilder:
 
             llm_start_time = datetime.now()
 
-            response = await self.langchain_llm.ainvoke(messages)
+            # 调用 LLM 前发送「正在思考」进度
+            if self.progress_callback:
+                try:
+                    await self.progress_callback(
+                        {"type": "thinking", "message": "正在思考..."}
+                    )
+                except Exception as cb_err:
+                    logger.warning(f"进度回调失败: {cb_err}")
+
+            if self.stream_callback and hasattr(self.langchain_llm, "astream"):
+                response = None
+                try:
+                    async for chunk in self.langchain_llm.astream(messages):
+                        additional = getattr(chunk, "additional_kwargs", None) or {}
+                        reasoning = additional.get(
+                            "reasoning_content"
+                        ) or additional.get("thinking")
+                        if isinstance(reasoning, str) and reasoning.strip():
+                            await self.stream_callback(
+                                {"type": "reasoning", "content": reasoning}
+                            )
+                        content = getattr(chunk, "content", None) or ""
+                        if isinstance(content, str) and content.strip():
+                            await self.stream_callback(
+                                {"type": "content", "content": content}
+                            )
+                        if chunk is not None:
+                            try:
+                                response = (
+                                    chunk if response is None else response + chunk
+                                )
+                            except TypeError:
+                                response = chunk
+                except Exception as stream_err:
+                    logger.warning(f"流式调用失败，回退 ainvoke: {stream_err}")
+                    response = await self.langchain_llm.ainvoke(messages)
+                if response is None:
+                    response = await self.langchain_llm.ainvoke(messages)
+            else:
+                response = await self.langchain_llm.ainvoke(messages)
 
             # 规范化 tool_calls.args（某些 LLM 可能返回字符串而非字典）
             response = _normalize_tool_calls_args(response)
@@ -1054,6 +1103,19 @@ class AgentGraphBuilder:
             tool_round += 1
             tool_messages = []
 
+            # 迭代边界进度（便于前端叙事展示）
+            if self.progress_callback:
+                try:
+                    await self.progress_callback(
+                        {
+                            "type": "iteration",
+                            "iteration": tool_round,
+                            "message": f"第 {tool_round} 轮分析...",
+                        }
+                    )
+                except Exception as cb_err:
+                    logger.warning(f"进度回调失败: {cb_err}")
+
             for tool_call in current_response.tool_calls:
                 tool_name = tool_call.get(
                     "name", tool_call.get("function", {}).get("name", "unknown")
@@ -1076,10 +1138,18 @@ class AgentGraphBuilder:
 
                 logger.info(f"执行工具调用: {tool_name}({tool_args})")
 
-                # 发送工具调用开始的进度事件
+                # 发送工具调用开始的进度事件（结构化，便于前端叙事展示）
                 if self.progress_callback:
                     try:
-                        await self.progress_callback(f"调用工具: {tool_name}")
+                        args_summary = self._summarize_tool_args(tool_name, tool_args)
+                        payload = {
+                            "type": "tool_start",
+                            "tool_name": tool_name,
+                            "tool_args_summary": args_summary,
+                            "message": f"正在使用 {tool_name}..."
+                            + (f" ({args_summary})" if args_summary else ""),
+                        }
+                        await self.progress_callback(payload)
                     except Exception as cb_err:
                         logger.warning(f"进度回调失败: {cb_err}")
 
@@ -1091,13 +1161,19 @@ class AgentGraphBuilder:
 
                     result_str = str(result)
 
-                    # 发送工具执行完成的进度事件（包含结果摘要）
+                    # 发送工具执行完成的进度事件（结构化）
                     if self.progress_callback:
                         try:
                             result_summary = self._generate_tool_result_summary(
                                 tool_name, result
                             )
-                            await self.progress_callback(result_summary)
+                            payload = {
+                                "type": "tool_result",
+                                "tool_name": tool_name,
+                                "result_summary": result_summary,
+                                "message": result_summary,
+                            }
+                            await self.progress_callback(payload)
                         except Exception as cb_err:
                             logger.warning(f"进度回调失败: {cb_err}")
 
@@ -1128,10 +1204,15 @@ class AgentGraphBuilder:
                     error_msg = f"工具执行错误: {str(e)}"
                     logger.error(f"工具 {tool_name} 执行失败: {e}")
 
-                    # 发送工具执行失败的进度事件
+                    # 发送工具执行失败的进度事件（结构化）
                     if self.progress_callback:
                         try:
-                            await self.progress_callback(f"工具 {tool_name} 执行失败")
+                            payload = {
+                                "type": "tool_failed",
+                                "tool_name": tool_name,
+                                "message": f"工具 {tool_name} 执行失败",
+                            }
+                            await self.progress_callback(payload)
                         except Exception as cb_err:
                             logger.warning(f"进度回调失败: {cb_err}")
 
@@ -1180,11 +1261,47 @@ class AgentGraphBuilder:
                 reserved_tokens=RESERVED_OUTPUT_TOKENS,
             )
 
+            # 调用 LLM 前发送“思考中”进度
+            if self.progress_callback:
+                try:
+                    await self.progress_callback(
+                        {
+                            "type": "thinking",
+                            "message": "正在思考...",
+                        }
+                    )
+                except Exception as cb_err:
+                    logger.warning(f"进度回调失败: {cb_err}")
+
             # 调用 LLM 获取下一步响应
             current_response = await self.langchain_llm.ainvoke(messages_to_send)
 
             # 规范化 tool_calls.args（某些 LLM 可能返回字符串而非字典）
             current_response = _normalize_tool_calls_args(current_response)
+
+            # 若仍有工具调用，发送“决定使用工具”进度
+            if (
+                self.progress_callback
+                and hasattr(current_response, "tool_calls")
+                and current_response.tool_calls
+            ):
+                try:
+                    tool_names = [
+                        tc.get("name", tc.get("function", {}).get("name", "unknown"))
+                        for tc in current_response.tool_calls
+                    ]
+                    names_str = "、".join(tool_names[:3]) + (
+                        " 等" if len(tool_names) > 3 else ""
+                    )
+                    await self.progress_callback(
+                        {
+                            "type": "decision",
+                            "message": f"决定使用 {names_str} 继续处理...",
+                            "tool_names": tool_names,
+                        }
+                    )
+                except Exception as cb_err:
+                    logger.warning(f"进度回调失败: {cb_err}")
 
             # 记录 LLM 调用日志（工具循环中的后续调用）
             llm_duration_ms = (datetime.now() - llm_start_time).total_seconds() * 1000
@@ -1225,6 +1342,19 @@ class AgentGraphBuilder:
             )
 
         return final_content
+
+    def _summarize_tool_args(self, tool_name: str, tool_args: Dict[str, Any]) -> str:
+        """生成工具参数的人类可读摘要，用于进度展示"""
+        if not tool_args or not isinstance(tool_args, dict):
+            return ""
+        parts = []
+        for k, v in list(tool_args.items())[:3]:  # 最多 3 个参数
+            if v is None or v == "":
+                continue
+            if isinstance(v, str) and len(v) > 40:
+                v = v[:37] + "..."
+            parts.append(f"{k}: {v}")
+        return ", ".join(parts) if parts else ""
 
     def _generate_tool_result_summary(self, tool_name: str, result: Any) -> str:
         """
@@ -1372,21 +1502,13 @@ class AgentGraphBuilder:
                     )
 
     def _parse_response(self, content: str) -> Dict[str, Any]:
-        """解析响应内容"""
-        import json
+        """
+        解析响应内容，优先提取 summary / narrative / data / highlights 结构
 
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            # 尝试提取 JSON
-            if "```json" in content:
-                start = content.find("```json") + 7
-                end = content.find("```", start)
-                if end > start:
-                    try:
-                        return json.loads(content[start:end].strip())
-                    except json.JSONDecodeError:
-                        pass
-
-            # 返回原始内容
-            return {"raw_content": content}
+        委托给 json_utils.extract_structured_output() 实现，支持：
+        1. JSON 优化（移除 markdown 标记、提取 JSON 边界等）
+        2. 双重编码处理 {"result": "JSON字符串"}
+        3. summary 清洗（移除 markdown 代码块标记）
+        4. 兜底处理
+        """
+        return extract_structured_output(content)

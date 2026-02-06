@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react';
-import { Send, Loader2, FolderOpen, Bot, Plus } from 'lucide-react';
+import { Send, Loader2, FolderOpen, Bot, Plus, Pause, Square } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { MessageBubble } from './MessageBubble';
@@ -106,21 +106,29 @@ export function ChatPanel() {
 
   // 处理建议点击 - 直接调用后端操作，避免依赖 LLM 识别
   const handleSuggestionClick = (suggestion: string) => {
-    // 将建议操作映射为直接的 WebSocket action
+    // 将建议操作映射为直接的 WebSocket action（含自然语言建议）
     const actionMap: Record<string, string | null> = {
       '确认规划': 'approve',
       '确认 Agents': 'approve',
       '确认工作流': 'approve',
       '确认': 'approve',
-      '修改规划': null,  // 保持为聊天消息
+      '看起来不错': 'approve',
+      '修改规划': null,
       '添加 Agent': null,
       '修改 Agent': null,
       '重新生成': 'regenerate',
       '回滚': 'rollback',
       '执行工作流': 'execute',
       '执行': 'execute',
+      '试试看效果': 'execute',
       '保存工作流': 'save',
       '保存': 'save',
+      '先保存': 'save',
+      '先保存下来': 'save',
+      '修改工作流': null,
+      '我想调整一下': null,
+      '我想调整': null,
+      '查看详情': null,
     };
 
     const directAction = actionMap[suggestion];
@@ -235,7 +243,7 @@ export function ChatPanel() {
       <div className={`px-4 py-2 border-t bg-gray-50 transition-all duration-150 ${suggestedActions.length > 0 ? 'min-h-[44px]' : 'h-0 py-0 overflow-hidden border-t-0'}`}>
         {suggestedActions.length > 0 && (
           <div className="flex flex-wrap gap-2">
-            {suggestedActions.map((action, index) => (
+            {suggestedActions.slice(0, 3).map((action, index) => (
               <button
                 key={`action_${action}_${index}`}
                 onClick={() => handleSuggestionClick(action)}
@@ -298,15 +306,43 @@ export function ChatPanel() {
             )}
           </div>
 
+          {mode === 'executing' && (
+            <div className="flex items-center gap-1 mr-1">
+              <button
+                type="button"
+                onClick={() => sendMessage('暂停')}
+                disabled={isLoading}
+                className="p-2 rounded-lg text-amber-600 hover:bg-amber-50 disabled:opacity-50 transition-colors"
+                title="暂停执行"
+              >
+                <Pause className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => sendMessage('停止')}
+                disabled={isLoading}
+                className="p-2 rounded-lg text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+                title="停止执行"
+              >
+                <Square className="w-4 h-4" />
+              </button>
+            </div>
+          )}
           <textarea
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              mode === 'executing'
-                ? "输入干预指令... (暂停/跳过/停止)"
-                : "描述您的需求或修改意见..."
+              mode === 'idle'
+                ? '描述你想创建的工作流，或从库中选择...'
+                : mode === 'building'
+                  ? '对方案有什么想法？可以直接说出修改意见...'
+                  : mode === 'executing'
+                    ? '执行中，你可以随时说"暂停"、"跳过"或补充指令...'
+                    : mode === 'completed'
+                      ? '对结果满意吗？可以调整后重新执行...'
+                      : '输入消息...'
             }
             className="flex-1 resize-none rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary min-h-[40px] max-h-[120px]"
             rows={1}

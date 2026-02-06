@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { 
-  CheckCircle2, 
-  XCircle, 
-  ChevronDown, 
-  ChevronRight, 
+import {
+  CheckCircle2,
+  XCircle,
+  ChevronDown,
+  ChevronRight,
   Wrench,
   Bot,
   AlertTriangle
@@ -14,13 +14,13 @@ interface GenerationSummaryCardProps {
   summary: GenerationSummary;
 }
 
-function AgentSummaryItem({ agent, index }: { agent: GeneratedAgentInfo; index: number }) {
+function AgentSummaryItem({ agent }: { agent: GeneratedAgentInfo }) {
   const [expanded, setExpanded] = useState(false);
   const hasTools = agent.tools && agent.tools.length > 0;
-  
+
   return (
     <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div 
+      <div
         className={`flex items-start gap-3 p-3 ${hasTools ? 'cursor-pointer hover:bg-slate-50' : ''} transition-colors`}
         onClick={() => hasTools && setExpanded(!expanded)}
       >
@@ -32,7 +32,7 @@ function AgentSummaryItem({ agent, index }: { agent: GeneratedAgentInfo; index: 
             <XCircle className="w-5 h-5 text-red-500" />
           )}
         </div>
-        
+
         {/* 内容 */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
@@ -46,7 +46,7 @@ function AgentSummaryItem({ agent, index }: { agent: GeneratedAgentInfo; index: 
           <p className="text-xs text-slate-500 mt-1 break-words leading-relaxed">
             {agent.description}
           </p>
-          
+
           {/* 领域标签 */}
           <div className="flex items-center gap-2 mt-2">
             <span className="px-2 py-0.5 text-[10px] bg-blue-50 text-blue-600 rounded-full">
@@ -59,7 +59,7 @@ function AgentSummaryItem({ agent, index }: { agent: GeneratedAgentInfo; index: 
             )}
           </div>
         </div>
-        
+
         {/* 展开按钮 */}
         {hasTools && (
           <div className="flex-shrink-0 text-slate-400 mt-0.5">
@@ -67,7 +67,7 @@ function AgentSummaryItem({ agent, index }: { agent: GeneratedAgentInfo; index: 
           </div>
         )}
       </div>
-      
+
       {/* 工具详情 */}
       {expanded && hasTools && (
         <div className="px-3 pb-3 pt-0 border-t border-slate-100">
@@ -75,7 +75,7 @@ function AgentSummaryItem({ agent, index }: { agent: GeneratedAgentInfo; index: 
             <Wrench className="w-3.5 h-3.5 text-slate-400 mt-0.5 flex-shrink-0" />
             <div className="flex flex-wrap gap-1">
               {agent.tools.map((tool, i) => (
-                <span 
+                <span
                   key={i}
                   className="px-2 py-0.5 text-[10px] bg-slate-100 text-slate-600 rounded-full"
                 >
@@ -115,16 +115,14 @@ function FailedAgentItem({ agent }: { agent: FailedAgentInfo }) {
 
 export default function GenerationSummaryCard({ summary }: GenerationSummaryCardProps) {
   const hasFailures = summary.failed_count > 0;
-  
+
   return (
     <div className="mt-3 bg-slate-50 rounded-2xl overflow-hidden border border-slate-200">
       {/* 标题栏 */}
-      <div className={`px-4 py-3 flex items-center justify-between border-b ${
-        hasFailures ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'
-      }`}>
-        <h3 className={`font-medium flex items-center gap-2 text-sm ${
-          hasFailures ? 'text-amber-800' : 'text-green-800'
+      <div className={`px-4 py-3 flex items-center justify-between border-b ${hasFailures ? 'bg-amber-50 border-amber-200' : 'bg-green-50 border-green-200'
         }`}>
+        <h3 className={`font-medium flex items-center gap-2 text-sm ${hasFailures ? 'text-amber-800' : 'text-green-800'
+          }`}>
           {hasFailures ? (
             <>
               <AlertTriangle className="w-4 h-4" />
@@ -149,14 +147,14 @@ export default function GenerationSummaryCard({ summary }: GenerationSummaryCard
           </span>
         </div>
       </div>
-      
+
       {/* Agent 列表 */}
       <div className="p-3 space-y-2">
         {/* 成功的 Agents */}
-        {summary.agents.map((agent, index) => (
-          <AgentSummaryItem key={agent.name} agent={agent} index={index} />
+        {summary.agents.map((agent) => (
+          <AgentSummaryItem key={agent.name} agent={agent} />
         ))}
-        
+
         {/* 失败的 Agents */}
         {summary.failed_agents && summary.failed_agents.length > 0 && (
           <div className="mt-3 pt-3 border-t border-slate-200">
@@ -172,7 +170,7 @@ export default function GenerationSummaryCard({ summary }: GenerationSummaryCard
           </div>
         )}
       </div>
-      
+
       {/* 下一步提示 */}
       {summary.next_step && (
         <div className="px-4 py-3 bg-blue-50 border-t border-blue-100">

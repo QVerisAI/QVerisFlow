@@ -77,6 +77,9 @@ class SocketIOHandler:
                 "execution_event",
                 "progress_update",
                 "node_progress",
+                "node_thinking",
+                "node_stream",
+                "node_activity",
             }
             or msg_dict.get("message_type") == "progress"
         )

@@ -16,6 +16,20 @@ from .prompt_structure import (
 )
 from .tool_definition import ToolReference
 
+# Standard output format for agent results: summary + narrative + data for readable UX
+OUTPUT_FORMAT_INSTRUCTION = """
+## 输出格式要求（必须遵守）
+
+你的最终输出必须是一个 JSON 对象，包含以下字段：
+- **summary**（必填）：一句话人类可读的摘要，说明你完成了什么。
+- **narrative**（必填）：2-5 句自然语言描述，面向非技术读者说明你的发现或结果。
+- **data**（必填）：你的详细结构化输出，任意合法 JSON 结构。
+- **highlights**（可选）：关键发现或重要条目的字符串数组。
+
+示例结构：
+{"summary": "...", "narrative": "...", "data": {...}, "highlights": ["...", "..."]}
+"""
+
 
 class AgentExecutionType(str, Enum):
     """
