@@ -20,6 +20,7 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-markdown": "^9.0.1",
+    "react-virtuoso": "^4.7.1",
     "reactflow": "^11.10.0",
     "socket.io-client": "^4.8.3",
     "tailwind-merge": "^2.2.0",

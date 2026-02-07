@@ -1,8 +1,8 @@
-import { useRef, useEffect, useState, useCallback } from 'react';
+import { useRef, useEffect, useState } from 'react';
 import { Send, Loader2, FolderOpen, Bot, Plus, Pause, Square } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { MessageBubble } from './MessageBubble';
+import { VirtualizedMessageList } from './VirtualizedMessageList';
 import { CheckpointList } from './CheckpointList';
 
 export function ChatPanel() {
@@ -14,59 +14,14 @@ export function ChatPanel() {
     mode,
     setShowWorkflowListPanel,
     setShowAgentLibraryPanel,
+    hasMoreHistory,
+    isLoadingHistory,
   } = useAppStore();
-  const { sendMessage, sendAction } = useWebSocket();
+  const { sendMessage, sendAction, loadMoreHistory } = useWebSocket();
   const [input, setInput] = useState('');
   const [showQuickMenu, setShowQuickMenu] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const quickMenuRef = useRef<HTMLDivElement>(null);
-  const lastMessageCountRef = useRef(0);
-  const isUserScrollingRef = useRef(false);
-
-  // 智能滚动：仅在新消息添加时滚动到底部，且用户未手动滚动时
-  const scrollToBottom = useCallback((force = false) => {
-    if (!messagesContainerRef.current || !messagesEndRef.current) return;
-
-    const container = messagesContainerRef.current;
-    const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-
-    // 只有在接近底部或强制滚动时才滚动
-    if (isNearBottom || force) {
-      // 使用 requestAnimationFrame 确保在 DOM 更新后滚动
-      requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
-      });
-    }
-  }, []);
-
-  // 监听消息变化，只在新消息添加时滚动
-  useEffect(() => {
-    const newCount = messages.length;
-    const oldCount = lastMessageCountRef.current;
-
-    if (newCount > oldCount) {
-      // 新消息添加，滚动到底部
-      scrollToBottom(true);
-    }
-
-    lastMessageCountRef.current = newCount;
-  }, [messages.length, scrollToBottom]);
-
-  // 监听用户滚动
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-
-    const handleScroll = () => {
-      const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 100;
-      isUserScrollingRef.current = !isNearBottom;
-    };
-
-    container.addEventListener('scroll', handleScroll);
-    return () => container.removeEventListener('scroll', handleScroll);
-  }, []);
 
   // 点击外部关闭快捷菜单
   useEffect(() => {
@@ -154,12 +109,9 @@ export function ChatPanel() {
       </div>
 
       {/* 消息列表 */}
-      <div
-        ref={messagesContainerRef}
-        className="flex-1 overflow-y-auto p-4 space-y-4"
-      >
+      <div className="flex-1 overflow-hidden">
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full px-6">
+          <div className="flex flex-col items-center justify-center h-full px-6 overflow-auto">
             {/* 欢迎标题 */}
             <div className="text-center mb-8">
               <h3 className="text-xl font-medium text-gray-800">开始构建</h3>
@@ -209,34 +161,14 @@ export function ChatPanel() {
             </div>
           </div>
         ) : (
-          messages
-            // 过滤过期的进度类消息（超过 5 分钟）
-            .filter((message) => {
-              const msgData = message.data as { type?: string } | undefined;
-              // 只过滤进度类消息
-              if (msgData?.type === 'agent_generation_progress') {
-                const msgTime = new Date(message.timestamp).getTime();
-                const now = Date.now();
-                const MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟
-                if (now - msgTime > MAX_AGE_MS) {
-                  return false; // 过滤掉过期的进度消息
-                }
-              }
-              return true;
-            })
-            .map((message, index) => (
-              <MessageBubble key={message.id || `fallback_${index}`} message={message} />
-            ))
+          <VirtualizedMessageList
+            messages={messages}
+            isLoading={isLoading}
+            hasMoreHistory={hasMoreHistory}
+            isLoadingHistory={isLoadingHistory}
+            onLoadMore={loadMoreHistory}
+          />
         )}
-
-        {isLoading && (
-          <div className="flex items-center gap-2 text-gray-500">
-            <Loader2 className="w-4 h-4 animate-spin" />
-            <span className="text-sm">思考中...</span>
-          </div>
-        )}
-
-        <div ref={messagesEndRef} />
       </div>
 
       {/* 建议操作 - 使用固定最小高度避免布局跳动 */}

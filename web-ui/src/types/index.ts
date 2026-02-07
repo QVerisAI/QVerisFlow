@@ -19,6 +19,7 @@ export enum WSMessageType {
   CONNECTED = 'connected',
   EXECUTION_HISTORY = 'execution_history',  // 执行历史响应
   EXECUTION_DETAIL = 'execution_detail',  // 执行详情响应
+  SYNC_MESSAGES_BATCH = 'sync_messages_batch',  // 批量消息同步响应
   // Agent 生成相关
   AGENT_GENERATION_PROGRESS = 'agent_generation_progress',
   AGENT_UPDATED = 'agent_updated',

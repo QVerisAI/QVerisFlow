@@ -66,6 +66,7 @@ class WSMessageType(Enum):
     CONNECTED = "connected"
     EXECUTION_HISTORY = "execution_history"  # 执行历史响应
     EXECUTION_DETAIL = "execution_detail"  # 执行详情响应
+    SYNC_MESSAGES_BATCH = "sync_messages_batch"  # 批量消息同步响应
 
     # 工作流管理响应 (Server -> Client)
     WORKFLOW_LOADED = "workflow_loaded"  # 工作流已加载
@@ -702,39 +703,91 @@ class WebSocketHandler:
 
     async def _handle_sync_messages(self, payload: Dict[str, Any]) -> None:
         """
-        处理消息同步请求（增量同步）
+        处理消息同步请求（支持分页的批量同步）
 
-        前端发送已有的消息数量，后端只返回缺失的消息。
-        这避免了重连时发送全部历史消息导致的 UI 闪动。
+        支持两种模式：
+        1. 分页模式（推荐）：使用 limit + offset 参数，批量返回消息
+        2. 兼容模式：使用 client_message_count 参数，逐条返回（兼容旧协议）
 
         Args:
             payload: {
-                "client_message_count": int,  # 前端当前消息数量
+                "limit": int,           # 每次加载的消息数量（默认 50）
+                "offset": int,          # 从最新消息往前偏移量（0=最新）
+                "client_message_count": int,  # 兼容旧协议
             }
         """
-        client_count = payload.get("client_message_count", 0)
-
         # 确保从数据库加载最新的消息
         await self._ensure_messages_loaded()
 
-        server_count = len(self.builder.conversation_history)
+        total_count = len(self.builder.conversation_history)
 
-        # 如果客户端消息少于服务端，发送缺失的消息
-        if client_count < server_count:
-            missing_messages = self.builder.conversation_history[client_count:]
-            logger.info(
-                f"同步缺失消息: 客户端={client_count}, 服务端={server_count}, 同步={len(missing_messages)}条"
-            )
+        # 检查是否使用新的分页模式
+        if "limit" in payload:
+            # 新分页模式：批量返回
+            limit = payload.get("limit", 50)
+            offset = payload.get("offset", 0)
 
-            for msg in missing_messages:
+            # 计算分页范围（从最新到最旧）
+            # 例如：total=500, offset=0, limit=50 → 取 [450:500]（最新50条）
+            # 例如：total=500, offset=50, limit=50 → 取 [400:450]
+            end_idx = total_count - offset
+            start_idx = max(0, end_idx - limit)
+
+            if end_idx <= 0:
+                # 没有更多消息
                 await self._send_message(
                     WSMessage(
-                        type=WSMessageType.CHAT_MESSAGE,
-                        payload=msg.to_dict(),
+                        type=WSMessageType.SYNC_MESSAGES_BATCH,
+                        payload={
+                            "messages": [],
+                            "total_count": total_count,
+                            "offset": offset,
+                            "has_more": False,
+                        },
                     )
                 )
+                return
+
+            messages_slice = self.builder.conversation_history[start_idx:end_idx]
+            has_more = start_idx > 0
+
+            logger.info(
+                f"批量同步消息: total={total_count}, offset={offset}, "
+                f"limit={limit}, 返回={len(messages_slice)}条, has_more={has_more}"
+            )
+
+            # 批量发送
+            await self._send_message(
+                WSMessage(
+                    type=WSMessageType.SYNC_MESSAGES_BATCH,
+                    payload={
+                        "messages": [msg.to_dict() for msg in messages_slice],
+                        "total_count": total_count,
+                        "offset": offset,
+                        "has_more": has_more,
+                    },
+                )
+            )
         else:
-            logger.debug(f"消息已同步: 客户端={client_count}, 服务端={server_count}")
+            # 兼容旧协议：逐条发送
+            client_count = payload.get("client_message_count", 0)
+
+            if client_count < total_count:
+                missing_messages = self.builder.conversation_history[client_count:]
+                logger.info(
+                    f"同步缺失消息（兼容模式）: 客户端={client_count}, "
+                    f"服务端={total_count}, 同步={len(missing_messages)}条"
+                )
+
+                for msg in missing_messages:
+                    await self._send_message(
+                        WSMessage(
+                            type=WSMessageType.CHAT_MESSAGE,
+                            payload=msg.to_dict(),
+                        )
+                    )
+            else:
+                logger.debug(f"消息已同步: 客户端={client_count}, 服务端={total_count}")
 
     async def _ensure_messages_loaded(self) -> None:
         """确保消息从数据库加载（如果数据库可用）"""

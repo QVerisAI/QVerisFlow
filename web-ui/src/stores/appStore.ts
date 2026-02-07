@@ -35,6 +35,13 @@ interface AppState {
   updateMessageById: (messageId: string, updates: Partial<Message>) => void;
   clearMessages: () => void;
   removeMessagesByDataType: (dataType: string) => void;
+  // 批量消息操作（用于渐进式加载）
+  prependMessagesBatch: (messages: Message[]) => void;  // 头部插入（加载更早的消息）
+  addMessagesBatch: (messages: Message[]) => void;      // 尾部追加（初始加载）
+  hasMoreHistory: boolean;
+  setHasMoreHistory: (has: boolean) => void;
+  isLoadingHistory: boolean;
+  setIsLoadingHistory: (loading: boolean) => void;
 
   // 工作流状态
   workflowState: WorkflowState | null;
@@ -213,12 +220,37 @@ export const useAppStore = create<AppState>((set) => ({
     return { messages: updatedMessages };
   }),
 
-  clearMessages: () => set({ messages: [] }),
+  clearMessages: () => set({ messages: [], hasMoreHistory: false }),
 
   // 按 data.type 清理消息（用于加载新工作流时清理旧的工作流卡片消息）
   removeMessagesByDataType: (dataType) => set((state) => ({
     messages: state.messages.filter(m => m.data?.type !== dataType)
   })),
+
+  // 批量消息操作（用于渐进式加载）
+  prependMessagesBatch: (messages) => set((state) => {
+    // 头部插入（加载更早的消息）
+    const messagesWithIds = messages.map(msg => ({
+      ...msg,
+      id: msg.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+    }));
+    return { messages: [...messagesWithIds, ...state.messages] };
+  }),
+
+  addMessagesBatch: (messages) => set((state) => {
+    // 尾部追加（初始加载最新消息）
+    const messagesWithIds = messages.map(msg => ({
+      ...msg,
+      id: msg.id || `msg_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+    }));
+    return { messages: [...state.messages, ...messagesWithIds] };
+  }),
+
+  hasMoreHistory: false,
+  setHasMoreHistory: (has) => set({ hasMoreHistory: has }),
+
+  isLoadingHistory: false,
+  setIsLoadingHistory: (loading) => set({ isLoadingHistory: loading }),
 
   // 工作流状态
   workflowState: null,

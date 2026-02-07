@@ -108,6 +108,11 @@ export function useWebSocket() {
     updateRealtimeNodeOutput,
     clearRealtimeNodeOutputs,
     setMode,
+    // 批量消息相关
+    prependMessagesBatch,
+    addMessagesBatch,
+    setHasMoreHistory,
+    setIsLoadingHistory,
   } = useAppStore();
 
   // 注册 Socket.IO 连接状态回调
@@ -228,8 +233,16 @@ export function useWebSocket() {
       const clientMessageCount = currentMessages.length;
       const serverHistoryCount = payload.history_count || 0;
 
-      // 如果服务端有更多消息，请求增量同步（无论是否重连）
-      if (serverHistoryCount > clientMessageCount) {
+      // 如果服务端有历史消息且前端没有消息，使用分页模式加载最新消息
+      if (serverHistoryCount > 0 && clientMessageCount === 0) {
+        console.log(`请求分页同步（初始加载）: 服务端=${serverHistoryCount}条, 请求最新50条`);
+        setIsLoadingHistory(true);
+        wsService.send(WSMessageType.SYNC_MESSAGES, {
+          limit: 50,
+          offset: 0,  // 从最新消息开始
+        });
+      } else if (serverHistoryCount > clientMessageCount) {
+        // 如果服务端有更多消息（可能是新消息），使用旧协议同步增量
         console.log(`请求增量同步: 客户端=${clientMessageCount}, 服务端=${serverHistoryCount}`);
         wsService.send(WSMessageType.SYNC_MESSAGES, {
           client_message_count: clientMessageCount
@@ -356,6 +369,39 @@ export function useWebSocket() {
       // 其他消息正常添加
       addMessage(message);
     }, 'hook_chat');
+
+    // 批量消息同步（渐进式加载）
+    const unsubSyncBatch = wsService.on(WSMessageType.SYNC_MESSAGES_BATCH, (msg) => {
+      const payload = msg.payload as {
+        messages: Array<{ role: string; content: string; message_type?: string; data?: Record<string, unknown>; timestamp?: string }>;
+        total_count: number;
+        offset: number;
+        has_more: boolean;
+      };
+
+      console.log(`收到批量消息: ${payload.messages.length}条, offset=${payload.offset}, has_more=${payload.has_more}, total=${payload.total_count}`);
+
+      // 转换消息格式
+      const messages: Message[] = payload.messages.map(m => ({
+        role: m.role as 'user' | 'assistant' | 'system',
+        content: m.content,
+        timestamp: m.timestamp || new Date().toISOString(),
+        messageType: (m.message_type || 'text') as Message['messageType'],
+        data: m.data,
+      }));
+
+      if (payload.offset === 0) {
+        // 初始加载（最新消息），追加到列表
+        addMessagesBatch(messages);
+      } else {
+        // 加载更早的消息，插入到列表头部
+        prependMessagesBatch(messages);
+      }
+
+      // 更新是否还有更多历史
+      setHasMoreHistory(payload.has_more);
+      setIsLoadingHistory(false);
+    }, 'hook_sync_batch');
 
     // 工作流更新
     const unsubWorkflow = wsService.on(WSMessageType.WORKFLOW_UPDATE, (msg) => {
@@ -1371,6 +1417,7 @@ export function useWebSocket() {
     return () => {
       unsubConnected();
       unsubChat();
+      unsubSyncBatch();
       unsubWorkflow();
       unsubHighlight();
       unsubSuggestions();
@@ -1391,7 +1438,26 @@ export function useWebSocket() {
       unsubAgentTemplates();
       unsubAgentReused();
     };
-  }, [addMessage, updateOrAddProgressMessage, setWorkflowState, setHighlightedNodes, setSuggestedActions, setExecutionProgress, updateNodeState, setIsLoading, setCheckpoints, setGenerationProgress, updateAgentInWorkflow, setMode, clearRealtimeNodeOutputs]);
+  }, [addMessage, updateOrAddProgressMessage, setWorkflowState, setHighlightedNodes, setSuggestedActions, setExecutionProgress, updateNodeState, setIsLoading, setCheckpoints, setGenerationProgress, updateAgentInWorkflow, setMode, clearRealtimeNodeOutputs, prependMessagesBatch, addMessagesBatch, setHasMoreHistory, setIsLoadingHistory]);
+
+  // 加载更多历史消息
+  const loadMoreHistory = useCallback(() => {
+    const { messages, hasMoreHistory, isLoadingHistory } = useAppStore.getState();
+
+    // 如果没有更多历史或正在加载，跳过
+    if (!hasMoreHistory || isLoadingHistory) {
+      return;
+    }
+
+    const currentCount = messages.length;
+    console.log(`请求更多历史消息: 当前=${currentCount}条`);
+
+    setIsLoadingHistory(true);
+    wsService.send(WSMessageType.SYNC_MESSAGES, {
+      limit: 50,
+      offset: currentCount,  // 从当前已有消息数量开始往前加载
+    });
+  }, [setIsLoadingHistory]);
 
   return {
     isConnected,
@@ -1402,5 +1468,6 @@ export function useWebSocket() {
     sendMessage,
     sendAction,
     smartSave,
+    loadMoreHistory,
   };
 }
