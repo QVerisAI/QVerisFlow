@@ -899,6 +899,42 @@ class WebSocketHandler:
 
             ops._task_description = workflow.description or workflow.name
 
+            # ========== 关键修复：从加载的数据重建 current_plan ==========
+            # 这是修复画布显示旧工作流的根本原因：
+            # _get_workflow_state() 优先使用 current_plan.agent_specs
+            # 如果不重建，会继续使用旧的 plan 数据
+            from src.evolution.interactive_builder import WorkflowPlan, AgentSpec
+
+            agent_specs = []
+            for agent in loaded_agents:
+                # 从 workflow nodes 获取该 agent 的依赖关系
+                node = next(
+                    (n for n in workflow.nodes if n.agent_id == agent.agent_id),
+                    None,
+                )
+                deps = node.dependencies if node else []
+
+                agent_specs.append(
+                    AgentSpec(
+                        name=agent.name,
+                        task=agent.description or "",
+                        display_name=agent.display_name or agent.name,
+                        suggested_tools=[
+                            t.tool_id for t in (agent.tool_references or [])
+                        ],
+                        dependencies=deps,
+                        context_refs=[],
+                    )
+                )
+
+            ops.builder.current_plan = WorkflowPlan(
+                task_description=workflow.description or workflow.name,
+                agent_specs=agent_specs,
+                workflow_structure="loaded_from_db",
+                estimated_steps=len(agent_specs),
+                notes=f"从数据库加载: {workflow.name}",
+            )
+
             logger.info(
                 f"工作流加载完成: {workflow.name}, "
                 f"已加载 {len(loaded_agents)}/{len(agent_ids)} 个 Agents"

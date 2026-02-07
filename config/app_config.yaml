@@ -145,7 +145,7 @@ models:
       - coding
       - vision
       - long_context
-    cost_tier: "medium"
+    cost_tier: "high"
 
   minimax-m2.1:
     api_key: ${MINIMAX_API_KEY:}

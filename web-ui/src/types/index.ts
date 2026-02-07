@@ -486,7 +486,7 @@ export interface ExecutionSummary {
   executionId: string;
   workflowId: string;
   workflowName?: string;
-  status: 'completed' | 'failed';
+  status: 'completed' | 'failed' | 'cancelled';
   totalDurationMs: number;
   nodesCompleted: number;
   nodesFailed: number;

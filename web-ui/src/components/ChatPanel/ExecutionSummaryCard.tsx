@@ -11,6 +11,7 @@ import {
   Edit3,
   List,
   PlayCircle,
+  StopCircle,
 } from 'lucide-react';
 import type { ExecutionSummary, ExecutionNodeResult } from '../../types';
 import { formatDuration, formatNodeOutput, formatStartNodeInput } from '../../utils/outputFormatter';
@@ -188,6 +189,7 @@ export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardPr
   const [showNodeDetails, setShowNodeDetails] = useState(false);
 
   const isSuccess = summary.status === 'completed';
+  const isCancelled = summary.status === 'cancelled';
   const hasFinalOutput = summary.finalOutput != null || summary.finalOutputMarkdown != null || summary.finalNarrative != null;
 
   // 计算显示的节点数（排除隐藏的空开始节点）
@@ -196,7 +198,7 @@ export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardPr
   const displayTotalNodes = summary.totalNodes - hiddenStartNodes;
   const displayCompletedNodes = Math.max(0, summary.nodesCompleted - hiddenStartNodes);
 
-  const conclusionText = summary.finalNarrative ?? (summary.finalOutput != null ? formatNodeOutput(summary.finalOutput).summary : null) ?? (isSuccess ? '执行已完成。' : '执行未完成。');
+  const conclusionText = summary.finalNarrative ?? (summary.finalOutput != null ? formatNodeOutput(summary.finalOutput).summary : null) ?? (isSuccess ? '执行已完成。' : isCancelled ? '执行已停止。' : '执行未完成。');
   const highlights = summary.finalHighlights ?? (summary.finalOutput != null && typeof summary.finalOutput === 'object' && summary.finalOutput !== null && 'highlights' in summary.finalOutput && Array.isArray((summary.finalOutput as Record<string, unknown>).highlights) ? (summary.finalOutput as Record<string, unknown>).highlights as string[] : null);
 
   const handleNodeClick = (nodeId: string) => {
@@ -206,10 +208,10 @@ export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardPr
   return (
     <div className="mt-3 bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm w-[400px]">
       {/* 标题栏 */}
-      <div className={`px-4 py-3 flex items-center justify-between border-b ${isSuccess ? 'bg-emerald-50 border-emerald-100' : 'bg-red-50 border-red-100'}`}>
-        <h3 className={`font-medium flex items-center gap-2 text-sm ${isSuccess ? 'text-emerald-700' : 'text-red-700'}`}>
-          {isSuccess ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
-          {isSuccess ? '工作流执行完成' : '工作流执行失败'}
+      <div className={`px-4 py-3 flex items-center justify-between border-b ${isSuccess ? 'bg-emerald-50 border-emerald-100' : isCancelled ? 'bg-amber-50 border-amber-100' : 'bg-red-50 border-red-100'}`}>
+        <h3 className={`font-medium flex items-center gap-2 text-sm ${isSuccess ? 'text-emerald-700' : isCancelled ? 'text-amber-700' : 'text-red-700'}`}>
+          {isSuccess ? <CheckCircle2 className="w-4 h-4" /> : isCancelled ? <StopCircle className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
+          {isSuccess ? '工作流执行完成' : isCancelled ? '工作流已停止' : '工作流执行失败'}
         </h3>
         <div className="flex items-center gap-3 text-xs">
           <span className="flex items-center gap-1 text-slate-500">
@@ -252,8 +254,8 @@ export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardPr
             <div className="px-4 pb-4">
               <OutputDisplay output={summary.finalOutput as Record<string, unknown>} />
             </div>
-        )}
-      </div>
+          )}
+        </div>
       )}
 
       {/* 错误信息 */}
@@ -292,7 +294,7 @@ export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardPr
           <Edit3 className="w-3.5 h-3.5" />
           修改后执行
         </button>
-          </div>
+      </div>
 
       {/* 各节点输出详情（默认折叠） */}
       <div>
@@ -317,7 +319,7 @@ export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardPr
                 ) : (
                   <NodeResultItem key={node.nodeId} node={node} onNodeClick={handleNodeClick} />
                 )
-            ))}
+              ))}
           </div>
         )}
       </div>

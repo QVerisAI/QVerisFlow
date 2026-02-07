@@ -245,6 +245,31 @@ export function useWebSocket() {
         data: payload.data,
       };
 
+      // 如果是执行摘要消息（从后端同步），检查是否已存在相同的摘要
+      if (payload.message_type === 'execution_summary' || payload.data?.type === 'execution_summary') {
+        const summaryData = payload.data as { executionId?: string } | undefined;
+        const executionId = summaryData?.executionId;
+
+        if (executionId) {
+          // 检查是否已存在该执行的摘要消息（防止重复）
+          const existingMessages = useAppStore.getState().messages;
+          const existingSummary = existingMessages.find(
+            m => m.messageType === 'execution_summary' &&
+              (m.data as { executionId?: string } | undefined)?.executionId === executionId
+          );
+
+          if (existingSummary) {
+            console.log('[WS] 跳过重复的执行摘要消息:', executionId);
+            return;
+          }
+        }
+
+        // 直接添加执行摘要消息
+        addMessage(message);
+        console.log('[WS] 添加执行摘要消息:', executionId);
+        return;
+      }
+
       // 如果是进度消息，使用更新逻辑（同一个 agent 只保留一条卡片）
       if (payload.data?.type === 'agent_generation_progress') {
         // 过滤过期的进度消息（超过 5 分钟）
@@ -585,8 +610,19 @@ export function useWebSocket() {
             nodesFailed,
           });
 
-          // 将进度消息转换为摘要消息
-          if (executionProgressRef.current) {
+          // 检查是否已存在该执行的摘要消息（可能从后端同步）
+          const existingMessages = useAppStore.getState().messages;
+          const existingSummary = existingMessages.find(
+            m => m.messageType === 'execution_summary' &&
+              (m.data as { executionId?: string } | undefined)?.executionId === executionId
+          );
+
+          if (existingSummary) {
+            // 已有摘要消息（从后端同步），只需清理进度状态
+            console.log('[Execution] 已存在摘要消息，跳过创建:', executionId);
+            executionProgressRef.current = null;
+          } else if (executionProgressRef.current) {
+            // 将进度消息转换为摘要消息
             const { messageId, progress, nodeResults } = executionProgressRef.current;
             const finalOutput = event.data?.final_output || event.data?.result;
             const finalNarrative = event.data?.final_narrative as string | undefined;
@@ -636,8 +672,19 @@ export function useWebSocket() {
             completedAt,
           });
 
-          // 将进度消息转换为失败摘要
-          if (executionProgressRef.current) {
+          // 检查是否已存在该执行的摘要消息（可能从后端同步）
+          const existingMessages = useAppStore.getState().messages;
+          const existingSummary = existingMessages.find(
+            m => m.messageType === 'execution_summary' &&
+              (m.data as { executionId?: string } | undefined)?.executionId === executionId
+          );
+
+          if (existingSummary) {
+            // 已有摘要消息（从后端同步），只需清理进度状态
+            console.log('[Execution] 已存在失败摘要消息，跳过创建:', executionId);
+            executionProgressRef.current = null;
+          } else if (executionProgressRef.current) {
+            // 将进度消息转换为失败摘要
             const { messageId, progress, nodeResults } = executionProgressRef.current;
 
             const summary: ExecutionSummary = {
@@ -658,6 +705,59 @@ export function useWebSocket() {
 
             updateMessageById(messageId, {
               content: '工作流执行失败',
+              messageType: 'execution_summary',
+              data: summary as unknown as Record<string, unknown>,
+            });
+
+            executionProgressRef.current = null;
+          }
+        }
+        currentExecutionRef.current = null;
+      }
+
+      // 执行取消：更新执行记录并转换为取消摘要消息
+      if (event.event_type === 'workflow_cancelled') {
+        const executionId = currentExecutionRef.current?.executionId || event.workflow_id;
+        if (executionId) {
+          const completedAt = new Date().toISOString();
+
+          updateExecutionRecord(executionId, {
+            status: 'cancelled',
+            completedAt,
+          });
+
+          // 检查是否已存在该执行的摘要消息（可能从后端同步）
+          const existingMessages = useAppStore.getState().messages;
+          const existingSummary = existingMessages.find(
+            m => m.messageType === 'execution_summary' &&
+              (m.data as { executionId?: string } | undefined)?.executionId === executionId
+          );
+
+          if (existingSummary) {
+            // 已有摘要消息（从后端同步），只需清理进度状态
+            console.log('[Execution] 已存在取消摘要消息，跳过创建:', executionId);
+            executionProgressRef.current = null;
+          } else if (executionProgressRef.current) {
+            // 将进度消息转换为取消摘要
+            const { messageId, progress, nodeResults } = executionProgressRef.current;
+
+            const summary: ExecutionSummary = {
+              type: 'execution_summary',
+              executionId,
+              workflowId: progress.workflowId,
+              workflowName: progress.workflowName,
+              status: 'cancelled',
+              totalDurationMs: 0,
+              nodesCompleted: progress.nodesCompleted,
+              nodesFailed: 0,
+              totalNodes: progress.totalNodes,
+              startedAt: progress.startedAt,
+              completedAt,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+
+            updateMessageById(messageId, {
+              content: '工作流已停止',
               messageType: 'execution_summary',
               data: summary as unknown as Record<string, unknown>,
             });
@@ -1124,6 +1224,11 @@ export function useWebSocket() {
         }>;
       };
       const store = useAppStore.getState();
+
+      // 清理旧的工作流相关卡片消息，避免加载新工作流时显示旧的信息
+      store.removeMessagesByDataType('workflow_info_card');
+      store.removeMessagesByDataType('workflow_loaded');
+
       store.setCurrentWorkflowMeta({
         id: payload.id || '',
         workflowId: payload.workflow_id,

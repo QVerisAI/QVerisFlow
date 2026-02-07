@@ -300,6 +300,100 @@ def _try_parse_double_encoded(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]
     return None
 
 
+def _try_extract_nested_structured_json(content: str) -> Optional[Dict[str, Any]]:
+    """
+    尝试从内容中智能提取嵌套的结构化 JSON
+
+    当直接解析失败时，查找内容中是否存在 summary/data 等标准字段，
+    并提取其所在的完整 JSON 对象。
+
+    处理场景：
+    1. 内容前有解释文字：'以下是分析结果：{"summary": ...}'
+    2. 内容被markdown包裹：'```json\n{"summary": ...}\n```'
+    3. 内容中有多个JSON片段，需要找到包含标准字段的那个
+
+    Args:
+        content: 原始内容
+
+    Returns:
+        如果成功提取则返回解析后的字典，否则返回 None
+    """
+    if not content:
+        return None
+
+    # 查找标准字段的位置
+    standard_fields = ['"summary"', '"data"', '"narrative"', '"highlights"']
+    field_positions = []
+    for field in standard_fields:
+        pos = content.find(field)
+        if pos != -1:
+            field_positions.append(pos)
+
+    if not field_positions:
+        return None
+
+    # 找到最早出现的标准字段位置
+    earliest_field_pos = min(field_positions)
+
+    # 从该位置向前查找最近的 '{' 作为 JSON 起点
+    json_start = content.rfind("{", 0, earliest_field_pos)
+    if json_start == -1:
+        return None
+
+    # 从 json_start 开始，使用括号匹配找到完整的 JSON 对象
+    brace_count = 0
+    json_end = -1
+    in_string = False
+    escape_next = False
+
+    for i in range(json_start, len(content)):
+        char = content[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if char == "\\" and in_string:
+            escape_next = True
+            continue
+        if char == '"' and not escape_next:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            brace_count += 1
+        elif char == "}":
+            brace_count -= 1
+            if brace_count == 0:
+                json_end = i
+                break
+
+    if json_end == -1:
+        return None
+
+    # 提取并解析 JSON
+    json_str = content[json_start : json_end + 1]
+    try:
+        parsed = json.loads(json_str)
+        if isinstance(parsed, dict) and ("summary" in parsed or "data" in parsed):
+            logger.debug("✅ 成功从嵌套内容中提取结构化 JSON")
+            return parsed
+    except json.JSONDecodeError:
+        # 尝试使用 optimize_json_response 优化后再解析
+        optimized = optimize_json_response(json_str)
+        if optimized:
+            try:
+                parsed = json.loads(optimized)
+                if isinstance(parsed, dict) and (
+                    "summary" in parsed or "data" in parsed
+                ):
+                    logger.debug("✅ 成功从嵌套内容中提取结构化 JSON（优化后）")
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
 def extract_structured_output(content: str) -> Dict[str, Any]:
     """
     从 LLM 输出中提取结构化输出 {summary, narrative, data, highlights}
@@ -339,6 +433,12 @@ def extract_structured_output(content: str) -> Dict[str, Any]:
                 parsed = json.loads(optimized)
             except json.JSONDecodeError:
                 pass
+
+    # Step 2.5: 尝试从内容中智能提取嵌套的结构化 JSON
+    if parsed is None:
+        extracted = _try_extract_nested_structured_json(content)
+        if extracted:
+            parsed = extracted
 
     # Step 3: 如果仍然无法解析，返回兜底结果
     if parsed is None:

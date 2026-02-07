@@ -363,10 +363,44 @@ class ConversationalWorkflowBuilder:
             if self.on_workflow_update:
                 await self.on_workflow_update(self._get_workflow_state())
 
+            # 保存执行摘要到对话历史（用于页面刷新后恢复卡片）
+            summary_message = self._build_execution_summary_message(event)
+            if summary_message:
+                self.conversation_history.append(summary_message)
+                await self._save_to_database()
+                logger.debug(f"执行摘要已保存到对话历史: {event.get('workflow_id')}")
+
         elif event_type in ["execution_failed", "workflow_failed"]:
             self.mode = SessionMode.BUILDING  # 失败后回到构建模式，允许重试
             if self.on_workflow_update:
                 await self.on_workflow_update(self._get_workflow_state())
+
+            # 保存失败摘要到对话历史
+            summary_message = self._build_execution_summary_message(
+                event, is_failed=True
+            )
+            if summary_message:
+                self.conversation_history.append(summary_message)
+                await self._save_to_database()
+                logger.debug(
+                    f"执行失败摘要已保存到对话历史: {event.get('workflow_id')}"
+                )
+
+        elif event_type == "workflow_cancelled":
+            self.mode = SessionMode.BUILDING  # 取消后回到构建模式
+            if self.on_workflow_update:
+                await self.on_workflow_update(self._get_workflow_state())
+
+            # 保存取消摘要到对话历史
+            summary_message = self._build_execution_summary_message(
+                event, is_cancelled=True
+            )
+            if summary_message:
+                self.conversation_history.append(summary_message)
+                await self._save_to_database()
+                logger.debug(
+                    f"执行取消摘要已保存到对话历史: {event.get('workflow_id')}"
+                )
 
         # 推送执行事件到前端
         if self.on_execution_event:
@@ -417,6 +451,117 @@ class ConversationalWorkflowBuilder:
             return f"工作流执行失败: {error}"
 
         return None
+
+    def _build_execution_summary_message(
+        self, event: Dict[str, Any], is_failed: bool = False, is_cancelled: bool = False
+    ) -> Optional[Message]:
+        """
+        构建执行摘要消息，用于持久化到对话历史
+
+        该消息将在页面刷新后通过消息同步机制恢复，使 ExecutionSummaryCard 能够正确渲染。
+
+        Args:
+            event: 执行完成/失败/取消事件
+            is_failed: 是否为失败事件
+            is_cancelled: 是否为取消事件
+
+        Returns:
+            执行摘要消息，或 None（如果无法构建）
+        """
+        data = event.get("data", {})
+
+        # 获取执行 ID 和工作流信息
+        execution_id = event.get("workflow_id") or event.get("execution_id")
+        if not execution_id:
+            logger.warning("无法构建执行摘要消息：缺少 execution_id")
+            return None
+
+        # 获取工作流名称（从 operations 或事件数据中获取）
+        workflow_name = "工作流"
+        current_workflow = self.operations.get_current_workflow()
+        if current_workflow:
+            workflow_name = current_workflow.get("name", workflow_name)
+
+        # 获取工作流 ID
+        workflow_id = execution_id  # 通常 execution_id 就是 workflow_id
+
+        # 构建节点结果列表（从事件数据中提取）
+        node_results = []
+        event_node_results = data.get("node_results", {})
+        if isinstance(event_node_results, dict):
+            for node_id, node_result in event_node_results.items():
+                if isinstance(node_result, dict):
+                    node_results.append(
+                        {
+                            "nodeId": node_id,
+                            "nodeName": node_result.get("node_name", node_id),
+                            "status": node_result.get("status", "completed"),
+                            "durationMs": node_result.get("duration_ms", 0),
+                            "outputPreview": node_result.get("output_preview"),
+                            "outputSummary": node_result.get("output_summary"),
+                            "outputNarrative": node_result.get("output_narrative"),
+                            "outputHighlights": node_result.get("output_highlights"),
+                            "fullOutput": node_result.get("output"),
+                            "error": node_result.get("error"),
+                        }
+                    )
+
+        # 计算节点统计
+        nodes_completed = data.get(
+            "nodes_completed",
+            len([r for r in node_results if r.get("status") == "completed"]),
+        )
+        nodes_failed = data.get(
+            "nodes_failed",
+            len([r for r in node_results if r.get("status") == "failed"]),
+        )
+        total_nodes = data.get("total_nodes", len(node_results))
+
+        # 确定执行状态
+        if is_cancelled:
+            status = "cancelled"
+        elif is_failed:
+            status = "failed"
+        else:
+            status = "completed"
+
+        # 构建与前端 ExecutionSummary 类型兼容的数据结构
+        summary_data = {
+            "type": "execution_summary",
+            "executionId": execution_id,
+            "workflowId": workflow_id,
+            "workflowName": workflow_name,
+            "status": status,
+            "totalDurationMs": data.get("total_duration_ms", 0),
+            "nodesCompleted": nodes_completed,
+            "nodesFailed": nodes_failed,
+            "totalNodes": total_nodes,
+            "startedAt": data.get("started_at", datetime.now().isoformat()),
+            "completedAt": data.get("completed_at") or datetime.now().isoformat(),
+            "nodeResults": node_results,
+            "finalOutput": data.get("final_output"),
+            "finalNarrative": data.get("final_narrative"),
+            "finalHighlights": data.get("final_highlights"),
+        }
+
+        # 如果是失败事件，添加错误信息
+        if is_failed:
+            summary_data["error"] = data.get("error") or event.get("error", "未知错误")
+
+        # 确定消息内容
+        if is_cancelled:
+            content = "工作流已停止"
+        elif is_failed:
+            content = "工作流执行失败"
+        else:
+            content = "工作流执行完成"
+
+        return Message(
+            role="assistant",
+            content=content,
+            message_type="execution_summary",
+            data=summary_data,
+        )
 
     async def process_message(self, user_message: str) -> ConversationResponse:
         """

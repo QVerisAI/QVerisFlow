@@ -34,6 +34,7 @@ interface AppState {
   updateOrAddProgressMessage: (agentName: string, message: Message) => void;
   updateMessageById: (messageId: string, updates: Partial<Message>) => void;
   clearMessages: () => void;
+  removeMessagesByDataType: (dataType: string) => void;
 
   // 工作流状态
   workflowState: WorkflowState | null;
@@ -213,6 +214,11 @@ export const useAppStore = create<AppState>((set) => ({
   }),
 
   clearMessages: () => set({ messages: [] }),
+
+  // 按 data.type 清理消息（用于加载新工作流时清理旧的工作流卡片消息）
+  removeMessagesByDataType: (dataType) => set((state) => ({
+    messages: state.messages.filter(m => m.data?.type !== dataType)
+  })),
 
   // 工作流状态
   workflowState: null,
