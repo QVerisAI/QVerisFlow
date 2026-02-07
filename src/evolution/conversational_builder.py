@@ -1029,7 +1029,16 @@ class ConversationalWorkflowBuilder:
             ]
 
             mode_str = history_data.get("mode", "idle")
-            self.mode = SessionMode(mode_str)
+            try:
+                self.mode = SessionMode(mode_str)
+                # 服务重启后，执行状态不可恢复（执行任务已丢失），重置为 building
+                if self.mode == SessionMode.EXECUTING:
+                    self.mode = SessionMode.BUILDING
+                    logger.info(
+                        "执行状态无法恢复（服务已重启），已重置为 building 模式"
+                    )
+            except ValueError:
+                self.mode = SessionMode.IDLE
 
             logger.info(
                 f"对话历史已从文件恢复: {len(self.conversation_history)} 条消息, 模式: {self.mode.value}"
@@ -1189,7 +1198,16 @@ class ConversationalWorkflowBuilder:
             ]
 
             mode_str = history_data.get("mode", "idle")
-            self.mode = SessionMode(mode_str)
+            try:
+                self.mode = SessionMode(mode_str)
+                # 服务重启后，执行状态不可恢复（执行任务已丢失），重置为 building
+                if self.mode == SessionMode.EXECUTING:
+                    self.mode = SessionMode.BUILDING
+                    logger.info(
+                        "执行状态无法恢复（服务已重启），已重置为 building 模式"
+                    )
+            except ValueError:
+                self.mode = SessionMode.IDLE
 
             logger.info(
                 f"对话历史已从文件恢复(同步): {len(self.conversation_history)} 条消息, 模式: {self.mode.value}"
@@ -1233,6 +1251,12 @@ class ConversationalWorkflowBuilder:
             mode_str = history_data.get("mode", "idle")
             try:
                 self.mode = SessionMode(mode_str)
+                # 服务重启后，执行状态不可恢复（执行任务已丢失），重置为 building
+                if self.mode == SessionMode.EXECUTING:
+                    self.mode = SessionMode.BUILDING
+                    logger.info(
+                        "执行状态无法恢复（服务已重启），已重置为 building 模式"
+                    )
             except ValueError:
                 self.mode = SessionMode.IDLE
 

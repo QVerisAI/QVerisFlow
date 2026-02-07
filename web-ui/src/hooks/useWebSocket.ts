@@ -107,6 +107,7 @@ export function useWebSocket() {
     setCurrentWorkflowMeta,
     updateRealtimeNodeOutput,
     clearRealtimeNodeOutputs,
+    setMode,
   } = useAppStore();
 
   // 注册 Socket.IO 连接状态回调
@@ -204,6 +205,23 @@ export function useWebSocket() {
 
       // 确保连接状态同步
       setIsConnected(true);
+
+      // 根据服务端返回的模式同步前端状态
+      // 这确保服务重启后前端状态与后端一致
+      if (payload.mode) {
+        const serverMode = payload.mode as 'idle' | 'building' | 'executing' | 'completed';
+        const currentMode = useAppStore.getState().mode;
+        if (currentMode !== serverMode) {
+          console.log(`同步会话模式: ${currentMode} -> ${serverMode}`);
+          setMode(serverMode);
+          // 如果服务端不在执行状态，清理执行进度（执行任务可能已丢失）
+          if (serverMode !== 'executing') {
+            setExecutionProgress({ nodesCompleted: 0, totalNodes: 0, currentNode: null });
+            // 清理实时节点输出
+            clearRealtimeNodeOutputs();
+          }
+        }
+      }
 
       // 获取当前前端消息数量
       const currentMessages = useAppStore.getState().messages;
@@ -1373,7 +1391,7 @@ export function useWebSocket() {
       unsubAgentTemplates();
       unsubAgentReused();
     };
-  }, [addMessage, updateOrAddProgressMessage, setWorkflowState, setHighlightedNodes, setSuggestedActions, setExecutionProgress, updateNodeState, setIsLoading, setCheckpoints, setGenerationProgress, updateAgentInWorkflow]);
+  }, [addMessage, updateOrAddProgressMessage, setWorkflowState, setHighlightedNodes, setSuggestedActions, setExecutionProgress, updateNodeState, setIsLoading, setCheckpoints, setGenerationProgress, updateAgentInWorkflow, setMode, clearRealtimeNodeOutputs]);
 
   return {
     isConnected,
