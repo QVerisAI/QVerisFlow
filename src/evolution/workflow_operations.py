@@ -1962,10 +1962,19 @@ class WorkflowOperationTools:
                 # 使用统一的路径获取方法
                 executions_path = str(self._get_executions_path())
 
+                # 加载应用层工作流配置
+                try:
+                    from src.config import get_app_config_loader
+
+                    app_wf_config = get_app_config_loader().get_workflow_config()
+                except Exception:
+                    app_wf_config = {}
+
                 self._workflow_engine = WorkflowEngine(
                     agent_registry=self.meta_agent.agent_registry,
                     tool_registry=self.tool_registry,
                     workspace_base_path=executions_path,
+                    app_workflow_config=app_wf_config,
                 )
 
             # 定义事件回调，转发执行事件

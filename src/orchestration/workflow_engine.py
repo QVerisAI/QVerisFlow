@@ -219,6 +219,7 @@ class WorkflowEngine(IWorkflowEngine):
         workspace_base_path: str = "/tmp/agent_workflows",
         auto_checkpoint: bool = True,
         checkpoint_interval: int = 1,  # 每执行几个节点保存一次检查点
+        app_workflow_config: Optional[Dict[str, Any]] = None,
     ):
         """
         初始化工作流引擎
@@ -230,6 +231,7 @@ class WorkflowEngine(IWorkflowEngine):
             workspace_base_path: 工作空间基础路径
             auto_checkpoint: 是否自动保存检查点
             checkpoint_interval: 检查点保存间隔（节点数）
+            app_workflow_config: 应用层工作流配置（来自 app_config.yaml 的 workflow 部分）
         """
         self.agent_registry = agent_registry or AgentRegistry.get_default()
         self.tool_registry = tool_registry or ToolRegistry.get_default()
@@ -237,6 +239,9 @@ class WorkflowEngine(IWorkflowEngine):
         self.workspace_base_path = workspace_base_path
         self.auto_checkpoint = auto_checkpoint
         self.checkpoint_interval = checkpoint_interval
+
+        # 应用层工作流配置（从 app_config.yaml 加载）
+        self._app_workflow_config = app_workflow_config or {}
 
         # 运行中的工作流
         self._running_workflows: Dict[str, WorkflowStatus] = {}
@@ -580,6 +585,7 @@ class WorkflowEngine(IWorkflowEngine):
                 "timestamp": started_at.isoformat(),
                 "data": {
                     "total_nodes": len(workflow_definition.nodes),
+                    "workflow_name": workflow_definition.name,
                 },
             },
         )
@@ -1186,12 +1192,16 @@ class WorkflowEngine(IWorkflowEngine):
             # 如果 result 有 data 字段，优先返回结构化的用户数据
             data = result.get("data")
             if data is not None:
-                return {
+                user_output = {
                     "summary": result.get("summary"),
                     "narrative": result.get("narrative"),
                     "data": data,
                     "highlights": result.get("highlights"),
                 }
+                # 保留 data_format 字段，供前端报告渲染使用
+                if result.get("data_format"):
+                    user_output["data_format"] = result["data_format"]
+                return user_output
             # 否则返回整个 result（已经是用户数据）
             return result
 
@@ -1914,7 +1924,9 @@ class WorkflowEngine(IWorkflowEngine):
                 output = {"status": "completed", "final_output": node_input}
 
             elif node.node_type == NodeType.AGENT:
-                output = await self._execute_agent_node(node, node_input, context)
+                output = await self._execute_agent_node(
+                    node, node_input, context, workflow_definition
+                )
 
             elif node.node_type == NodeType.PARALLEL:
                 output = await self._execute_parallel_node(
@@ -2052,6 +2064,7 @@ class WorkflowEngine(IWorkflowEngine):
         node: WorkflowNode,
         node_input: Dict[str, Any],
         context: Dict[str, Any],
+        workflow_definition=None,
     ) -> Any:
         """执行 Agent 节点"""
         # 优先从节点直接字段获取，其次从 config 获取
@@ -2065,6 +2078,35 @@ class WorkflowEngine(IWorkflowEngine):
         agent_definition = self.agent_registry.get_definition(agent_ref)
         if not agent_definition:
             raise ValueError(f"Agent {agent_ref} 未在注册表中找到")
+
+        # --- Resolve data_format ---
+        # Priority: agent output_instruction.data_format
+        #         > WorkflowDefinition.default_data_format
+        #         > app_config.yaml workflow.default_data_format
+        #         > system default ("json")
+        agent_data_format = getattr(
+            agent_definition.output_instruction, "data_format", "json"
+        )
+        if agent_data_format == "json":
+            # Agent 未显式设置，尝试从工作流定义继承
+            resolved_format = "json"
+            if workflow_definition is not None:
+                wf_default = getattr(workflow_definition, "default_data_format", "json")
+                if wf_default and wf_default != "json":
+                    resolved_format = wf_default
+
+            # 工作流定义也没设置，回退到应用配置
+            if resolved_format == "json":
+                app_default = self._app_workflow_config.get(
+                    "default_data_format", "json"
+                )
+                if app_default and app_default != "json":
+                    resolved_format = app_default
+
+            # 如果解析出非 json 格式，克隆并修改 agent 定义
+            if resolved_format != "json":
+                agent_definition = agent_definition.model_copy(deep=True)
+                agent_definition.output_instruction.data_format = resolved_format
 
         # 根据 Agent 的 llm_config 动态创建 LLM 客户端
         llm_client = self._get_or_create_llm_client(agent_definition.llm_config)

@@ -128,6 +128,7 @@ models:
       - coding
       - vision
       - long_context
+      - tool_use
     cost_tier: "medium"
 
   kimi-k2.5-thinking:
@@ -145,6 +146,7 @@ models:
       - coding
       - vision
       - long_context
+      - tool_use
     cost_tier: "high"
 
   minimax-m2.1:
@@ -175,6 +177,7 @@ models:
       - reasoning
       - coding
       - long_context
+      - tool_use
     cost_tier: "high"
 
   embedding:
@@ -187,6 +190,28 @@ models:
 
 
 default_model: ${DEFAULT_MODEL:kimi-k2.5}
+
+
+# ============================================================
+# 工作流执行配置
+# 控制工作流引擎的全局行为
+# ============================================================
+workflow:
+  # Agent 输出 data 字段的默认格式
+  # - "json":     结构化 JSON 对象（适合下游程序消费）
+  # - "markdown": Markdown 文本（面向人类阅读，报告更美观）
+  # 可被 WorkflowDefinition.default_data_format 或
+  # 单个 Agent 的 output_instruction.data_format 覆盖
+  default_data_format: ${WORKFLOW_DATA_FORMAT:markdown}
+
+  # 默认节点超时时间（秒）
+  default_timeout: 600
+
+  # 最大并行节点数
+  max_parallel_nodes: 5
+
+  # 节点失败时是否继续执行后续节点
+  continue_on_error: false
 
 
 # QVeris 远程工具配置

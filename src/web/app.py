@@ -100,13 +100,18 @@ async def init_dependencies():
         )
         logger.info("✅ MetaAgent 已初始化")
 
-        # 初始化 WorkflowEngine
+        # 初始化 WorkflowEngine（传入应用层工作流配置）
+        _workflow_config = _config_loader.get_workflow_config()
         _workflow_engine = WorkflowEngine(
             llm_client=_llm_client,
             tool_registry=_tool_registry,
             workspace_base_path=Path("/tmp/agent_workflows"),
+            app_workflow_config=_workflow_config,
         )
-        logger.info("✅ WorkflowEngine 已初始化")
+        logger.info(
+            f"✅ WorkflowEngine 已初始化"
+            f"（default_data_format={_workflow_config.get('default_data_format', 'json')}）"
+        )
 
         logger.info("✅ 所有依赖初始化完成")
 

@@ -352,7 +352,7 @@ export default function ExecutionProgressCard({ progress }: ExecutionProgressCar
   };
 
   return (
-    <div className="mt-3 bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm w-[400px]">
+    <div className="mt-3 bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm w-full max-w-[400px]">
       {/* 标题栏 */}
       <div className={`px-4 py-3 flex items-center justify-between border-b ${isFailed ? 'bg-red-50 border-red-100' :
         isCompleted ? 'bg-emerald-50 border-emerald-100' :
@@ -407,14 +407,14 @@ export default function ExecutionProgressCard({ progress }: ExecutionProgressCar
             isStartNode(node) ? (
               <StartNodeItem key={node.nodeId} node={node} />
             ) : (
-          <NodeProgressItem
-            key={node.nodeId}
-            node={node}
-            onNodeClick={handleNodeClick}
+              <NodeProgressItem
+                key={node.nodeId}
+                node={node}
+                onNodeClick={handleNodeClick}
                 isCurrent={isRunning && (progress.currentNode === node.nodeId || progress.currentNode === node.nodeName)}
-          />
+              />
             )
-        ))}
+          ))}
       </div>
 
       {/* 当前执行节点提示 */}

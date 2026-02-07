@@ -23,6 +23,61 @@ logger = get_logger()
 _cpu_executor = ThreadPoolExecutor(max_workers=4)
 
 
+# ---------------------------------------------------------------------------
+# Helper: convert a JSON output_schema into Markdown section guidance
+# ---------------------------------------------------------------------------
+
+
+def schema_to_markdown_guide(schema: Dict[str, Any]) -> str:
+    """Convert a JSON Schema into Markdown section guidance for the LLM.
+
+    When ``data_format`` is ``"markdown"``, the LLM should produce a
+    Markdown string instead of a JSON object.  If the agent also has an
+    ``output_schema`` that describes the expected JSON structure, this
+    helper translates the schema *keys* into section headings so the LLM
+    knows which topics to cover.
+
+    Example input::
+
+        {"type": "object", "properties": {
+            "financial_analysis": {"description": "财务分析"},
+            "risk_analysis": {"description": "风险评估"}
+        }}
+
+    Example output::
+
+        ## Markdown data 章节指引
+        请在 data 字段中包含以下章节：
+        - ## 财务分析
+        - ## 风险评估
+
+    Args:
+        schema: JSON Schema dict (typically from ``AgentDefinition.output_schema``).
+
+    Returns:
+        A prompt snippet (may be empty if the schema has no usable properties).
+    """
+    properties = schema.get("properties", {})
+    if not properties:
+        return ""
+
+    sections: list[str] = []
+    for key, prop in properties.items():
+        # Prefer the Chinese ``description``; fall back to the key itself.
+        label = prop.get("description", key) if isinstance(prop, dict) else key
+        sections.append(f"- ## {label}")
+
+    if not sections:
+        return ""
+
+    lines = [
+        "## Markdown data 章节指引",
+        "请在 data 字段中包含以下章节（使用 Markdown 二级标题）：",
+        *sections,
+    ]
+    return "\n".join(lines)
+
+
 def _normalize_tool_calls_args(response: Any) -> Any:
     """
     规范化 AI 响应中的 tool_calls.args 字段
@@ -794,13 +849,28 @@ class AgentGraphBuilder:
         )
 
         try:
-            from ..definitions.agent_definition import OUTPUT_FORMAT_INSTRUCTION
+            from ..definitions.agent_definition import get_output_format_instruction
+
+            # 根据 agent 配置的 data_format 选择对应的输出格式指令
+            data_format = getattr(
+                self.definition.output_instruction, "data_format", "json"
+            )
+            output_format_instruction = get_output_format_instruction(data_format)
+
+            # 当 data_format 为 markdown 且定义了 output_schema 时，
+            # 将 schema 转换为 Markdown 章节指引附加到提示中
+            schema_guide = ""
+            if data_format == "markdown" and self.definition.output_schema:
+                schema_guide = "\n\n" + schema_to_markdown_guide(
+                    self.definition.output_schema
+                )
 
             # 构建消息列表（含输出格式要求：summary + narrative + data）
             system_prompt = (
                 self.definition.build_system_prompt()
                 + "\n\n"
-                + OUTPUT_FORMAT_INSTRUCTION.strip()
+                + output_format_instruction.strip()
+                + schema_guide
             )
             messages = [
                 SystemMessage(content=system_prompt),

@@ -397,6 +397,7 @@ class MetaAgent:
     }},
     "output_instruction": {{
         "format_type": "json",
+        "data_format": "json 或 markdown（见下方 data_format 选择指引）",
         "format_requirements": ["输出格式要求1", "输出格式要求2"],
         "quality_standards": ["质量标准1", "质量标准2"],
         "example_output": "可选的示例输出"
@@ -425,11 +426,17 @@ class MetaAgent:
 }}
 ```
 
+## data_format 选择指引
+- 分析、推理、评估、报告生成类 Agent → data_format: "markdown"
+  （输出面向人类阅读，data 字段为 Markdown 文本，使用中文标题、Markdown 表格和列表）
+- 数据采集、API 调用、数据转换、数据验证类 Agent → data_format: "json"
+  （输出面向下游程序消费，data 字段保持结构化 JSON 对象）
+
 注意事项：
 1. agent_id 应该简洁、有意义，使用下划线命名
 2. **重要**: display_name 必须是简洁、易懂的中文名称（如"数据收集器"、"趋势分析师"），让普通用户能理解这个 Agent 的作用
 3. background_instruction 必须包含 role_description、core_capability、task_context 三个字段
-3. output_instruction 必须包含 format_type、format_requirements 字段
+3. output_instruction 必须包含 format_type、data_format、format_requirements 字段
 4. user_instruction 必须包含 task_description 字段
 5. **重要**: tool_references 中的 tool_id 必须是上方「Framework 可用工具列表」中列出的工具
 6. **重要**: tool_type 只能是以下值之一: "builtin", "qveris", "custom", "mcp", "app", "external_api"
@@ -1259,6 +1266,7 @@ class MetaAgent:
             if "output_instruction" not in data:
                 data["output_instruction"] = {
                     "format_type": "json",
+                    "data_format": "json",
                     "format_requirements": ["输出 JSON 格式"],
                 }
 
@@ -1566,6 +1574,7 @@ class MetaAgent:
         {{"from_node": "analyzer", "to_node": "report_generator"}},
         {{"from_node": "report_generator", "to_node": "end"}}
     ],
+    "default_data_format": "markdown",
     "global_config": {{
         "max_parallel": 3,
         "default_timeout": 120
@@ -1583,7 +1592,8 @@ class MetaAgent:
 7. dependencies 数组表示该节点依赖的前置节点（控制执行顺序）
 8. **context_refs 数组表示该节点需要引用的其他节点输出（仅获取数据，不影响执行顺序）**
 9. edges 定义节点间的连接关系
-10. **报告/总结/输出类节点必须通过 context_refs 引用原始数据节点，确保最终输出包含详实的事实依据**"""
+10. **报告/总结/输出类节点必须通过 context_refs 引用原始数据节点，确保最终输出包含详实的事实依据**
+11. **default_data_format**: 面向用户展示的工作流建议设置为 "markdown"，使 Agent 输出更易读的报告内容"""
 
     def _extract_capabilities(self, agent: AgentDefinition) -> List[str]:
         """从 Agent 定义中提取能力关键词"""

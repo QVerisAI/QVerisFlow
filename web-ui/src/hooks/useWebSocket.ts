@@ -932,6 +932,11 @@ export function useWebSocket() {
             const { messageId, progress, nodeResults } = executionProgressRef.current;
             const nodeName = event.node_name || event.node_id || frontendNodeId;
 
+            // 从 output 中提取 data_format（agent 输出标准字段）
+            const outputObj = output as Record<string, unknown> | undefined;
+            const rawDataFormat = outputObj?.data_format ?? outputObj?.dataFormat;
+            const dataFormat = (rawDataFormat === 'json' || rawDataFormat === 'markdown') ? rawDataFormat : undefined;
+
             nodeResults.set(frontendNodeId, {
               nodeId: frontendNodeId,
               nodeName,
@@ -943,6 +948,7 @@ export function useWebSocket() {
               outputNarrative: outputNarrative ?? undefined,
               outputHighlights: outputHighlights ?? undefined,
               fullOutput: output,
+              dataFormat,
             });
 
             const progressPercent = Math.round((completed / totalNodes) * 100);

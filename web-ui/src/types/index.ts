@@ -458,6 +458,7 @@ export interface ExecutionNodeResult {
   outputNarrative?: string; // 自然语言叙述（面向非技术用户）
   outputHighlights?: string[]; // 关键发现列表
   fullOutput?: unknown;     // 完整输出数据
+  dataFormat?: 'json' | 'markdown';  // data 字段的格式类型（来自 agent 输出的 data_format）
   error?: string;           // 错误信息
   runningStatus?: string;   // 运行中的状态描述（如"正在调用工具 xxx"）
   thinkingContent?: string; // 累积的思考 token

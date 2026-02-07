@@ -365,7 +365,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`flex items-start gap-2 ${maxWidthClass} ${isUser ? 'flex-row-reverse' : ''}`}>
+      <div className={`flex items-start gap-3 ${maxWidthClass} ${isUser ? 'flex-row-reverse' : ''}`}>
         {/* 头像（叙事消息使用哑色） */}
         <div className={`
           flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center

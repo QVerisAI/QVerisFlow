@@ -491,20 +491,29 @@ class ConversationalWorkflowBuilder:
         if isinstance(event_node_results, dict):
             for node_id, node_result in event_node_results.items():
                 if isinstance(node_result, dict):
-                    node_results.append(
-                        {
-                            "nodeId": node_id,
-                            "nodeName": node_result.get("node_name", node_id),
-                            "status": node_result.get("status", "completed"),
-                            "durationMs": node_result.get("duration_ms", 0),
-                            "outputPreview": node_result.get("output_preview"),
-                            "outputSummary": node_result.get("output_summary"),
-                            "outputNarrative": node_result.get("output_narrative"),
-                            "outputHighlights": node_result.get("output_highlights"),
-                            "fullOutput": node_result.get("output"),
-                            "error": node_result.get("error"),
-                        }
-                    )
+                    # 从 agent 原始输出中提取 data_format
+                    raw_output = node_result.get("output")
+                    data_format = None
+                    if isinstance(raw_output, dict):
+                        inner = raw_output.get("result", raw_output)
+                        if isinstance(inner, dict):
+                            data_format = inner.get("data_format")
+
+                    node_entry = {
+                        "nodeId": node_id,
+                        "nodeName": node_result.get("node_name", node_id),
+                        "status": node_result.get("status", "completed"),
+                        "durationMs": node_result.get("duration_ms", 0),
+                        "outputPreview": node_result.get("output_preview"),
+                        "outputSummary": node_result.get("output_summary"),
+                        "outputNarrative": node_result.get("output_narrative"),
+                        "outputHighlights": node_result.get("output_highlights"),
+                        "fullOutput": raw_output,
+                        "error": node_result.get("error"),
+                    }
+                    if data_format:
+                        node_entry["dataFormat"] = data_format
+                    node_results.append(node_entry)
 
         # 计算节点统计
         nodes_completed = data.get(

@@ -16,19 +16,63 @@ from .prompt_structure import (
 )
 from .tool_definition import ToolReference
 
-# Standard output format for agent results: summary + narrative + data for readable UX
-OUTPUT_FORMAT_INSTRUCTION = """
+# ---------------------------------------------------------------------------
+# Standard output format instructions for agent results.
+# The JSON wrapper {summary, narrative, data, data_format, highlights} is
+# always required.  The *content* of the ``data`` field is controlled by
+# ``data_format``: either a structured JSON object or a Markdown string.
+# ---------------------------------------------------------------------------
+
+_OUTPUT_FORMAT_JSON = """
 ## 输出格式要求（必须遵守）
 
 你的最终输出必须是一个 JSON 对象，包含以下字段：
 - **summary**（必填）：一句话人类可读的摘要，说明你完成了什么。
 - **narrative**（必填）：2-5 句自然语言描述，面向非技术读者说明你的发现或结果。
-- **data**（必填）：你的详细结构化输出，任意合法 JSON 结构。
+- **data_format**（必填）：固定值 "json"。
+- **data**（必填）：你的详细结构化输出，任意合法 JSON 结构（对象或数组）。
 - **highlights**（可选）：关键发现或重要条目的字符串数组。
 
 示例结构：
-{"summary": "...", "narrative": "...", "data": {...}, "highlights": ["...", "..."]}
+{"summary": "...", "narrative": "...", "data_format": "json", "data": {...}, "highlights": ["...", "..."]}
 """
+
+_OUTPUT_FORMAT_MARKDOWN = """
+## 输出格式要求（必须遵守）
+
+你的最终输出必须是一个 JSON 对象，包含以下字段：
+- **summary**（必填）：一句话人类可读的摘要，说明你完成了什么。
+- **narrative**（必填）：2-5 句自然语言描述，面向非技术读者说明你的发现或结果。
+- **data_format**（必填）：固定值 "markdown"。
+- **data**（必填）：一段 **Markdown 格式的字符串**，是你的详细分析报告。要求：
+  - 使用中文标题（## / ###），不要使用英文字段名作为标题
+  - 使用 Markdown 表格展示对比、指标等结构化数据
+  - 使用加粗（**关键结论**）突出重要信息
+  - 使用列表（- / 1.）组织要点
+  - 语言面向非技术用户，清晰易读
+- **highlights**（可选）：关键发现或重要条目的字符串数组。
+
+示例结构：
+{"summary": "...", "narrative": "...", "data_format": "markdown", "data": "## 分析概览\\n\\n本次分析覆盖了...\\n\\n| 维度 | 评估 |\\n|---|---|\\n| 时间逻辑 | 合理 |\\n\\n### 关键发现\\n\\n- **发现一**：...", "highlights": ["...", "..."]}
+"""
+
+# Backward-compatible alias – existing code that imports OUTPUT_FORMAT_INSTRUCTION
+# will continue to work (defaults to JSON variant).
+OUTPUT_FORMAT_INSTRUCTION = _OUTPUT_FORMAT_JSON
+
+
+def get_output_format_instruction(data_format: str = "json") -> str:
+    """Return the appropriate output-format prompt based on *data_format*.
+
+    Args:
+        data_format: ``"json"`` or ``"markdown"``.
+
+    Returns:
+        The prompt instruction string.
+    """
+    if data_format == "markdown":
+        return _OUTPUT_FORMAT_MARKDOWN
+    return _OUTPUT_FORMAT_JSON
 
 
 class AgentExecutionType(str, Enum):

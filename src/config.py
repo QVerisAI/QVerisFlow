@@ -118,8 +118,12 @@ class WorkflowConfig(BaseModel):
     """工作流配置"""
 
     max_parallel_nodes: int = Field(default=5, description="最大并行节点数")
-    default_timeout: int = Field(default=600, description="默认工作流超时时间（秒）")
+    default_timeout: int = Field(default=300, description="默认工作流超时时间（秒）")
     continue_on_error: bool = Field(default=False, description="节点失败时是否继续")
+    default_data_format: str = Field(
+        default="json",
+        description="Agent 输出 data 字段的默认格式：json 或 markdown，可被工作流定义或单个 Agent 覆盖",
+    )
 
 
 # ========== 可观测性配置 ==========
@@ -716,6 +720,21 @@ class AppConfigLoader:
             return "api_key" in first_model or "base_url" in first_model
         return False
 
+    def get_workflow_config(self) -> Dict[str, Any]:
+        """
+        获取工作流执行配置
+
+        Returns:
+            工作流配置字典，包含:
+            - default_data_format: Agent 输出 data 字段的默认格式 (json/markdown)
+            - default_timeout: 默认节点超时时间（秒）
+            - max_parallel_nodes: 最大并行节点数
+            - continue_on_error: 节点失败时是否继续
+        """
+        if self._config is None:
+            self.load()
+        return self._config.get("workflow", {})
+
     def get_qveris_config(self) -> Dict[str, Any]:
         """
         获取 QVeris 配置部分
@@ -1168,6 +1187,24 @@ def create_llm_client(
     return loader.create_llm_client(tier=tier, client_type=client_type, **kwargs)
 
 
+def get_workflow_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    便捷函数：获取工作流配置
+
+    从 config/app_config.yaml 加载工作流配置。
+
+    Args:
+        config_path: 配置文件路径（可选）
+
+    Returns:
+        工作流配置字典
+    """
+    loader = get_app_config_loader()
+    if config_path:
+        loader.load(config_path)
+    return loader.get_workflow_config()
+
+
 def get_qveris_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     便捷函数：获取 QVeris 配置
@@ -1250,6 +1287,8 @@ __all__ = [
     "ModelRegistry",
     "get_model_registry",
     "create_llm_client_by_name",
+    # 工作流配置
+    "get_workflow_config",
     # QVeris 配置
     "get_qveris_config",
     "create_qveris_adapter",

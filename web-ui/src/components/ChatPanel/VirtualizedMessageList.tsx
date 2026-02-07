@@ -58,9 +58,13 @@ export const VirtualizedMessageList = forwardRef<
     return FIRST_INDEX_BASE - filteredMessages.length;
   }, [filteredMessages.length]);
 
-  // 渲染单条消息
+  // 渲染单条消息（添加垂直间距避免气泡重叠）
   const itemContent = useCallback((_index: number, message: Message) => {
-    return <MessageBubble message={message} />;
+    return (
+      <div className="py-1.5">
+        <MessageBubble message={message} />
+      </div>
+    );
   }, []);
 
   // 计算 key

@@ -146,6 +146,12 @@ class WorkflowDefinition(BaseModel):
         default=None, description="主出口节点 ID（可选，默认使用 exit_nodes[0]）"
     )
 
+    # === 输出格式配置 ===
+    default_data_format: str = Field(
+        default="json",
+        description="工作流内 Agent 默认的 data 字段格式：json 或 markdown，可被单个 Agent 的 output_instruction.data_format 覆盖",
+    )
+
     # === 运行时上下文配置 ===
     domain: str = Field(
         default="general",

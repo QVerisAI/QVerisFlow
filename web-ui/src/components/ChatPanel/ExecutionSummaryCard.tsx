@@ -11,10 +11,12 @@ import {
   List,
   PlayCircle,
   StopCircle,
+  FileText,
 } from 'lucide-react';
 import type { ExecutionSummary, ExecutionNodeResult } from '../../types';
 import { formatDuration, formatNodeOutput, formatStartNodeInput } from '../../utils/outputFormatter';
 import { OutputDisplay } from '../common/OutputDisplay';
+import { openReport } from '../../utils/reportGenerator';
 
 interface ExecutionSummaryCardProps {
   summary: ExecutionSummary;
@@ -206,7 +208,7 @@ export default function ExecutionSummaryCard({ summary, onReExecute }: Execution
   };
 
   return (
-    <div className="mt-3 bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm w-[400px]">
+    <div className="mt-3 bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm w-full max-w-[400px]">
       {/* 标题栏 */}
       <div className={`px-4 py-3 flex items-center justify-between border-b ${isSuccess ? 'bg-emerald-50 border-emerald-100' : isCancelled ? 'bg-amber-50 border-amber-100' : 'bg-red-50 border-red-100'}`}>
         <h3 className={`font-medium flex items-center gap-2 text-sm ${isSuccess ? 'text-emerald-700' : isCancelled ? 'text-amber-700' : 'text-red-700'}`}>
@@ -277,6 +279,14 @@ export default function ExecutionSummaryCard({ summary, onReExecute }: Execution
         >
           <List className="w-3.5 h-3.5" />
           {showNodeDetails ? '收起节点详情' : '查看节点详情'}
+        </button>
+        <button
+          type="button"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
+          onClick={() => openReport(summary)}
+        >
+          <FileText className="w-3.5 h-3.5" />
+          查看完整报告
         </button>
         <button
           type="button"
