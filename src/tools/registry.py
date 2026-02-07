@@ -347,8 +347,14 @@ class ToolRegistry(IToolRegistry):
         metrics = get_metrics_collector()
         start_time = datetime.now()
 
+        # 增强执行上下文：注入运行时信息
+        enhanced_context = context.copy() if context else {}
+        enhanced_context.setdefault("current_time", datetime.now().isoformat())
+        enhanced_context.setdefault("tool_id", tool_id)
+        enhanced_context.setdefault("tool_name", definition.name)
+
         # 获取 workspace 用于日志记录（文件系统交互总线）
-        workspace = context.get("workspace") if context else None
+        workspace = enhanced_context.get("workspace")
 
         # 参数验证
         validated_params = params

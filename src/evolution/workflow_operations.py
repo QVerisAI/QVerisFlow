@@ -2092,11 +2092,87 @@ class WorkflowOperationTools:
             return OperationResult(success=False, message="没有正在执行的工作流")
 
         if self._workflow_engine:
+            workflow_id = self._current_workflow_id
             # 设置取消标志
-            self._workflow_engine._cancel_flags[self._current_workflow_id] = True
+            self._workflow_engine._cancel_flags[workflow_id] = True
             self._is_executing = False
-            logger.info(f"工作流已停止: {self._current_workflow_id}")
-            return OperationResult(success=True, message="工作流已停止")
+
+            # 构建当前已完成节点的结果数据（用于前端持久化显示）
+            node_results_data = {}
+            current_result = self._workflow_engine._workflow_results.get(workflow_id)
+            if current_result and current_result.node_results:
+                # 尝试获取工作流定义以获取节点名称
+                # workflow_id 格式为 "{workflow_definition_id}_{uuid}"
+                base_workflow_id = (
+                    workflow_id.rsplit("_", 1)[0] if "_" in workflow_id else workflow_id
+                )
+                workflow_def = self._workflow_engine._workflow_definitions.get(
+                    base_workflow_id
+                )
+                node_name_map = {}
+                if workflow_def:
+                    node_name_map = {
+                        node.node_id: node.name for node in workflow_def.nodes
+                    }
+
+                for nid, nr in current_result.node_results.items():
+                    # 从节点输出中提取摘要信息
+                    output_summary, output_narrative, output_highlights = (
+                        self._workflow_engine._extract_narrative_fields(
+                            nr.output if isinstance(nr.output, dict) else None
+                        )
+                    )
+                    output_preview = self._workflow_engine._truncate_output(
+                        nr.output, max_length=100
+                    )
+                    if isinstance(output_preview, dict):
+                        output_preview = str(output_preview)[:100]
+                    node_results_data[nid] = {
+                        "node_name": node_name_map.get(nid, nid),
+                        "status": nr.status,
+                        "duration_ms": nr.duration_ms,
+                        "output": nr.output,
+                        "output_preview": output_preview,
+                        "output_summary": output_summary,
+                        "output_narrative": output_narrative,
+                        "output_highlights": output_highlights,
+                        "error": nr.error,
+                    }
+
+            # 立即发送取消事件，让前端及时更新状态
+            # 包含当前已完成的节点结果，用于持久化显示
+            await self._workflow_engine._emit_event(
+                workflow_id,
+                {
+                    "event_type": "workflow_cancelled",
+                    "workflow_id": workflow_id,
+                    "timestamp": datetime.now().isoformat(),
+                    "data": {
+                        "status": "cancelled",
+                        "node_results": node_results_data,
+                        "total_duration_ms": (
+                            current_result.total_duration_ms if current_result else 0
+                        ),
+                        "nodes_completed": len(
+                            [
+                                r
+                                for r in node_results_data.values()
+                                if r.get("status") == "success"
+                            ]
+                        ),
+                        "total_nodes": len(node_results_data),
+                    },
+                },
+            )
+
+            # 如果工作流被暂停，唤醒它以便能够终止
+            if workflow_id in self._workflow_engine._pause_events:
+                self._workflow_engine._pause_events[workflow_id].set()
+
+            logger.info(f"工作流已停止: {workflow_id}")
+            return OperationResult(
+                success=True, message="工作流已停止执行。当前执行已被取消。"
+            )
         return OperationResult(success=False, message="工作流引擎未初始化")
 
     async def skip_node(self, node_id: Optional[str] = None) -> OperationResult:

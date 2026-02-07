@@ -30,6 +30,7 @@ from typing import (
 
 from src.utils.logger import get_logger
 from ..definitions import AgentDefinition, WorkflowDefinition, WorkflowNode
+from ..core.context_provider import RuntimeContextProvider
 
 logger = get_logger(__name__)
 
@@ -1191,7 +1192,17 @@ class InteractiveWorkflowBuilder:
 - **新生成的规划必须是完整的、可执行的**，包含所有必要的 Agent 和正确的依赖关系
 """
 
+        # 获取运行时上下文（时间、模型能力等）
+        context_provider = RuntimeContextProvider()
+        runtime_context = context_provider.format_for_prompt(
+            include_time=True,
+            include_domain=False,  # 规划阶段不需要领域知识
+            include_model_capabilities=True,  # 规划阶段需要模型能力矩阵
+        )
+
         prompt = f"""你是一个工作流规划专家。请根据以下信息，生成一个完整的工作流规划。
+
+{runtime_context}
 
 ## 原始任务描述
 {task_description}
@@ -1225,6 +1236,10 @@ class InteractiveWorkflowBuilder:
 
 4. **纯 LLM 分析/生成**：如果 Agent 只需要 LLM 思考能力，suggested_tools 可以为空数组
 
+## 时间感知提示
+- 在规划数据收集任务时，请确保 Agent 会基于当前时间确定查询的时间范围
+- 如果任务涉及"最近"、"近期"等时间描述，需要明确转化为具体的时间范围
+
 ## 输出要求
 请输出完整的 JSON 格式规划（包含所有需要的 Agent）：
 
@@ -1253,6 +1268,11 @@ class InteractiveWorkflowBuilder:
 4. 合理设置依赖关系，支持并行执行
 5. 考虑错误处理和数据验证
 6. **suggested_tools 必须使用真实存在的工具 ID**
+7. **时间处理规则（重要）**：
+   - 上方「当前执行环境」中的时间仅供你理解任务背景
+   - **严禁**在 task 字段中写入具体日期（如 "2026-02-07"、"从2025-11-01至..."）
+   - 应使用通用描述，如 "获取最近3个月数据"、"根据执行时间确定查询范围"
+   - 具体时间会在 Agent 执行时由系统自动注入
 """
 
         response = await self.meta_agent._call_llm(prompt)

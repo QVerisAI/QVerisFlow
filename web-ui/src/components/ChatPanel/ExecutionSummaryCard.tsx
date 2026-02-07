@@ -8,7 +8,6 @@ import {
   Layers,
   AlertTriangle,
   Play,
-  Edit3,
   List,
   PlayCircle,
   StopCircle,
@@ -19,6 +18,7 @@ import { OutputDisplay } from '../common/OutputDisplay';
 
 interface ExecutionSummaryCardProps {
   summary: ExecutionSummary;
+  onReExecute?: () => void;
 }
 
 /**
@@ -184,7 +184,7 @@ function NodeResultItem({ node, onNodeClick }: {
   );
 }
 
-export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardProps) {
+export default function ExecutionSummaryCard({ summary, onReExecute }: ExecutionSummaryCardProps) {
   const [showFinalOutput, setShowFinalOutput] = useState(true);
   const [showNodeDetails, setShowNodeDetails] = useState(false);
 
@@ -281,18 +281,10 @@ export default function ExecutionSummaryCard({ summary }: ExecutionSummaryCardPr
         <button
           type="button"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-blue-600 hover:bg-blue-50 transition-colors"
-          onClick={() => window.dispatchEvent(new CustomEvent('suggested-action', { detail: { action: '试试看效果' } }))}
+          onClick={() => onReExecute?.()}
         >
           <Play className="w-3.5 h-3.5" />
           重新执行
-        </button>
-        <button
-          type="button"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
-          onClick={() => window.dispatchEvent(new CustomEvent('suggested-action', { detail: { action: '我想调整一下' } }))}
-        >
-          <Edit3 className="w-3.5 h-3.5" />
-          修改后执行
         </button>
       </div>
 

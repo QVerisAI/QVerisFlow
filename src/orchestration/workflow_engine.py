@@ -25,6 +25,7 @@ from ..registry import AgentRegistry
 from ..tools import ToolRegistry
 from ..workspace import AgentWorkspace, WorkspaceConfig
 from ..config import get_model_registry
+from ..core.context_provider import RuntimeContextProvider
 from ..exceptions import (
     WorkflowError,
     WorkflowNodeError,
@@ -352,12 +353,42 @@ class WorkflowEngine(IWorkflowEngine):
             # 验证工作流（检查循环依赖）
             self._validate_workflow(workflow_definition)
 
-            # 构建执行上下文
+            # 获取工作流的配置
+            domain = getattr(workflow_definition, "domain", "general")
+            timezone = getattr(workflow_definition, "timezone", "Asia/Shanghai")
+            runtime_context_injection = getattr(
+                workflow_definition, "runtime_context_injection", True
+            )
+
+            # 初始化基础上下文
             context = {
                 "workflow_id": workflow_id,
                 "global_context": workflow_definition.global_context or {},
                 **(initial_context or {}),
             }
+
+            # 根据配置决定是否注入运行时上下文
+            total_nodes = len(workflow_definition.nodes)
+            if runtime_context_injection:
+                # 创建运行时上下文提供器
+                context_provider = RuntimeContextProvider(
+                    domain=domain,
+                    timezone=timezone,
+                    workflow_id=workflow_id,
+                    execution_id=workflow_id,
+                )
+
+                # 获取并注入运行时上下文
+                runtime_context = context_provider.get_runtime_context_dict()
+                runtime_context["_runtime"]["total_nodes"] = total_nodes
+                runtime_context["_runtime"]["started_at"] = datetime.now().isoformat()
+                context.update(runtime_context)
+            else:
+                # 即使不注入完整运行时上下文，也提供基本的进度信息
+                context["_runtime"] = {
+                    "total_nodes": total_nodes,
+                    "started_at": datetime.now().isoformat(),
+                }
 
             # 构建 DAG 并获取拓扑排序
             execution_order = self._topological_sort(workflow_definition)
@@ -371,7 +402,7 @@ class WorkflowEngine(IWorkflowEngine):
                 workflow_definition
             )
 
-            for node_id in execution_order:
+            for node_index, node_id in enumerate(execution_order):
                 # 检查取消标志
                 if self._cancel_flags.get(workflow_id):
                     result.status = WorkflowStatus.CANCELLED
@@ -381,6 +412,16 @@ class WorkflowEngine(IWorkflowEngine):
                 node = self._get_node(workflow_definition, node_id)
                 if not node:
                     continue
+
+                # 更新运行时上下文：当前节点进度
+                if "_runtime" in context:
+                    context["_runtime"]["current_node_index"] = node_index
+                    context["_runtime"]["current_node_id"] = node_id
+                    context["_runtime"]["completed_nodes"] = nodes_executed
+                    if total_nodes > 0:
+                        context["_runtime"]["progress_percentage"] = round(
+                            nodes_executed / total_nodes * 100, 1
+                        )
 
                 # 检查依赖是否都已完成
                 dependencies_met = self._check_dependencies(node, result.node_results)
@@ -583,12 +624,57 @@ class WorkflowEngine(IWorkflowEngine):
                 if self._cancel_flags.get(workflow_id):
                     result.status = WorkflowStatus.CANCELLED
                     result.error = "工作流被取消"
+
+                    # 构建已完成节点的结果数据（用于前端持久化显示）
+                    node_name_map = {
+                        node.node_id: node.name for node in workflow_definition.nodes
+                    }
+                    cancelled_node_results = {}
+                    for nid, nr in result.node_results.items():
+                        output_summary, output_narrative, output_highlights = (
+                            self._extract_narrative_fields(
+                                nr.output if isinstance(nr.output, dict) else None
+                            )
+                        )
+                        output_preview = self._truncate_output(
+                            nr.output, max_length=100
+                        )
+                        if isinstance(output_preview, dict):
+                            output_preview = str(output_preview)[:100]
+                        cancelled_node_results[nid] = {
+                            "node_name": node_name_map.get(nid, nid),
+                            "status": nr.status,
+                            "duration_ms": nr.duration_ms,
+                            "output": nr.output,
+                            "output_preview": output_preview,
+                            "output_summary": output_summary,
+                            "output_narrative": output_narrative,
+                            "output_highlights": output_highlights,
+                            "error": nr.error,
+                        }
+
                     await self._emit_event(
                         workflow_id,
                         {
                             "event_type": "workflow_cancelled",
                             "workflow_id": workflow_id,
                             "timestamp": datetime.now().isoformat(),
+                            "data": {
+                                "status": "cancelled",
+                                "node_results": cancelled_node_results,
+                                "total_duration_ms": (
+                                    datetime.now() - started_at
+                                ).total_seconds()
+                                * 1000,
+                                "nodes_completed": len(
+                                    [
+                                        r
+                                        for r in result.node_results.values()
+                                        if r.status == "success"
+                                    ]
+                                ),
+                                "total_nodes": len(execution_order),
+                            },
                         },
                     )
                     break
@@ -786,6 +872,40 @@ class WorkflowEngine(IWorkflowEngine):
             self._running_workflows[workflow_id] = result.status
             self._workflow_results[workflow_id] = result
 
+            # 构建节点结果列表（用于前端持久化显示）
+            # 从 workflow_definition 获取节点名称映射
+            node_name_map = {
+                node.node_id: node.name for node in workflow_definition.nodes
+            }
+            node_results_for_event = {}
+            for node_id, node_result in result.node_results.items():
+                # 从节点输出中提取摘要信息
+                output_summary, output_narrative, output_highlights = (
+                    self._extract_narrative_fields(
+                        node_result.output
+                        if isinstance(node_result.output, dict)
+                        else None
+                    )
+                )
+                # 生成输出预览
+                output_preview = self._truncate_output(
+                    node_result.output, max_length=100
+                )
+                if isinstance(output_preview, dict):
+                    output_preview = str(output_preview)[:100]
+
+                node_results_for_event[node_id] = {
+                    "node_name": node_name_map.get(node_id, node_id),
+                    "status": node_result.status,
+                    "duration_ms": node_result.duration_ms,
+                    "output": node_result.output,
+                    "output_preview": output_preview,
+                    "output_summary": output_summary,
+                    "output_narrative": output_narrative,
+                    "output_highlights": output_highlights,
+                    "error": node_result.error,
+                }
+
             # 推送完成事件
             if result.status == WorkflowStatus.COMPLETED:
                 final_out = result.final_output
@@ -806,6 +926,7 @@ class WorkflowEngine(IWorkflowEngine):
                     ),
                     "total_nodes": len(result.node_results),
                     "final_output": result.final_output,
+                    "node_results": node_results_for_event,  # 添加节点结果用于持久化
                 }
                 if final_narrative is not None:
                     data_payload["final_narrative"] = final_narrative
@@ -842,6 +963,16 @@ class WorkflowEngine(IWorkflowEngine):
                                 ),
                                 None,
                             ),
+                            "node_results": node_results_for_event,  # 添加节点结果用于持久化
+                            "total_duration_ms": result.total_duration_ms,
+                            "nodes_completed": len(
+                                [
+                                    r
+                                    for r in result.node_results.values()
+                                    if r.status == "success"
+                                ]
+                            ),
+                            "total_nodes": len(result.node_results),
                         },
                     },
                 )

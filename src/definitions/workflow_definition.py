@@ -146,6 +146,20 @@ class WorkflowDefinition(BaseModel):
         default=None, description="主出口节点 ID（可选，默认使用 exit_nodes[0]）"
     )
 
+    # === 运行时上下文配置 ===
+    domain: str = Field(
+        default="general",
+        description="业务领域: financial, healthcare, scientific, legal, general",
+    )
+    runtime_context_injection: bool = Field(
+        default=True,
+        description="是否在执行时自动注入运行时上下文（时间、进度等）",
+    )
+    timezone: str = Field(
+        default="Asia/Shanghai",
+        description="工作流执行时区，用于时间上下文",
+    )
+
     # === 元数据 ===
     tags: List[str] = Field(default_factory=list)
     author: str = Field(default="system")

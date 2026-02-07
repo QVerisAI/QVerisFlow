@@ -834,6 +834,18 @@ export function useWebSocket() {
 
       // === 处理节点级别的执行事件 ===
 
+      // 校验事件是否属于当前执行，忽略来自旧执行的延迟事件
+      // 这避免了用户停止后重新执行时，旧执行的事件污染新执行的状态
+      const currentExecId = currentExecutionRef.current?.executionId;
+      const eventExecId = event.workflow_id;
+
+      if (currentExecId && eventExecId && currentExecId !== eventExecId) {
+        console.debug(
+          `[事件忽略] 节点事件属于旧执行 ${eventExecId}，当前执行是 ${currentExecId}，事件类型: ${event.event_type}`
+        );
+        return; // 忽略不属于当前执行的节点事件
+      }
+
       // 更新节点状态
       if (frontendNodeId) {
         let nodeStatus: 'pending' | 'running' | 'completed' | 'failed' = 'pending';

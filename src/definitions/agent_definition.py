@@ -146,9 +146,28 @@ class AgentDefinition(BaseModel):
                 result.append(ToolReference.model_validate(item))
         return result
 
-    def build_system_prompt(self) -> str:
-        """构建完整的系统 prompt"""
-        return self.background_instruction.to_prompt()
+    def build_system_prompt(self, include_time_awareness: bool = True) -> str:
+        """
+        构建完整的系统 prompt
+
+        Args:
+            include_time_awareness: 是否包含时间感知指令
+
+        Returns:
+            完整的系统 prompt
+        """
+        base_prompt = self.background_instruction.to_prompt()
+
+        if include_time_awareness:
+            time_awareness_instruction = """
+
+## 时间感知提示
+- 在执行数据查询、信息搜索时，请务必基于当前执行时间确定查询的时间范围
+- 如果任务涉及"最近"、"近期"、"上一季度"等相对时间描述，需要转换为具体的时间范围
+- 输出结果中涉及时间时，请确保使用准确的时间表述"""
+            return base_prompt + time_awareness_instruction
+
+        return base_prompt
 
     def build_output_prompt(self) -> str:
         """构建输出指令 prompt"""

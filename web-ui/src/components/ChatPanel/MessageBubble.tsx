@@ -9,6 +9,7 @@ import AgentSearchCard from './AgentSearchCard';
 import ExecutionProgressCard from './ExecutionProgressCard';
 import ExecutionSummaryCard from './ExecutionSummaryCard';
 import ExecutionNarrativeMessage from './ExecutionNarrativeMessage';
+import { wsService } from '../../services/websocket';
 
 interface MessageBubbleProps {
   message: Message;
@@ -423,7 +424,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           {executionProgressData && <ExecutionProgressCard progress={executionProgressData} />}
 
           {/* 执行摘要卡片 */}
-          {executionSummaryData && <ExecutionSummaryCard summary={executionSummaryData} />}
+          {executionSummaryData && (
+            <ExecutionSummaryCard
+              summary={executionSummaryData}
+              onReExecute={() => wsService.sendUserAction('execute')}
+            />
+          )}
 
           {/* 执行叙事消息（流式/活动展示） */}
           {executionNarrativeData && (

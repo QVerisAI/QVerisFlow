@@ -208,6 +208,96 @@ qveris:
   auto_register_discovered: false
 
 
+# ============================================================
+# 业务领域知识配置
+# 用于向 Agent 注入领域特定的上下文，减少幻觉
+# ============================================================
+domains:
+  financial:
+    name: "金融分析"
+    description: "股票、基金、债券等金融产品分析"
+    data_sources:
+      - "交易所官方数据"
+      - "财经资讯平台（东方财富、同花顺等）"
+      - "公司公告（巨潮资讯）"
+    timeliness:
+      price_delay: "15-30分钟"
+      announcement_delay: "T+1"
+      news_delay: "实时或准实时"
+    terminology:
+      - "PE（市盈率）"
+      - "PB（市净率）"
+      - "ROE（净资产收益率）"
+      - "EPS（每股收益）"
+      - "市值"
+      - "换手率"
+    compliance:
+      - "不提供投资建议，仅供参考"
+      - "历史数据不代表未来表现"
+      - "投资有风险，决策需谨慎"
+    data_format:
+      currency: "人民币元"
+      percentage: "%"
+      date_format: "YYYY-MM-DD"
+      
+  healthcare:
+    name: "医疗健康"
+    description: "医学研究、临床数据、药品信息分析"
+    data_sources:
+      - "临床试验数据库（ClinicalTrials.gov）"
+      - "医学文献（PubMed、知网）"
+      - "药品说明书（NMPA）"
+    timeliness:
+      clinical_trial: "更新周期不定"
+      literature: "发表后1-3个月索引"
+    terminology:
+      - "ICD-10/11 疾病编码"
+      - "ATC 药物分类"
+      - "循证医学等级"
+    compliance:
+      - "不提供诊断或治疗建议"
+      - "仅供医学专业人员参考"
+      - "严格保护患者隐私（HIPAA/个人信息保护法）"
+      
+  scientific:
+    name: "科学研究"
+    description: "学术论文、专利、实验数据分析"
+    data_sources:
+      - "学术数据库（Web of Science、Scopus）"
+      - "专利数据库（USPTO、CNIPA）"
+      - "预印本平台（arXiv、bioRxiv）"
+    terminology:
+      - "使用学术规范引用格式（APA/MLA/GB）"
+      - "影响因子 (IF)"
+      - "H指数"
+    compliance:
+      - "标注数据来源和可信度"
+      - "区分同行评审与预印本"
+      - "注意引用格式规范"
+      
+  legal:
+    name: "法律法规"
+    description: "法律条文、判例、合规分析"
+    data_sources:
+      - "法律法规数据库（北大法宝、中国裁判文书网）"
+      - "监管公告"
+      - "司法解释"
+    timeliness:
+      legislation: "以官方公布为准"
+      case_law: "裁判文书上网有滞后"
+    compliance:
+      - "不构成法律意见"
+      - "以官方发布为准"
+      - "具体问题请咨询专业律师"
+      
+  general:
+    name: "通用"
+    description: "无特定领域约束"
+    data_sources: []
+    compliance:
+      - "信息仅供参考"
+
+
 # 调试配置
 debug:
   enabled: false

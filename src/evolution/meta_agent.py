@@ -33,6 +33,7 @@ from ..definitions import (
 from ..registry import AgentRegistry
 from ..config import get_model_registry
 from ..tools import ToolRegistry
+from ..core.context_provider import RuntimeContextProvider
 from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -299,6 +300,7 @@ class MetaAgent:
         reference_examples: List[str],
         tools: List[str] = None,
         constraints: Dict[str, Any] = None,
+        domain: str = "general",
     ) -> str:
         """构建 Agent 创建提示"""
         examples_text = (
@@ -326,7 +328,17 @@ class MetaAgent:
         # 分析任务复杂度并推荐模型
         suggested_model = self._suggest_model_for_task(task_description, tools)
 
+        # 获取运行时上下文（时间、领域知识等）
+        context_provider = RuntimeContextProvider(domain=domain)
+        runtime_context = context_provider.format_for_prompt(
+            include_time=True,
+            include_domain=True,
+            include_model_capabilities=False,  # 模型信息已在下方提供
+        )
+
         return f"""你是一个专业的 Agent 设计专家。请根据以下任务描述，设计一个高效的 Agent。
+
+{runtime_context}
 
 ## 任务描述
 {task_description}
@@ -381,7 +393,7 @@ class MetaAgent:
     "background_instruction": {{
         "role_description": "角色描述，如：你是一位资深分析师...",
         "core_capability": "核心能力描述，如：你的核心能力是...",
-        "task_context": "任务上下文，如：在本任务中，你需要..."
+        "task_context": "任务上下文（不要包含具体日期），如：在本任务中，你需要根据执行时的当前时间，获取最近N个月的数据..."
     }},
     "output_instruction": {{
         "format_type": "json",
@@ -438,7 +450,17 @@ class MetaAgent:
     - "risk_assessment": 风险评估
     - "signal_detection": 信号检测
     - "report_generation": 报告生成
-    - "general": 通用（其他任务）"""
+    - "general": 通用（其他任务）
+12. **时间处理规则（极其重要）**: 
+    - 上方「当前执行环境」中的时间信息**仅供你理解任务背景**，帮助你设计合理的 Agent
+    - **严禁**在生成的 Agent 定义中写入任何具体的日期时间值（如 "2026-02-07"、"从2025-11-01至2026-02-07"）
+    - task_context 和 task_description 中必须使用**通用的时间描述**，例如：
+      - ✅ 正确: "根据执行时的当前时间，获取最近3个月的历史数据"
+      - ✅ 正确: "基于当前时间确定查询的时间范围"
+      - ❌ 错误: "当前时间为2026-02-07，获取从2025-11-01至2026-02-07的数据"
+      - ❌ 错误: "获取2025年Q4的数据"
+    - 具体的当前时间会在 Agent **执行时**由系统自动注入，无需在定义中写死
+    - Agent 定义是持久化的，如果写入具体时间，未来执行时会使用错误的旧时间"""
 
     def _build_optimization_prompt(
         self,

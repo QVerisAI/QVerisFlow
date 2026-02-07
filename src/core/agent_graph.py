@@ -15,6 +15,7 @@ from src.utils.json_utils import extract_structured_output
 from .agent_state import AgentState
 from .context_manager import ContextManager, TiktokenCounter, SimpleTokenCounter
 from .reference_resolver import ReferenceResolver
+from .context_provider import RuntimeContextProvider, get_current_time_context
 
 logger = get_logger()
 
@@ -1005,7 +1006,14 @@ class AgentGraphBuilder:
         self, task: str, input_data: Optional[Dict[str, Any]], previous_feedback: str
     ) -> str:
         """构建上下文收集 prompt，支持 @工具名 和 #上下文名 引用解析"""
-        prompt_parts = [f"## 任务\n{task}", f"\n## 输入数据\n{input_data}"]
+        # 获取运行时时间上下文
+        time_context = get_current_time_context()
+
+        prompt_parts = [
+            time_context,
+            f"\n## 任务\n{task}",
+            f"\n## 输入数据\n{input_data}",
+        ]
 
         if previous_feedback:
             prompt_parts.append(
@@ -1013,8 +1021,10 @@ class AgentGraphBuilder:
             )
 
         prompt_parts.append(
-            "\n请收集完成任务所需的上下文信息。"
-            "如果需要搜索或查询数据，请使用可用的工具。"
+            "\n## 执行指南\n"
+            "请收集完成任务所需的上下文信息。\n"
+            "如果需要搜索或查询数据，请使用可用的工具。\n"
+            "**重要**: 在查询数据时，请基于上述「当前执行环境」中的时间信息确定查询的时间范围。"
         )
 
         raw_prompt = "\n".join(prompt_parts)
@@ -1031,7 +1041,12 @@ class AgentGraphBuilder:
 
     def _build_action_prompt(self, context: str, previous_draft: str) -> str:
         """构建执行动作 prompt，支持 @工具名 和 #上下文名 引用解析"""
+        # 获取运行时时间上下文
+        time_context = get_current_time_context()
+
         prompt_parts = [
+            time_context,
+            "",
             "## 重要提示",
             "这是**生成阶段**，你已经收集了足够的上下文信息。",
             "请直接根据下方的上下文信息生成最终输出，不要再调用工具收集更多信息。",
@@ -1050,9 +1065,10 @@ class AgentGraphBuilder:
 
         prompt_parts.append(
             "\n## 执行要求\n"
-            "请直接在回复中输出符合上述格式要求的结果内容。"
-            "如果输出格式要求是 JSON，请直接返回 JSON 格式的内容。"
-            "不要调用工具来读取更多文件，上下文信息已经足够。"
+            "请直接在回复中输出符合上述格式要求的结果内容。\n"
+            "如果输出格式要求是 JSON，请直接返回 JSON 格式的内容。\n"
+            "不要调用工具来读取更多文件，上下文信息已经足够。\n"
+            "**注意**: 在输出中涉及时间、日期时，请确保与当前执行环境的时间一致。"
         )
 
         raw_prompt = "\n".join(prompt_parts)

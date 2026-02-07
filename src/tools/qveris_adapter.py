@@ -20,6 +20,7 @@ from ..definitions.tool_definition import (
     ToolCategory,
     ToolReferenceType,
 )
+from ..core.context_provider import extract_schema_constraints
 from .registry import ToolRegistry, tool
 from .qveris_client import (
     QVerisClient,
@@ -37,6 +38,62 @@ try:
 except ImportError:
     get_tracer = None
     get_metrics_collector = None
+
+
+def format_tool_info_enhanced(
+    tool_info: QVerisToolInfo,
+    cache_ttl: int = 3600,
+) -> Dict[str, Any]:
+    """
+    格式化工具信息，包含增强的质量指标和数据时效性信息
+
+    Args:
+        tool_info: QVeris 工具信息对象
+        cache_ttl: 数据缓存 TTL（秒）
+
+    Returns:
+        增强的工具信息字典
+    """
+    base_info = tool_info.to_dict()
+
+    # 添加格式化的质量指标描述
+    quality_metrics_text = []
+    if tool_info.weighted_success_rate is not None:
+        success_rate_pct = tool_info.weighted_success_rate * 100
+        if success_rate_pct >= 95:
+            reliability = "高可靠"
+        elif success_rate_pct >= 80:
+            reliability = "较可靠"
+        else:
+            reliability = "可靠性一般"
+        quality_metrics_text.append(f"成功率: {success_rate_pct:.1f}% ({reliability})")
+
+    if tool_info.avg_execution_time is not None:
+        if tool_info.avg_execution_time < 2:
+            speed = "响应快"
+        elif tool_info.avg_execution_time < 10:
+            speed = "响应适中"
+        else:
+            speed = "响应较慢"
+        quality_metrics_text.append(
+            f"平均耗时: {tool_info.avg_execution_time:.1f}秒 ({speed})"
+        )
+
+    base_info["quality_summary"] = (
+        ", ".join(quality_metrics_text) if quality_metrics_text else "无历史数据"
+    )
+
+    # 添加数据时效性提示
+    cache_minutes = cache_ttl // 60
+    base_info["data_freshness_warning"] = f"数据可能有 {cache_minutes} 分钟延迟"
+
+    # 添加参数约束的人类可读描述
+    if tool_info.input_schema:
+        base_info["parameter_constraints"] = extract_schema_constraints(
+            tool_info.input_schema
+        )
+
+    return base_info
 
 
 class QVerisToolAdapter:
@@ -246,28 +303,34 @@ You could reference the examples given if any for each tool. You could call make
             # 记录指标
             duration_ms = (datetime.now() - start_time).total_seconds() * 1000
             if metrics:
-                metrics.counter("qveris.search.total").inc(
-                    labels={"status": "success"}
-                )
+                metrics.counter("qveris.search.total").inc(labels={"status": "success"})
                 metrics.histogram("qveris.search.duration_ms").observe(duration_ms)
                 metrics.gauge("qveris.search.tools_found").set(result.total_count)
 
             logger.info(f"QVeris 搜索完成: '{query}' -> {result.total_count} 个工具")
 
-            return result.to_dict()
+            # 返回增强的工具信息（包含质量指标和数据时效性）
+            enhanced_result = {
+                "search_id": result.search_id,
+                "query": result.query,
+                "tools": [
+                    format_tool_info_enhanced(t, cache_ttl=self.client.cache_ttl)
+                    for t in result.tools
+                ],
+                "total_count": result.total_count,
+                "timestamp": result.timestamp.isoformat(),
+                "search_time_ms": duration_ms,
+            }
+            return enhanced_result
 
         except QVerisAPIError as e:
             if metrics:
-                metrics.counter("qveris.search.total").inc(
-                    labels={"status": "error"}
-                )
+                metrics.counter("qveris.search.total").inc(labels={"status": "error"})
             logger.error(f"QVeris 搜索失败: {e}")
             raise
         except Exception as e:
             if metrics:
-                metrics.counter("qveris.search.total").inc(
-                    labels={"status": "error"}
-                )
+                metrics.counter("qveris.search.total").inc(labels={"status": "error"})
             logger.error(f"QVeris 搜索异常: {e}")
             raise
 
