@@ -323,6 +323,116 @@ domains:
       - "信息仅供参考"
 
 
+# ============================================================
+# 持久化存储配置
+# 支持 裸机部署 和 Docker 部署 两种模式
+# ============================================================
+storage:
+  # 部署模式: bare-metal | docker
+  # - bare-metal: 连接 localhost 上的服务（手动安装或 docker compose 启动基础设施）
+  # - docker: 连接 Docker 网络中的服务名（应用本身也在 Docker 中运行）
+  deploy_mode: ${DEPLOY_MODE:bare-metal}
+
+  # ----------------------------------------------------------
+  # 本地文件存储
+  # 用于工作空间、临时文件、本地缓存等
+  # ----------------------------------------------------------
+  local:
+    # 数据根目录（所有本地持久化数据的顶层目录）
+    data_dir: ${LOCAL_DATA_DIR:./data}
+    # 工作空间目录（会话文件、草稿等）
+    workspace_dir: ${WORKSPACE_DIR:./data/workspaces}
+    # 文件存储目录（上传的文件、生成的报告等）
+    storage_dir: ${STORAGE_DIR:./data/storage}
+    # 日志目录
+    log_dir: ${LOG_DIR:./data/logs}
+    # 临时文件目录
+    temp_dir: ${TEMP_DIR:./data/temp}
+
+  # ----------------------------------------------------------
+  # PostgreSQL 数据库
+  # ----------------------------------------------------------
+  postgres:
+    enabled: ${ENABLE_POSTGRES:true}
+    # bare-metal 模式下连接 localhost，Docker 模式下连接服务名 postgres
+    host: ${POSTGRES_HOST:localhost}
+    port: ${POSTGRES_PORT:5432}
+    database: ${POSTGRES_DB:agent_framework}
+    user: ${POSTGRES_USER:postgres}
+    password: ${POSTGRES_PASSWORD:postgres}
+    # 连接池配置
+    pool_size: ${POSTGRES_POOL_SIZE:10}
+    max_overflow: ${POSTGRES_MAX_OVERFLOW:20}
+    pool_pre_ping: true
+    # 完整 URL（可选，设置后覆盖上述单项配置）
+    # url: ${DATABASE_URL:}
+
+  # ----------------------------------------------------------
+  # Redis 缓存 / 消息队列
+  # ----------------------------------------------------------
+  redis:
+    enabled: ${ENABLE_REDIS:true}
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    db: ${REDIS_DB:0}
+    max_connections: ${REDIS_MAX_CONNECTIONS:20}
+    ssl: false
+    # 键前缀（多项目隔离）
+    key_prefix: ${REDIS_KEY_PREFIX:qveris:}
+
+  # ----------------------------------------------------------
+  # MinIO / OSS 对象存储
+  # ----------------------------------------------------------
+  oss:
+    enabled: ${ENABLE_OSS:false}
+    # 提供商: minio | aliyun
+    provider: ${OSS_PROVIDER:minio}
+    # MinIO 配置
+    endpoint: ${MINIO_ENDPOINT:localhost:9000}
+    access_key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret_key: ${MINIO_SECRET_KEY:minioadmin}
+    bucket: ${MINIO_BUCKET:agent-framework}
+    secure: ${MINIO_SECURE:false}
+    # MinIO 控制台端口（仅 Docker 部署时使用）
+    console_port: ${MINIO_CONSOLE_PORT:9001}
+    # 阿里云 OSS（provider=aliyun 时生效）
+    aliyun:
+      endpoint: ${ALIYUN_OSS_ENDPOINT:}
+      access_key_id: ${ALIYUN_OSS_ACCESS_KEY_ID:}
+      access_key_secret: ${ALIYUN_OSS_ACCESS_KEY_SECRET:}
+      bucket: ${ALIYUN_OSS_BUCKET:}
+
+  # ----------------------------------------------------------
+  # 检查点存储（LangGraph Checkpoint）
+  # ----------------------------------------------------------
+  checkpoint:
+    # 类型: memory | redis | postgresql | file
+    type: ${CHECKPOINT_TYPE:redis}
+    # Redis 检查点配置
+    redis_prefix: ${CHECKPOINT_REDIS_PREFIX:langgraph:checkpoint:}
+    redis_ttl: ${CHECKPOINT_REDIS_TTL:86400}
+    # PostgreSQL 检查点表名
+    postgres_table: langgraph_checkpoints
+    # 文件检查点目录
+    file_path: ${CHECKPOINT_FILE_PATH:./data/checkpoints}
+
+  # ----------------------------------------------------------
+  # 追踪 / 审计存储
+  # ----------------------------------------------------------
+  trace:
+    # 类型: file | database | oss
+    type: ${TRACE_STORAGE_TYPE:database}
+    # 文件追踪目录
+    file_path: ${TRACE_FILE_PATH:./data/traces}
+    # 数据库表前缀
+    postgres_table_prefix: trace_
+    # OSS 对象前缀
+    oss_prefix: traces/
+    # 数据保留天数
+    retention_days: ${TRACE_RETENTION_DAYS:30}
+
+
 # 调试配置
 debug:
   enabled: false

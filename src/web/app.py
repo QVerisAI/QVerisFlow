@@ -42,6 +42,7 @@ _tool_registry: Optional[Any] = None
 _llm_client: Optional[Any] = None
 _workflow_engine: Optional[Any] = None
 _config_loader: Optional[Any] = None
+_storage_service: Optional[Any] = None
 
 
 def get_meta_agent():
@@ -60,9 +61,13 @@ def get_workflow_engine():
     return _workflow_engine
 
 
+def get_storage_service():
+    return _storage_service
+
+
 async def init_dependencies():
     """初始化依赖"""
-    global _meta_agent, _tool_registry, _llm_client, _workflow_engine, _config_loader
+    global _meta_agent, _tool_registry, _llm_client, _workflow_engine, _config_loader, _storage_service
 
     logger.info("正在初始化依赖...")
 
@@ -72,9 +77,17 @@ async def init_dependencies():
         from src.tools.builtin import register_builtin_tools
         from src.evolution.meta_agent import MetaAgent
         from src.orchestration.workflow_engine import WorkflowEngine
+        from src.storage.service import StorageService
 
         # 加载配置
         _config_loader = AppConfigLoader()
+        _config_loader.load()
+
+        # ---- 初始化存储服务 ----
+        storage_config = _config_loader.get_storage_config()
+        _storage_service = StorageService.get_instance()
+        await _storage_service.initialize(storage_config)
+        logger.info(f"✅ 存储服务已初始化 ({_storage_service})")
 
         # 初始化工具注册表
         _tool_registry = ToolRegistry()
@@ -101,11 +114,13 @@ async def init_dependencies():
         logger.info("✅ MetaAgent 已初始化")
 
         # 初始化 WorkflowEngine（传入应用层工作流配置）
+        # 使用存储配置中的工作空间路径
         _workflow_config = _config_loader.get_workflow_config()
+        workspace_path = Path(storage_config.local.workspace_dir)
         _workflow_engine = WorkflowEngine(
             llm_client=_llm_client,
             tool_registry=_tool_registry,
-            workspace_base_path=Path("/tmp/agent_workflows"),
+            workspace_base_path=workspace_path,
             app_workflow_config=_workflow_config,
         )
         logger.info(
@@ -128,6 +143,9 @@ async def lifespan(app: FastAPI):
     yield
     # 关闭时清理
     logger.info("应用正在关闭...")
+    # 优雅关闭存储服务
+    if _storage_service and _storage_service.is_initialized:
+        await _storage_service.shutdown()
 
 
 def create_app():
@@ -187,7 +205,11 @@ def create_app():
         is_reconnect = builder is not None
 
         if not builder:
-            storage_path = Path("./workspaces") / session_id
+            # 使用存储配置中的工作空间路径
+            base_ws = Path("./data/workspaces")
+            if _storage_service and _storage_service.config:
+                base_ws = Path(_storage_service.config.local.workspace_dir)
+            storage_path = base_ws / session_id
             builder = ConversationalWorkflowBuilder(
                 meta_agent=_meta_agent,
                 tool_registry=_tool_registry,
@@ -390,7 +412,10 @@ def create_app():
 
             if not builder:
                 # 创建新的构建器
-                storage_path = Path("./workspaces") / session_id
+                base_ws = Path("./data/workspaces")
+                if _storage_service and _storage_service.config:
+                    base_ws = Path(_storage_service.config.local.workspace_dir)
+                storage_path = base_ws / session_id
                 builder = ConversationalWorkflowBuilder(
                     meta_agent=_meta_agent,
                     tool_registry=_tool_registry,
@@ -442,7 +467,7 @@ def create_app():
     @app.get("/health")
     async def health_check():
         """健康检查"""
-        return {
+        result = {
             "status": "healthy",
             "meta_agent": _meta_agent is not None,
             "tool_registry": _tool_registry is not None,
@@ -450,6 +475,14 @@ def create_app():
             "workflow_engine": _workflow_engine is not None,
             "socketio": sio is not None,
         }
+        # 附加存储健康状态
+        if _storage_service and _storage_service.is_initialized:
+            try:
+                storage_health = await _storage_service.health_check()
+                result["storage"] = storage_health
+            except Exception as e:
+                result["storage"] = {"error": str(e)}
+        return result
 
     # 静态文件（前端）
     frontend_path = Path(__file__).parent.parent.parent / "web-ui" / "dist"

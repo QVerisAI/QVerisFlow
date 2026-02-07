@@ -720,6 +720,38 @@ class AppConfigLoader:
             return "api_key" in first_model or "base_url" in first_model
         return False
 
+    def get_storage_config(self):
+        """
+        获取存储配置（StorageConfig 实例）
+
+        优先从 app_config.yaml 的 storage 部分加载，
+        回退到环境变量。
+
+        Returns:
+            StorageConfig 实例
+        """
+        from src.storage.config import StorageConfig
+
+        if self._config is None:
+            self.load()
+
+        storage_dict = self._config.get("storage", {})
+        if storage_dict:
+            return StorageConfig.from_app_config(storage_dict)
+        else:
+            return StorageConfig.from_env()
+
+    def get_storage_config_dict(self) -> Dict[str, Any]:
+        """
+        获取存储配置部分（原始字典）
+
+        Returns:
+            存储配置字典
+        """
+        if self._config is None:
+            self.load()
+        return self._config.get("storage", {})
+
     def get_workflow_config(self) -> Dict[str, Any]:
         """
         获取工作流执行配置
@@ -1187,6 +1219,24 @@ def create_llm_client(
     return loader.create_llm_client(tier=tier, client_type=client_type, **kwargs)
 
 
+def get_storage_config(config_path: Optional[str] = None):
+    """
+    便捷函数：获取存储配置
+
+    从 config/app_config.yaml 加载存储配置。
+
+    Args:
+        config_path: 配置文件路径（可选）
+
+    Returns:
+        StorageConfig 实例
+    """
+    loader = get_app_config_loader()
+    if config_path:
+        loader.load(config_path)
+    return loader.get_storage_config()
+
+
 def get_workflow_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """
     便捷函数：获取工作流配置
@@ -1287,6 +1337,8 @@ __all__ = [
     "ModelRegistry",
     "get_model_registry",
     "create_llm_client_by_name",
+    # 存储配置
+    "get_storage_config",
     # 工作流配置
     "get_workflow_config",
     # QVeris 配置
