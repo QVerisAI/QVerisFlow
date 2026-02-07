@@ -647,11 +647,13 @@ class WorkflowEngine(IWorkflowEngine):
                         )
                         if isinstance(output_preview, dict):
                             output_preview = str(output_preview)[:100]
+                        # 使用用户可见输出（与 node_completed 事件保持一致）
+                        user_facing_output = self._extract_user_facing_output(nr.output)
                         cancelled_node_results[nid] = {
                             "node_name": node_name_map.get(nid, nid),
                             "status": nr.status,
                             "duration_ms": nr.duration_ms,
-                            "output": nr.output,
+                            "output": user_facing_output,
                             "output_preview": output_preview,
                             "output_summary": output_summary,
                             "output_narrative": output_narrative,
@@ -900,11 +902,16 @@ class WorkflowEngine(IWorkflowEngine):
                 if isinstance(output_preview, dict):
                     output_preview = str(output_preview)[:100]
 
+                # 使用用户可见输出（与 node_completed 事件保持一致）
+                user_facing_output = self._extract_user_facing_output(
+                    node_result.output
+                )
+
                 node_results_for_event[node_id] = {
                     "node_name": node_name_map.get(node_id, node_id),
                     "status": node_result.status,
                     "duration_ms": node_result.duration_ms,
-                    "output": node_result.output,
+                    "output": user_facing_output,
                     "output_preview": output_preview,
                     "output_summary": output_summary,
                     "output_narrative": output_narrative,

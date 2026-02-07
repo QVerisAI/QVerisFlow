@@ -491,24 +491,50 @@ class ConversationalWorkflowBuilder:
         if isinstance(event_node_results, dict):
             for node_id, node_result in event_node_results.items():
                 if isinstance(node_result, dict):
-                    # 从 agent 原始输出中提取 data_format
                     raw_output = node_result.get("output")
+
+                    # --- 清洗 fullOutput：从原始 agent 输出中提取用户可见部分 ---
+                    # 原始结构: {agent_id, task_id, success, result: {summary, narrative, data, highlights, data_format}, ...}
+                    # 清洗后:   {summary, narrative, data, highlights, data_format}
+                    user_output = raw_output
                     data_format = None
                     if isinstance(raw_output, dict):
-                        inner = raw_output.get("result", raw_output)
-                        if isinstance(inner, dict):
-                            data_format = inner.get("data_format")
+                        inner = raw_output.get("result")
+                        if isinstance(inner, dict) and (
+                            "data" in inner or "summary" in inner
+                        ):
+                            user_output = {
+                                "summary": inner.get("summary"),
+                                "narrative": inner.get("narrative"),
+                                "data": inner.get("data"),
+                                "highlights": inner.get("highlights"),
+                            }
+                            if inner.get("data_format"):
+                                user_output["data_format"] = inner["data_format"]
+                                data_format = inner["data_format"]
+                        else:
+                            # 没有 result 嵌套，直接从顶层取
+                            data_format = raw_output.get("data_format")
+
+                    # --- 规范化 status：后端 "success" -> 前端 "completed" ---
+                    raw_status = node_result.get("status", "completed")
+                    status = "completed" if raw_status == "success" else raw_status
+
+                    # --- outputPreview 强制字符串化 ---
+                    preview = node_result.get("output_preview")
+                    if preview is not None and not isinstance(preview, str):
+                        preview = str(preview)[:200]
 
                     node_entry = {
                         "nodeId": node_id,
                         "nodeName": node_result.get("node_name", node_id),
-                        "status": node_result.get("status", "completed"),
+                        "status": status,
                         "durationMs": node_result.get("duration_ms", 0),
-                        "outputPreview": node_result.get("output_preview"),
+                        "outputPreview": preview,
                         "outputSummary": node_result.get("output_summary"),
                         "outputNarrative": node_result.get("output_narrative"),
                         "outputHighlights": node_result.get("output_highlights"),
-                        "fullOutput": raw_output,
+                        "fullOutput": user_output,
                         "error": node_result.get("error"),
                     }
                     if data_format:

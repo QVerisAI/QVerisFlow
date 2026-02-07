@@ -492,12 +492,16 @@ def extract_structured_output(content: str) -> Dict[str, Any]:
                 if not summary:
                     summary = "执行完成"
 
-        return {
+        result = {
             "summary": summary,
             "narrative": parsed.get("narrative"),
             "data": parsed.get("data"),
             "highlights": parsed.get("highlights"),
         }
+        # 保留 data_format 字段（供前端报告渲染判断 markdown/json）
+        if "data_format" in parsed:
+            result["data_format"] = parsed["data_format"]
+        return result
 
     # Step 7: 兼容旧输出格式（没有 summary/data 字段）
     # 尝试从常见字段生成 summary
@@ -522,9 +526,12 @@ def extract_structured_output(content: str) -> Dict[str, Any]:
     if not summary:
         summary = "执行完成"
 
-    return {
+    result = {
         "summary": summary,
         "narrative": parsed.get("narrative"),
         "data": parsed,
         "highlights": parsed.get("highlights"),
     }
+    if isinstance(parsed, dict) and "data_format" in parsed:
+        result["data_format"] = parsed["data_format"]
+    return result

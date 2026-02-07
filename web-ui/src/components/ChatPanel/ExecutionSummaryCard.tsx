@@ -131,6 +131,7 @@ function NodeResultItem({ node, onNodeClick }: {
   const getStatusIcon = () => {
     switch (node.status) {
       case 'completed':
+      case 'success':  // 兼容后端 NodeExecutionResult 的 "success" 状态值
         return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
       case 'failed':
         return <XCircle className="w-4 h-4 text-red-500" />;

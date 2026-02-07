@@ -450,7 +450,7 @@ export interface NodeActivity {
 export interface ExecutionNodeResult {
   nodeId: string;
   nodeName: string;
-  status: 'completed' | 'failed' | 'running' | 'pending';
+  status: 'completed' | 'success' | 'failed' | 'running' | 'pending';
   durationMs?: number;
   outputPreview?: string;   // 简短输出预览（一行）
   outputSummary?: string;   // 一句话摘要

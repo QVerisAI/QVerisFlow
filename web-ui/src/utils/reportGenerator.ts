@@ -225,8 +225,18 @@ function markdownToHtml(md: string): string {
 function detectDataFormat(output: unknown): 'json' | 'markdown' {
   if (output && typeof output === 'object') {
     const obj = output as Record<string, unknown>;
+    // 顶层检查
     if (obj.data_format === 'markdown' || obj.dataFormat === 'markdown') return 'markdown';
     if (obj.data_format === 'json' || obj.dataFormat === 'json') return 'json';
+    // 处理嵌套 result 结构（历史数据可能包含原始 agent 输出 {result: {summary, data, data_format, ...}}）
+    const inner = (typeof obj.result === 'object' && obj.result !== null)
+      ? obj.result as Record<string, unknown>
+      : null;
+    if (inner) {
+      if (inner.data_format === 'markdown' || inner.dataFormat === 'markdown') return 'markdown';
+      if (inner.data_format === 'json' || inner.dataFormat === 'json') return 'json';
+      if (typeof inner.data === 'string') return 'markdown';
+    }
     // 自动检测：如果 data 是字符串，视为 markdown
     if (typeof obj.data === 'string') return 'markdown';
   }
@@ -324,7 +334,14 @@ function renderOutputData(output: unknown, formatHint?: 'json' | 'markdown'): st
   if (output === null || output === undefined) return '';
   if (typeof output !== 'object') return renderStructuredData(output);
 
-  const obj = output as Record<string, unknown>;
+  let obj = output as Record<string, unknown>;
+  // 处理嵌套 result 结构：原始 agent 输出 {agent_id, result: {summary, data, ...}, ...}
+  if (typeof obj.result === 'object' && obj.result !== null) {
+    const inner = obj.result as Record<string, unknown>;
+    if ('data' in inner || 'summary' in inner) {
+      obj = inner;
+    }
+  }
   const dataFormat = formatHint || detectDataFormat(obj);
   const filtered = filterTechnicalFields(obj);
 
@@ -934,6 +951,30 @@ function getReportStyles(): string {
       .status-bar { background: #f8fafc !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       .status-dot { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       .step-data { background: #f8fafc !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+      /* 防止表格行、列表项在分页处被截断 */
+      tr { break-inside: avoid; page-break-inside: avoid; }
+      li { break-inside: avoid; page-break-inside: avoid; }
+      .kv-table tr { break-inside: avoid; page-break-inside: avoid; }
+      .data-table tr { break-inside: avoid; page-break-inside: avoid; }
+      .bullet-list li { break-inside: avoid; page-break-inside: avoid; }
+      .findings li { break-inside: avoid; page-break-inside: avoid; }
+      .step-highlights li { break-inside: avoid; page-break-inside: avoid; }
+      .numbered-item { break-inside: avoid; page-break-inside: avoid; }
+      .section-block { break-inside: avoid; page-break-inside: avoid; }
+      .kv-inline { break-inside: avoid; page-break-inside: avoid; }
+
+      /* 控制孤行和寡行（确保段落至少有 3 行在页面开头或结尾） */
+      p { orphans: 3; widows: 3; }
+      .step-narrative { orphans: 3; widows: 3; }
+      .summary-text { orphans: 3; widows: 3; }
+      .conclusion-text { orphans: 3; widows: 3; }
+
+      /* 表格尽量不分页（小表格），大表格允许行级分页但行本身不断开 */
+      .kv-table { break-inside: avoid-page; }
+      table { break-inside: auto; }
+      thead { display: table-header-group; }  /* 表头在每页重复显示 */
+      tfoot { display: table-footer-group; }
     }
   `;
 }
@@ -1291,14 +1332,14 @@ function getExportScript(reportTitle: string): string {
       }
 
       /**
-       * 分片渲染导出 PDF
+       * 分片渲染导出 PDF（智能分页版本）
        *
        * 核心思路：将报告按 A4 页高度逐页截图（html2canvas），每页 Canvas
        * 仅约 1000px 高，绝不会超出浏览器 Canvas 尺寸限制（~65 535px）。
        * 然后用 jsPDF 将每张截图依次放入 PDF 页面。
        *
-       * 这解决了 html2pdf.js 将整个报告渲染为一张巨型 Canvas 导致
-       * 数十页 PDF 全部空白的经典问题。
+       * 智能分页：在分页点附近寻找合适的断点（表格行之间、段落之间），
+       * 避免在文字行中间截断。
        */
       async function exportPdf() {
         /* ── 1. 依赖检测 ── */
@@ -1363,18 +1404,92 @@ function getExportScript(reportTitle: string): string {
           var CH = PH - 2 * MG;                   /* 内容高度 267mm */
           var pxPerMm  = totalW / CW;              /* 像素 → 毫米 */
           var pageHPx  = Math.floor(CH * pxPerMm); /* 每页高度（像素） */
-          var numPages = Math.ceil(totalH / pageHPx);
+
+          /* ── 4. 智能分页：收集所有可分页断点 ── */
+          /**
+           * 寻找合适的分页点：在目标位置附近（上下 100px）寻找元素边界
+           * 优先级：表格行底部 > 段落底部 > 列表项底部 > 分割线 > 任意块元素底部
+           */
+          function findBreakPoint(targetY, searchRange) {
+            searchRange = searchRange || 100;
+            var minY = Math.max(0, targetY - searchRange);
+            var maxY = Math.min(totalH, targetY + searchRange);
+
+            /* 收集候选断点 */
+            var candidates = [];
+            var containerRect = element.getBoundingClientRect();
+            var containerTop = containerRect.top + window.scrollY;
+
+            /* 选择器优先级从高到低 */
+            var selectors = [
+              { sel: 'tr', priority: 10 },
+              { sel: 'p', priority: 9 },
+              { sel: 'li', priority: 8 },
+              { sel: 'hr', priority: 7 },
+              { sel: '.step-card', priority: 6 },
+              { sel: '.section-block', priority: 5 },
+              { sel: '.kv-inline', priority: 4 },
+              { sel: '.numbered-item', priority: 4 },
+              { sel: 'div', priority: 1 }
+            ];
+
+            selectors.forEach(function(item) {
+              var els = element.querySelectorAll(item.sel);
+              els.forEach(function(el) {
+                var rect = el.getBoundingClientRect();
+                var elBottom = rect.bottom + window.scrollY - containerTop;
+                if (elBottom >= minY && elBottom <= maxY) {
+                  candidates.push({ y: elBottom, priority: item.priority });
+                }
+              });
+            });
+
+            if (candidates.length === 0) return targetY;
+
+            /* 按优先级降序，然后按距离目标的距离升序排序 */
+            candidates.sort(function(a, b) {
+              if (b.priority !== a.priority) return b.priority - a.priority;
+              return Math.abs(a.y - targetY) - Math.abs(b.y - targetY);
+            });
+
+            return Math.floor(candidates[0].y);
+          }
+
+          /* ── 5. 计算智能分页点 ── */
+          var pageBreaks = [0];
+          var currentY = 0;
+          while (currentY < totalH) {
+            var idealNextY = currentY + pageHPx;
+            if (idealNextY >= totalH) {
+              break;
+            }
+            var actualBreak = findBreakPoint(idealNextY, 80);
+            /* 确保分页点在合理范围内，避免页面过短或过长 */
+            var minPageH = pageHPx * 0.7;
+            var maxPageH = pageHPx * 1.15;
+            if (actualBreak - currentY < minPageH) {
+              actualBreak = currentY + pageHPx;
+            } else if (actualBreak - currentY > maxPageH) {
+              actualBreak = currentY + pageHPx;
+            }
+            pageBreaks.push(Math.min(actualBreak, totalH));
+            currentY = actualBreak;
+          }
+          pageBreaks.push(totalH);
+
+          var numPages = pageBreaks.length - 1;
           if (numPages < 1) numPages = 1;
 
           var scale = 2;
           var pdf = new JsPDF('p', 'mm', 'a4');
 
-          /* ── 4. 逐页截图并写入 PDF ── */
+          /* ── 6. 逐页截图并写入 PDF ── */
           for (var i = 0; i < numPages; i++) {
             if (btn) btn.textContent = '导出 (' + (i + 1) + '/' + numPages + ')...';
 
-            var yOff   = i * pageHPx;
-            var sliceH = Math.min(pageHPx, totalH - yOff);
+            var yOff   = pageBreaks[i];
+            var sliceH = pageBreaks[i + 1] - yOff;
+            if (sliceH <= 0) continue;
 
             var canvas = await html2canvas(element, {
               scale:           scale,
@@ -1407,7 +1522,7 @@ function getExportScript(reportTitle: string): string {
           console.error('PDF export failed:', err);
           alert('PDF 导出失败: ' + (err.message || err) + '\\n\\n请尝试使用浏览器打印功能 (Ctrl/Cmd+P) 导出');
         } finally {
-          /* ── 5. 恢复页面原始状态 ── */
+          /* ── 7. 恢复页面原始状态 ── */
           element.style.paddingTop = origPadTop;
           if (toolbar) toolbar.style.display = '';
           details.forEach(function(el) { el.classList.remove('open'); });

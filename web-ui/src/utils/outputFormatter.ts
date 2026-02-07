@@ -331,7 +331,15 @@ export function formatNodeOutput(output: unknown): FormatNodeOutputResult {
   }
 
   if (typeof output === 'object' && output !== null) {
-    const obj = output as Record<string, unknown>;
+    let obj = output as Record<string, unknown>;
+
+    // 处理嵌套 result 结构：原始 agent 输出 {agent_id, result: {summary, data, ...}, ...}
+    if (typeof obj.result === 'object' && obj.result !== null) {
+      const inner = obj.result as Record<string, unknown>;
+      if ('data' in inner || 'summary' in inner) {
+        obj = inner;
+      }
+    }
 
     // 过滤技术字段
     const filteredObj = filterTechnicalFields(obj);
