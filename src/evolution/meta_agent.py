@@ -14,7 +14,7 @@ Meta Agent
 - Agent 性能监控集成
 """
 
-from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
 from datetime import datetime, timedelta
 import json
 
@@ -137,8 +137,8 @@ class MetaAgent:
                 if ref_agent:
                     reference_examples.append(self._format_agent_example(ref_agent))
 
-        # 构建生成提示
-        prompt = self._build_creation_prompt(
+        # 构建生成提示（同时获取工具编号映射表）
+        prompt, tool_index_map = self._build_creation_prompt(
             task_description=task_description,
             reference_examples=reference_examples,
             tools=tools,
@@ -148,8 +148,10 @@ class MetaAgent:
         # 调用 LLM 生成（启用 JSON 优化和重试机制）
         response = await self._call_llm(prompt, expect_json=True)
 
-        # 解析响应为 AgentDefinition
-        agent_def = self._parse_agent_definition(response)
+        # 解析响应为 AgentDefinition（传入工具映射表用于解析 tool_indices）
+        agent_def = self._parse_agent_definition(
+            response, tool_index_map=tool_index_map
+        )
 
         logger.info(f"Meta Agent 创建了新 Agent: {agent_def.agent_id}")
 
@@ -301,20 +303,27 @@ class MetaAgent:
         tools: List[str] = None,
         constraints: Dict[str, Any] = None,
         domain: str = "general",
-    ) -> str:
-        """构建 Agent 创建提示"""
+    ) -> Tuple[str, Dict[int, Dict[str, Any]]]:
+        """
+        构建 Agent 创建提示
+
+        Returns:
+            Tuple of:
+                - prompt: 完整的 LLM 提示文本
+                - tool_index_map: 工具编号映射表，用于解析 LLM 输出的 tool_indices
+        """
         examples_text = (
             "\n\n".join(reference_examples) if reference_examples else "无参考示例"
         )
 
-        # 获取真实可用的工具列表
-        available_tools_info = self._get_available_tools_info()
+        # 构建带编号的工具目录（同时获取 index_map）
+        available_tools_info, tool_index_map = self._build_indexed_tool_catalog()
 
         # 用户指定的工具偏好（如果有）
         if tools:
-            tools_preference = f"用户建议的工具: {', '.join(tools)}\n（请从下方实际可用工具中选择匹配的工具，如果建议的工具不存在，请使用 QVeris 工具动态发现）"
+            tools_preference = f"用户建议的工具: {', '.join(tools)}\n（请从上方工具列表中选择对应编号，如果建议的工具不存在，请选择 QVeris 工具编号以动态发现）"
         else:
-            tools_preference = "无特定工具偏好，请根据任务需求从可用工具中选择"
+            tools_preference = "无特定工具偏好，请根据任务需求从可用工具列表中选择编号"
 
         constraints_text = (
             json.dumps(constraints, ensure_ascii=False, indent=2)
@@ -336,7 +345,24 @@ class MetaAgent:
             include_model_capabilities=False,  # 模型信息已在下方提供
         )
 
-        return f"""你是一个专业的 Agent 设计专家。请根据以下任务描述，设计一个高效的 Agent。
+        # 动态计算 QVeris 工具编号，用于示例和提示
+        qveris_search_idx = None
+        qveris_execute_idx = None
+        for idx, info in tool_index_map.items():
+            if info["tool_id"] == "qveris_search_tools":
+                qveris_search_idx = idx
+            elif info["tool_id"] == "qveris_execute_tool":
+                qveris_execute_idx = idx
+
+        # 构建 tool_indices 示例值
+        if qveris_search_idx is not None and qveris_execute_idx is not None:
+            tool_indices_example = f"[{qveris_search_idx}, {qveris_execute_idx}]"
+            qveris_hint = f"7. 对于需要外部数据的任务，必须包含编号 {qveris_search_idx} 和 {qveris_execute_idx}"
+        else:
+            tool_indices_example = "[]"
+            qveris_hint = "7. 对于需要外部数据的任务，请选择 QVeris 类型的工具编号"
+
+        prompt = f"""你是一个专业的 Agent 设计专家。请根据以下任务描述，设计一个高效的 Agent。
 
 {runtime_context}
 
@@ -346,20 +372,18 @@ class MetaAgent:
 ## 参考示例
 {examples_text}
 
-## Framework 可用工具列表
+## 可用工具列表
 {available_tools_info}
 
 ## 工具选择偏好
 {tools_preference}
 
 ## 工具选择指南
-1. **只能使用上述列出的工具**，不要虚构不存在的工具（如 "Web Scraper"、"Financial API" 等）
-2. **外部数据获取**：如果任务需要获取外部数据（金融数据、新闻、网页内容等），必须使用：
-   - `qveris_search_tools`: 搜索可用的远程工具
-   - `qveris_execute_tool`: 执行找到的工具
-3. **文件操作**：使用 file_* 系列工具
-4. **命令执行**：使用 bash_execute_safe
-5. **无需外部数据**：如果任务只需要 LLM 分析/生成，tool_references 可以为空数组
+1. **只能选择上方工具列表中的编号**，不要虚构不存在的工具
+2. **外部数据获取**：如果任务需要获取外部数据（金融数据、新闻、网页内容等），必须选择 QVeris 搜索和执行工具
+3. **文件操作**：选择 file_* 系列工具的编号
+4. **命令执行**：选择 bash_execute_safe 的编号
+5. **无需工具**：如果任务只需要 LLM 分析/生成，tool_indices 应为空数组 []
 
 ## 约束条件
 {constraints_text}
@@ -413,10 +437,7 @@ class MetaAgent:
         "max_tokens": 8000,
         "max_iterations": 10
     }},
-    "tool_references": [
-        {{"tool_id": "qveris_search_tools", "alias": "搜索工具", "tool_type": "qveris", "enabled": true}},
-        {{"tool_id": "qveris_execute_tool", "alias": "执行工具", "tool_type": "qveris", "enabled": true}}
-    ],
+    "tool_indices": {tool_indices_example},
     "output_schema": {{
         "type": "object",
         "properties": {{
@@ -436,14 +457,11 @@ class MetaAgent:
 1. agent_id 应该简洁、有意义，使用下划线命名
 2. **重要**: display_name 必须是简洁、易懂的中文名称（如"数据收集器"、"趋势分析师"），让普通用户能理解这个 Agent 的作用
 3. background_instruction 必须包含 role_description、core_capability、task_context 三个字段
-3. output_instruction 必须包含 format_type、data_format、format_requirements 字段
-4. user_instruction 必须包含 task_description 字段
-5. **重要**: tool_references 中的 tool_id 必须是上方「Framework 可用工具列表」中列出的工具
-6. **重要**: tool_type 只能是以下值之一: "builtin", "qveris", "custom", "mcp", "app", "external_api"
-   - 文件操作工具(file_*)和命令执行工具(bash_*)使用 "builtin"
-   - QVeris 远程工具使用 "qveris"
-7. 对于需要外部数据的任务，必须包含 qveris_search_tools 和 qveris_execute_tool
-8. 如果任务不需要任何工具（纯 LLM 分析），tool_references 应为空数组 []
+4. output_instruction 必须包含 format_type、data_format、format_requirements 字段
+5. user_instruction 必须包含 task_description 字段
+6. **重要**: tool_indices 中的编号必须是上方「可用工具列表」中列出的编号，不要填写不存在的编号
+{qveris_hint}
+8. 如果任务不需要任何工具（纯 LLM 分析），tool_indices 应为空数组 []
 9. **重要**: llm_config.model_name 必须从可用模型列表中选择
 10. **重要**: execution_type 只能是以下值之一:
     - "executor": 执行智能体，快速执行直接输出（推荐用于数据收集、报告生成等）
@@ -468,6 +486,8 @@ class MetaAgent:
       - ❌ 错误: "获取2025年Q4的数据"
     - 具体的当前时间会在 Agent **执行时**由系统自动注入，无需在定义中写死
     - Agent 定义是持久化的，如果写入具体时间，未来执行时会使用错误的旧时间"""
+
+        return prompt, tool_index_map
 
     def _build_optimization_prompt(
         self,
@@ -619,6 +639,265 @@ class MetaAgent:
 不要虚构工具名称（如 "Web Scraper"、"Financial API"），而是通过 QVeris 动态发现和使用远程工具。
 """
 
+    # ToolCategory -> ToolReferenceType 映射
+    _CATEGORY_TO_REF_TYPE: Dict[str, str] = {
+        "file_system": "builtin",
+        "system": "builtin",
+        "bash": "builtin",
+        "code_execution": "builtin",
+        "qveris": "qveris",
+        "dynamic": "qveris",
+        "mcp": "mcp",
+    }
+
+    # 默认工具目录（当 tool_registry 不可用时的兜底列表）
+    _DEFAULT_TOOL_CATALOG: List[Dict[str, str]] = [
+        {
+            "tool_id": "file_ls",
+            "alias": "列出目录",
+            "tool_type": "builtin",
+            "description": "列出目录内容",
+        },
+        {
+            "tool_id": "file_read",
+            "alias": "读取文件",
+            "tool_type": "builtin",
+            "description": "读取文件内容",
+        },
+        {
+            "tool_id": "file_write",
+            "alias": "写入文件",
+            "tool_type": "builtin",
+            "description": "写入文件",
+        },
+        {
+            "tool_id": "file_edit",
+            "alias": "编辑文件",
+            "tool_type": "builtin",
+            "description": "编辑文件（查找替换）",
+        },
+        {
+            "tool_id": "file_append",
+            "alias": "追加文件",
+            "tool_type": "builtin",
+            "description": "追加内容到文件",
+        },
+        {
+            "tool_id": "bash_execute",
+            "alias": "执行命令",
+            "tool_type": "builtin",
+            "description": "执行 Bash 命令",
+        },
+        {
+            "tool_id": "bash_execute_safe",
+            "alias": "安全执行命令",
+            "tool_type": "builtin",
+            "description": "安全执行 Bash 命令",
+        },
+        {
+            "tool_id": "qveris_search_tools",
+            "alias": "搜索远程工具",
+            "tool_type": "qveris",
+            "description": "搜索 QVeris 平台上的远程工具",
+        },
+        {
+            "tool_id": "qveris_execute_tool",
+            "alias": "执行远程工具",
+            "tool_type": "qveris",
+            "description": "执行通过搜索找到的远程工具",
+        },
+        {
+            "tool_id": "qveris_get_tool_info",
+            "alias": "获取远程工具信息",
+            "tool_type": "qveris",
+            "description": "获取工具的详细信息",
+        },
+    ]
+
+    def _build_indexed_tool_catalog(self) -> Tuple[str, Dict[int, Dict[str, Any]]]:
+        """
+        构建带编号的工具目录，用于 LLM 通过编号选择工具。
+
+        返回格式化的工具列表文本和 index -> 工具信息的映射表。
+        LLM 只需输出工具编号，系统通过映射表反查完整的工具引用信息。
+
+        Returns:
+            Tuple of:
+                - formatted_text: 带编号的工具列表文本（嵌入到 prompt 中）
+                - index_map: {index: {"tool_id": ..., "alias": ..., "tool_type": ...}}
+        """
+        catalog_items: List[Dict[str, Any]] = []
+
+        if self.tool_registry:
+            try:
+                tools_list = self.tool_registry.list_all()
+                if tools_list:
+                    for tool in tools_list:
+                        if not tool.get("is_active", True):
+                            continue
+
+                        tool_id = tool.get("tool_id", "")
+                        category = tool.get("category", "general")
+
+                        # 从 ToolDefinition 获取规范的 alias 和描述
+                        tool_def = self.tool_registry.get(tool_id)
+                        alias = (
+                            tool_def.alias if tool_def else tool.get("name", tool_id)
+                        )
+                        description = tool_def.description if tool_def else ""
+
+                        # 从 category 推导 tool_type
+                        tool_type = self._CATEGORY_TO_REF_TYPE.get(category, "custom")
+
+                        catalog_items.append(
+                            {
+                                "tool_id": tool_id,
+                                "alias": alias,
+                                "tool_type": tool_type,
+                                "description": description,
+                            }
+                        )
+            except Exception as e:
+                logger.warning(f"从 ToolRegistry 获取工具列表失败: {e}")
+
+        # 兜底：使用默认目录
+        if not catalog_items:
+            catalog_items = [item.copy() for item in self._DEFAULT_TOOL_CATALOG]
+
+        # 构建 index_map 和格式化文本
+        index_map: Dict[int, Dict[str, Any]] = {}
+        lines = ["可用工具列表（请通过编号选择需要的工具）：\n"]
+
+        # 记录 QVeris 搜索和执行工具的编号，用于动态提示
+        qveris_search_idx: Optional[int] = None
+        qveris_execute_idx: Optional[int] = None
+
+        for idx, item in enumerate(catalog_items):
+            index_map[idx] = {
+                "tool_id": item["tool_id"],
+                "alias": item["alias"],
+                "tool_type": item["tool_type"],
+            }
+
+            # 截取描述前 60 个字符，避免过长
+            desc = item.get("description", "")
+            if len(desc) > 60:
+                desc = desc[:60] + "..."
+
+            lines.append(
+                f"  [{idx}] {item['tool_id']} - {item['alias']} "
+                f"({item['tool_type']}): {desc}"
+            )
+
+            # 追踪 QVeris 关键工具编号
+            if item["tool_id"] == "qveris_search_tools":
+                qveris_search_idx = idx
+            elif item["tool_id"] == "qveris_execute_tool":
+                qveris_execute_idx = idx
+
+        lines.append("")
+
+        # 添加 QVeris 工具的动态提示
+        if qveris_search_idx is not None and qveris_execute_idx is not None:
+            lines.append(
+                f"**重要**: 对于需要外部数据（金融数据、新闻、API 调用等）的任务，"
+                f"必须同时选择 [{qveris_search_idx}] 和 [{qveris_execute_idx}]。"
+            )
+            lines.append("不要虚构工具名称，而是通过 QVeris 动态发现和使用远程工具。")
+            lines.append("")
+
+        formatted_text = "\n".join(lines)
+
+        logger.debug(
+            f"构建工具目录: {len(index_map)} 个工具, "
+            f"QVeris search=[{qveris_search_idx}], execute=[{qveris_execute_idx}]"
+        )
+
+        return formatted_text, index_map
+
+    def _resolve_tool_indices(
+        self,
+        indices: List[Any],
+        index_map: Dict[int, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        将工具编号列表转换为 ToolReference 兼容的字典列表。
+
+        通过 index_map 反查每个编号对应的完整工具信息（tool_id, alias, tool_type），
+        确保工具引用的名称和类型完全由系统控制，不受 LLM 输出影响。
+
+        Args:
+            indices: LLM 输出的工具编号列表（如 [6, 7]）
+            index_map: _build_indexed_tool_catalog() 返回的编号映射表
+
+        Returns:
+            ToolReference 兼容的字典列表
+        """
+        if not indices:
+            return []
+
+        resolved_refs: List[Dict[str, Any]] = []
+
+        for raw_idx in indices:
+            # 容错：LLM 可能输出字符串形式的数字
+            try:
+                idx = int(raw_idx)
+            except (ValueError, TypeError):
+                logger.warning(f"无效的工具编号 '{raw_idx}'，已跳过")
+                continue
+
+            if idx in index_map:
+                tool_info = index_map[idx]
+                resolved_refs.append(
+                    {
+                        "tool_id": tool_info["tool_id"],
+                        "alias": tool_info["alias"],
+                        "tool_type": tool_info["tool_type"],
+                        "enabled": True,
+                    }
+                )
+            else:
+                logger.warning(
+                    f"工具编号 {idx} 不在可用范围 [0, {max(index_map.keys()) if index_map else 0}] 内，已跳过"
+                )
+
+        # 如果所有编号都无效但原始列表非空，回退到 QVeris 默认工具
+        if not resolved_refs and indices:
+            logger.info("所有工具编号均无效，添加 QVeris 默认工具以支持动态工具发现")
+            # 从 index_map 中查找 QVeris 工具
+            for idx, info in index_map.items():
+                if info["tool_id"] in ("qveris_search_tools", "qveris_execute_tool"):
+                    resolved_refs.append(
+                        {
+                            "tool_id": info["tool_id"],
+                            "alias": info["alias"],
+                            "tool_type": info["tool_type"],
+                            "enabled": True,
+                        }
+                    )
+            # 如果 index_map 中也没有 QVeris 工具，使用硬编码兜底
+            if not resolved_refs:
+                resolved_refs = [
+                    {
+                        "tool_id": "qveris_search_tools",
+                        "alias": "搜索远程工具",
+                        "tool_type": "qveris",
+                        "enabled": True,
+                    },
+                    {
+                        "tool_id": "qveris_execute_tool",
+                        "alias": "执行远程工具",
+                        "tool_type": "qveris",
+                        "enabled": True,
+                    },
+                ]
+
+        logger.debug(
+            f"工具编号解析: {indices} -> " f"{[r['tool_id'] for r in resolved_refs]}"
+        )
+
+        return resolved_refs
+
     def _validate_tool_references(
         self, tool_references: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -716,17 +995,20 @@ class MetaAgent:
             validated_refs = [
                 {
                     "tool_id": "qveris_search_tools",
-                    "alias": "搜索工具",
+                    "alias": "搜索远程工具",
                     "tool_type": "qveris",
                     "enabled": True,
                 },
                 {
                     "tool_id": "qveris_execute_tool",
-                    "alias": "执行工具",
+                    "alias": "执行远程工具",
                     "tool_type": "qveris",
                     "enabled": True,
                 },
             ]
+
+        # 规范化别名：使用 ToolRegistry 中的规范 alias，覆盖 LLM 生成的任意别名
+        self._normalize_tool_aliases(validated_refs)
 
         return validated_refs
 
@@ -792,6 +1074,50 @@ class MetaAgent:
             return None  # 返回 None，让调用者决定添加 QVeris 工具
 
         return None
+
+    def _normalize_tool_aliases(self, tool_refs: List[Dict[str, Any]]) -> None:
+        """
+        规范化工具引用的别名（alias），确保使用 ToolRegistry 中定义的规范名称。
+
+        在旧的 tool_references 路径中，LLM 可能生成任意的别名（如"搜索金融数据工具"、
+        "QVeris工具搜索"等），此方法将其统一为注册时的规范别名。
+
+        Args:
+            tool_refs: 工具引用列表（会被原地修改）
+        """
+        if not tool_refs:
+            return
+
+        # 尝试从 ToolRegistry 获取规范别名
+        canonical_aliases: Dict[str, str] = {}
+        if self.tool_registry:
+            try:
+                for tool in self.tool_registry.list_all():
+                    tool_id = tool.get("tool_id", "")
+                    tool_def = self.tool_registry.get(tool_id)
+                    if tool_def:
+                        canonical_aliases[tool_id] = tool_def.alias
+            except Exception as e:
+                logger.debug(f"获取规范别名失败: {e}")
+
+        # 如果无法从 ToolRegistry 获取，使用默认目录中的别名
+        if not canonical_aliases:
+            canonical_aliases = {
+                item["tool_id"]: item["alias"] for item in self._DEFAULT_TOOL_CATALOG
+            }
+
+        # 逐一规范化
+        for ref in tool_refs:
+            tool_id = ref.get("tool_id", "")
+            if tool_id in canonical_aliases:
+                old_alias = ref.get("alias", "")
+                canonical = canonical_aliases[tool_id]
+                if old_alias != canonical:
+                    logger.debug(
+                        f"规范化工具别名: '{tool_id}' 的 alias "
+                        f"'{old_alias}' -> '{canonical}'"
+                    )
+                    ref["alias"] = canonical
 
     def _normalize_enum_fields(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1203,8 +1529,20 @@ class MetaAgent:
             "不支持的 LLM 客户端类型，请确保客户端具有 ainvoke, invoke, 或 generate 方法"
         )
 
-    def _parse_agent_definition(self, response: str) -> AgentDefinition:
-        """解析 LLM 响应为 AgentDefinition"""
+    def _parse_agent_definition(
+        self,
+        response: str,
+        tool_index_map: Optional[Dict[int, Dict[str, Any]]] = None,
+    ) -> AgentDefinition:
+        """
+        解析 LLM 响应为 AgentDefinition
+
+        Args:
+            response: LLM 的原始响应文本
+            tool_index_map: 工具编号映射表（来自 _build_indexed_tool_catalog），
+                            用于将 tool_indices 转换为 tool_references。
+                            如果为 None，则回退到旧的 tool_references 解析逻辑。
+        """
         import re
 
         # 提取 JSON
@@ -1316,8 +1654,18 @@ class MetaAgent:
                                 )
                     ui["context_references"] = normalized_ctx
 
-            # 处理 tool_references 中缺失的字段并验证工具存在性
-            if "tool_references" in data:
+            # 处理工具选择：优先使用 tool_indices（编号选择），回退到 tool_references（旧格式）
+            if "tool_indices" in data and tool_index_map:
+                # 新方式：通过编号反查工具信息，确保 alias 和 tool_type 完全由系统控制
+                data["tool_references"] = self._resolve_tool_indices(
+                    data.pop("tool_indices"), tool_index_map
+                )
+                logger.debug(
+                    f"通过 tool_indices 解析工具引用: "
+                    f"{[r['tool_id'] for r in data.get('tool_references', [])]}"
+                )
+            elif "tool_references" in data:
+                # 旧方式（向后兼容）：LLM 直接输出 tool_references 对象数组
                 for i, tool_ref in enumerate(data["tool_references"]):
                     if "alias" not in tool_ref:
                         tool_ref["alias"] = tool_ref.get("tool_id", f"tool_{i}")
@@ -1441,14 +1789,14 @@ class MetaAgent:
             )
             ```
         """
-        # 收集可用 Agent 的信息
+        # 收集可用 Agent 的信息（使用索引编号，不暴露原始 agent_id）
         agent_infos = []
-        for agent_id in available_agents:
+        for idx, agent_id in enumerate(available_agents):
             agent = self.agent_registry.get_definition(agent_id)
             if agent:
                 agent_infos.append(
                     {
-                        "id": agent.agent_id,
+                        "index": idx,
                         "name": agent.name,
                         "description": agent.description,
                         "capabilities": self._extract_capabilities(agent),
@@ -1469,8 +1817,21 @@ class MetaAgent:
         # 调用 LLM 生成（启用 JSON 优化和重试机制）
         response = await self._call_llm(prompt, expect_json=True)
 
-        # 解析响应为 WorkflowDefinition
-        workflow = self._parse_workflow_definition(response)
+        # 解析响应为 WorkflowDefinition（传入 available_agents 用于索引映射）
+        workflow = self._parse_workflow_definition(
+            response, available_agents=available_agents
+        )
+
+        # 最终校验：确保所有 agent 节点都引用了有效的 agent_id
+        registered_ids = set(available_agents)
+        for node in workflow.nodes:
+            if node.node_type.value == "agent" and node.agent_id:
+                if node.agent_id not in registered_ids:
+                    raise ValueError(
+                        f"工作流节点 '{node.node_id}' 引用了无效的 "
+                        f"agent_id='{node.agent_id}'，"
+                        f"可用的 agent_id: {available_agents}"
+                    )
 
         logger.info(f"Meta Agent 生成了工作流: {workflow.workflow_id}")
 
@@ -1496,7 +1857,7 @@ class MetaAgent:
 ## 任务描述
 {task_description}
 
-## 可用 Agent
+## 可用 Agent（按编号索引）
 {agents_text}
 
 ## 约束条件
@@ -1518,7 +1879,8 @@ class MetaAgent:
    - 例如：report_generator 依赖 analyzer 执行，但也需要 data_collector 的原始数据作为证据支撑
 
 ## 输出要求
-请生成完整的工作流定义，严格使用以下 JSON 格式：
+请生成完整的工作流定义，严格使用以下 JSON 格式。
+**重要：agent 类型节点必须使用 `agent_index`（整数）引用上方 Agent 列表的编号，不要使用字符串 ID。**
 
 ```json
 {{
@@ -1535,44 +1897,44 @@ class MetaAgent:
             "node_type": "start"
         }},
         {{
-            "node_id": "data_collector",
+            "node_id": "step_0",
             "name": "数据采集节点",
             "node_type": "agent",
-            "agent_id": "数据采集 Agent ID",
+            "agent_index": 0,
             "dependencies": ["start"],
             "context_refs": [],
             "config": {{"timeout": 90}}
         }},
         {{
-            "node_id": "analyzer",
+            "node_id": "step_1",
             "name": "分析节点",
             "node_type": "agent",
-            "agent_id": "分析 Agent ID",
-            "dependencies": ["data_collector"],
+            "agent_index": 1,
+            "dependencies": ["step_0"],
             "context_refs": [],
             "config": {{"timeout": 120}}
         }},
         {{
-            "node_id": "report_generator",
+            "node_id": "step_2",
             "name": "报告生成节点",
             "node_type": "agent",
-            "agent_id": "报告生成 Agent ID",
-            "dependencies": ["analyzer"],
-            "context_refs": ["data_collector"],
+            "agent_index": 2,
+            "dependencies": ["step_1"],
+            "context_refs": ["step_0"],
             "config": {{"timeout": 90}}
         }},
         {{
             "node_id": "end",
             "name": "结束节点",
             "node_type": "end",
-            "dependencies": ["report_generator"]
+            "dependencies": ["step_2"]
         }}
     ],
     "edges": [
-        {{"from_node": "start", "to_node": "data_collector"}},
-        {{"from_node": "data_collector", "to_node": "analyzer"}},
-        {{"from_node": "analyzer", "to_node": "report_generator"}},
-        {{"from_node": "report_generator", "to_node": "end"}}
+        {{"from_node": "start", "to_node": "step_0"}},
+        {{"from_node": "step_0", "to_node": "step_1"}},
+        {{"from_node": "step_1", "to_node": "step_2"}},
+        {{"from_node": "step_2", "to_node": "end"}}
     ],
     "default_data_format": "markdown",
     "global_config": {{
@@ -1588,7 +1950,7 @@ class MetaAgent:
 3. 必须有一个 start 节点和至少一个 end 节点
 4. entry_node 应设为 start 节点的 ID
 5. exit_nodes 应包含所有 end 节点的 ID
-6. agent 类型节点必须指定 agent_id
+6. **agent 类型节点必须指定 agent_index（整数），对应上方 Agent 列表的 index 编号，不要使用 agent_id 字符串**
 7. dependencies 数组表示该节点依赖的前置节点（控制执行顺序）
 8. **context_refs 数组表示该节点需要引用的其他节点输出（仅获取数据，不影响执行顺序）**
 9. edges 定义节点间的连接关系
@@ -1621,8 +1983,16 @@ class MetaAgent:
 
         return capabilities
 
-    def _parse_workflow_definition(self, response: str) -> WorkflowDefinition:
-        """解析 LLM 响应为 WorkflowDefinition"""
+    def _parse_workflow_definition(
+        self, response: str, available_agents: List[str] = None
+    ) -> WorkflowDefinition:
+        """
+        解析 LLM 响应为 WorkflowDefinition
+
+        Args:
+            response: LLM 响应文本
+            available_agents: 可用的 agent_id 列表，用于将 agent_index 映射为真实 agent_id
+        """
         import re
         from ..definitions.workflow_definition import NodeType
 
@@ -1645,6 +2015,8 @@ class MetaAgent:
             if "name" not in data:
                 data["name"] = "自动生成的工作流"
 
+            available_set = set(available_agents) if available_agents else set()
+
             # 转换节点，确保每个节点有必需字段
             nodes = []
             for i, node_data in enumerate(data.get("nodes", [])):
@@ -1666,6 +2038,40 @@ class MetaAgent:
                 if node_type_str not in valid_types:
                     node_type_str = "agent"
                 node_data["node_type"] = node_type_str
+
+                # ====== agent_index -> agent_id 确定性映射 ======
+                if available_agents and node_type_str == "agent":
+                    agent_index = node_data.pop("agent_index", None)
+                    if agent_index is not None:
+                        # LLM 使用了 agent_index（期望路径）
+                        try:
+                            idx = int(agent_index)
+                        except (TypeError, ValueError):
+                            idx = -1
+                        if 0 <= idx < len(available_agents):
+                            node_data["agent_id"] = available_agents[idx]
+                        else:
+                            logger.error(
+                                f"节点 {node_data.get('node_id')} 的 "
+                                f"agent_index={agent_index} 越界 "
+                                f"(可用范围: 0-{len(available_agents)-1})"
+                            )
+                    elif node_data.get("agent_id"):
+                        # LLM 忽略了 agent_index 指令，仍使用 agent_id 字符串
+                        raw_id = node_data["agent_id"]
+                        if raw_id not in available_set:
+                            corrected = self._resolve_agent_id(raw_id, available_agents)
+                            if corrected:
+                                logger.warning(
+                                    f"自动修正 agent_id: "
+                                    f"'{raw_id}' -> '{corrected}'"
+                                )
+                                node_data["agent_id"] = corrected
+                            else:
+                                logger.error(
+                                    f"节点 {node_data.get('node_id')} 引用了"
+                                    f"无法解析的 agent_id: '{raw_id}'"
+                                )
 
                 nodes.append(WorkflowNode(**node_data))
 
@@ -1718,6 +2124,96 @@ class MetaAgent:
         except Exception as e:
             logger.error(f"创建 WorkflowDefinition 失败: {e}")
             raise ValueError(f"无法创建 WorkflowDefinition: {e}")
+
+    def _resolve_agent_id(
+        self, raw_id: str, available_agents: List[str]
+    ) -> Optional[str]:
+        """
+        尝试将 LLM 生成的可能不正确的 agent_id 修正为合法的 agent_id。
+
+        使用 5 级匹配策略，按优先级从高到低：
+        1. 精确匹配
+        2. 大小写不敏感匹配
+        3. _agent 后缀对齐（去掉或添加）
+        4. AgentRegistry name/display_name 反向查找
+        5. 单词重叠度评分（阈值 >= 0.7）
+
+        Args:
+            raw_id: LLM 生成的 agent_id 字符串
+            available_agents: 合法 agent_id 列表
+
+        Returns:
+            修正后的 agent_id，如果无法修正则返回 None
+        """
+        if not raw_id or not available_agents:
+            return None
+
+        # 策略 1: 精确匹配
+        if raw_id in available_agents:
+            return raw_id
+
+        # 策略 2: 大小写不敏感匹配
+        raw_lower = raw_id.lower()
+        for aid in available_agents:
+            if aid.lower() == raw_lower:
+                return aid
+
+        # 策略 3: _agent 后缀对齐
+        if raw_id.endswith("_agent"):
+            stripped = raw_id[: -len("_agent")]
+            for aid in available_agents:
+                if aid == stripped or aid.lower() == stripped.lower():
+                    return aid
+        else:
+            with_suffix = raw_id + "_agent"
+            for aid in available_agents:
+                if aid == with_suffix or aid.lower() == with_suffix.lower():
+                    return aid
+
+        # 策略 4: AgentRegistry name/display_name 反向查找
+        if self.agent_registry:
+            for aid in available_agents:
+                agent_def = self.agent_registry.get_definition(aid)
+                if agent_def:
+                    names_to_check = [
+                        agent_def.name,
+                        getattr(agent_def, "display_name", None),
+                    ]
+                    for name in names_to_check:
+                        if name and (
+                            name == raw_id
+                            or name.lower() == raw_lower
+                            or name.lower().replace(" ", "_") == raw_lower
+                            or name.lower().replace("-", "_") == raw_lower
+                        ):
+                            return aid
+
+        # 策略 5: 单词重叠度评分
+        def _word_set(s: str) -> set:
+            return set(s.lower().replace("-", "_").split("_"))
+
+        raw_words = _word_set(raw_id)
+        best_score = 0.0
+        best_match = None
+        for aid in available_agents:
+            aid_words = _word_set(aid)
+            if not raw_words or not aid_words:
+                continue
+            intersection = raw_words & aid_words
+            union = raw_words | aid_words
+            score = len(intersection) / len(union) if union else 0.0
+            if score > best_score:
+                best_score = score
+                best_match = aid
+
+        if best_score >= 0.7 and best_match:
+            logger.info(
+                f"_resolve_agent_id: 通过单词重叠匹配 "
+                f"'{raw_id}' -> '{best_match}' (score={best_score:.2f})"
+            )
+            return best_match
+
+        return None
 
     async def optimize_workflow(
         self,

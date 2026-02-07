@@ -876,6 +876,12 @@ class ConversationalWorkflowBuilder:
             if target_id:
                 for dep in deps:
                     source_id = name_to_id.get(dep)
+                    # 回退查找：依赖可能是 node_id 而非 agent name
+                    if not source_id:
+                        for node in state["nodes"]:
+                            if node.get("workflowNodeId") == dep:
+                                source_id = node.get("nodeId")
+                                break
                     if source_id:
                         edge_key = f"{source_id}->{target_id}"
                         if edge_key not in edges_added:
@@ -888,9 +894,14 @@ class ConversationalWorkflowBuilder:
                             )
                             edges_added.add(edge_key)
 
-        # ========== 关键修复：如果 plan_agents 没有生成边，从 WorkflowDefinition 获取 ==========
-        # 这种情况发生在加载已保存的工作流时，因为 AgentDefinition 不包含 dependencies
-        if not state["edges"] and workflow_node_dependencies:
+        # ========== 关键修复：边数不足时，从 WorkflowDefinition 补充 ==========
+        # 不再要求完全无边才触发回退，而是在边数明显不足时也尝试从 workflow 补充
+        # 一个连通的 N 节点 DAG 至少需要 N-1 条边
+        agent_node_count = len(state["nodes"])
+        if (
+            len(state["edges"]) < max(agent_node_count - 1, 1)
+            and workflow_node_dependencies
+        ):
             # 构建 workflow_node_id -> frontend_node_id 的映射
             wf_node_to_frontend = {}
             for node in state["nodes"]:

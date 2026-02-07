@@ -1749,6 +1749,7 @@ class WorkflowOperationTools:
             result_data = {}
             db_saved = False
             saved_agents_count = 0
+            failed_agents = []
 
             # ========== 优先保存到数据库 ==========
             if (
@@ -1806,7 +1807,11 @@ class WorkflowOperationTools:
                             )
                             saved_agents_count += 1
                         except Exception as agent_error:
-                            logger.warning(f"保存 Agent 失败: {agent_error}")
+                            agent_name = getattr(agent_def, "name", "unknown")
+                            logger.error(
+                                f"保存 Agent '{agent_name}' 失败: {agent_error}"
+                            )
+                            failed_agents.append(agent_name)
 
                     await db.close()
 
@@ -1817,12 +1822,15 @@ class WorkflowOperationTools:
                         agents=agents,
                         saved_agents_count=saved_agents_count,
                     )
+                    if failed_agents:
+                        result_data["failed_agents"] = failed_agents
                     db_saved = True
 
                     logger.info(
                         f"工作流已保存到数据库: {workflow_detail.name} "
                         f"(ID: {workflow_detail.workflow_id}), "
                         f"Agents: {saved_agents_count}/{len(agents)}"
+                        + (f", 失败: {failed_agents}" if failed_agents else "")
                     )
 
                 except Exception as db_error:
@@ -1871,6 +1879,11 @@ class WorkflowOperationTools:
                 message = (
                     f"工作流 '{result_data.get('name', workflow.name)}' 已保存到数据库"
                 )
+                if failed_agents:
+                    message += (
+                        f"（警告：{len(failed_agents)} 个 Agent 保存失败: "
+                        f"{', '.join(failed_agents)}）"
+                    )
                 return OperationResult(
                     success=True,
                     message=message,

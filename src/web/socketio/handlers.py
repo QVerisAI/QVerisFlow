@@ -435,26 +435,49 @@ class SocketIOHandler:
                         agent_ids.add(node.config.get("agent_id"))
 
                 # 从数据库加载这些 Agents 并注册到 AgentRegistry
+                # 增加模糊匹配重试：当精确查找失败时，尝试去掉/添加 _agent 后缀
                 loaded_agents = []
                 loaded_agent_db_ids = {}  # agent_id -> 数据库 ID 映射
+                loaded_agent_map = {}  # agent_id -> AgentDefinition 映射
                 for agent_id in agent_ids:
                     try:
                         agent_model = await agent_repo.get_by_agent_id(agent_id)
+
+                        # 模糊匹配重试：精确查找失败时尝试 _agent 后缀对齐
+                        if not agent_model:
+                            fuzzy_id = None
+                            if agent_id.endswith("_agent"):
+                                fuzzy_id = agent_id[: -len("_agent")]
+                            else:
+                                fuzzy_id = agent_id + "_agent"
+                            if fuzzy_id:
+                                agent_model = await agent_repo.get_by_agent_id(fuzzy_id)
+                                if agent_model:
+                                    logger.warning(
+                                        f"Agent '{agent_id}' 未找到，"
+                                        f"通过模糊匹配找到 '{fuzzy_id}'"
+                                    )
+
                         if agent_model and agent_model.definition_json:
                             # 从数据库记录构建 AgentDefinition
                             agent_def = AgentDefinition(**agent_model.definition_json)
                             loaded_agents.append(agent_def)
                             # 保存数据库 ID 用于后续更新
                             loaded_agent_db_ids[agent_id] = agent_model.id
+                            # 同时用原始 agent_id 和实际 agent_id 作为 key
+                            loaded_agent_map[agent_id] = agent_def
+                            loaded_agent_map[agent_def.agent_id] = agent_def
 
                             # 注册到 AgentRegistry（用于执行时查找）
                             if not self.builder.meta_agent.agent_registry.get_definition(
-                                agent_id
+                                agent_def.agent_id
                             ):
                                 self.builder.meta_agent.agent_registry.register_definition(
                                     agent_def
                                 )
-                                logger.info(f"已注册 Agent 到 Registry: {agent_id}")
+                                logger.info(
+                                    f"已注册 Agent 到 Registry: {agent_def.agent_id}"
+                                )
                         else:
                             logger.warning(f"Agent 不存在于数据库: {agent_id}")
                     except Exception as agent_error:
@@ -490,33 +513,68 @@ class SocketIOHandler:
 
                 ops._task_description = workflow.description or workflow.name
 
-                # ========== 关键修复：从加载的数据重建 current_plan ==========
-                # 这是修复画布显示旧工作流的根本原因：
-                # _get_workflow_state() 优先使用 current_plan.agent_specs
-                # 如果不重建，会继续使用旧的 plan 数据
+                # ========== 关键修复：从 workflow.nodes 重建 current_plan ==========
+                # 以 workflow.nodes 为权威数据源（而非 loaded_agents），
+                # 确保所有节点都出现在画布上，即使某些 agent 未能从 DB 加载
                 from src.evolution.interactive_builder import WorkflowPlan, AgentSpec
 
-                agent_specs = []
-                for agent in loaded_agents:
-                    # 从 workflow nodes 获取该 agent 的依赖关系
-                    node = next(
-                        (n for n in workflow.nodes if n.agent_id == agent.agent_id),
-                        None,
-                    )
-                    deps = node.dependencies if node else []
-
-                    agent_specs.append(
-                        AgentSpec(
-                            name=agent.name,
-                            task=agent.description or "",
-                            display_name=agent.display_name or agent.name,
-                            suggested_tools=[
-                                t.tool_id for t in (agent.tool_references or [])
-                            ],
-                            dependencies=deps,
-                            context_refs=[],
+                # 构建 node_id -> agent_name 映射（用于将 node_id 依赖转为 agent name）
+                node_id_to_agent_name = {}
+                for n in workflow.nodes:
+                    if n.agent_id:
+                        agent_def = loaded_agent_map.get(n.agent_id)
+                        node_id_to_agent_name[n.node_id] = (
+                            agent_def.name if agent_def else n.name
                         )
-                    )
+
+                agent_specs = []
+                for node in workflow.nodes:
+                    # 只为 agent 类型节点构建 AgentSpec
+                    if node.node_type.value != "agent":
+                        continue
+
+                    agent_def = loaded_agent_map.get(node.agent_id)
+
+                    # 将 node.dependencies（node_id）转换为 agent name
+                    deps_as_names = []
+                    for dep_node_id in node.dependencies or []:
+                        dep_name = node_id_to_agent_name.get(dep_node_id)
+                        if dep_name:
+                            deps_as_names.append(dep_name)
+                        # 过滤掉 start/end 等非 agent 节点
+
+                    context_refs = list(node.context_refs or [])
+
+                    if agent_def:
+                        # 正常路径：agent 成功从 DB 加载
+                        agent_specs.append(
+                            AgentSpec(
+                                name=agent_def.name,
+                                task=agent_def.description or "",
+                                display_name=agent_def.display_name or agent_def.name,
+                                suggested_tools=[
+                                    t.tool_id for t in (agent_def.tool_references or [])
+                                ],
+                                dependencies=deps_as_names,
+                                context_refs=context_refs,
+                            )
+                        )
+                    else:
+                        # 降级路径：agent 未能从 DB 加载，使用节点信息保证画布显示
+                        logger.warning(
+                            f"Agent '{node.agent_id}' 未在数据库中找到，"
+                            f"使用节点信息 '{node.name}' 降级显示"
+                        )
+                        agent_specs.append(
+                            AgentSpec(
+                                name=node.name,
+                                task=f"[未加载] {node.name}",
+                                display_name=node.name,
+                                suggested_tools=[],
+                                dependencies=deps_as_names,
+                                context_refs=context_refs,
+                            )
+                        )
 
                 ops.builder.current_plan = WorkflowPlan(
                     task_description=workflow.description or workflow.name,
@@ -528,7 +586,8 @@ class SocketIOHandler:
 
                 logger.info(
                     f"工作流加载完成: {workflow.name}, "
-                    f"已加载 {len(loaded_agents)}/{len(agent_ids)} 个 Agents"
+                    f"已加载 {len(loaded_agents)}/{len(agent_ids)} 个 Agents, "
+                    f"画布节点: {len(agent_specs)} 个"
                 )
 
                 # 格式化执行历史
