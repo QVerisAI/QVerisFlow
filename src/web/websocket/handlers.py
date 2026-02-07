@@ -931,6 +931,10 @@ class WebSocketHandler:
                 ops.builder.draft_agents = loaded_agents
                 # ========== 关键修复：设置 current_stage 为 WORKFLOW ==========
                 ops.builder.current_stage = InteractionStage.WORKFLOW
+                # 初始化 FSM 到全部就绪状态
+                from src.evolution.interactive_builder import BuilderStateMachine
+
+                ops.builder.fsm = BuilderStateMachine.init_from_loaded()
                 # 保存数据库 ID 用于后续更新
                 ops.builder.loaded_workflow_db_id = workflow_detail.id
                 ops.builder.loaded_agent_db_ids = loaded_agent_db_ids
@@ -946,6 +950,10 @@ class WebSocketHandler:
                 ops._builder.draft_agents = loaded_agents
                 # ========== 关键修复：设置 current_stage 为 WORKFLOW ==========
                 ops._builder.current_stage = InteractionStage.WORKFLOW
+                # 初始化 FSM 到全部就绪状态
+                from src.evolution.interactive_builder import BuilderStateMachine
+
+                ops._builder.fsm = BuilderStateMachine.init_from_loaded()
                 # 保存数据库 ID 用于后续更新
                 ops._builder.loaded_workflow_db_id = workflow_detail.id
                 ops._builder.loaded_agent_db_ids = loaded_agent_db_ids

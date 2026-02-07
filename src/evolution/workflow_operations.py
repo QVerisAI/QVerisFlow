@@ -107,6 +107,13 @@ class WorkflowOperationTools:
     def builder(self) -> Optional["InteractiveWorkflowBuilder"]:
         return self._builder
 
+    @property
+    def fsm(self):
+        """便捷访问构建器的状态机"""
+        if self._builder:
+            return self._builder.fsm
+        return None
+
     def _ensure_builder(self) -> bool:
         """确保 builder 已初始化"""
         return self._builder is not None
@@ -162,6 +169,9 @@ class WorkflowOperationTools:
 
             if plan:
                 self._builder.current_plan = plan
+
+                # 通知状态机：规划已创建
+                self._builder.fsm.on_plan_created()
 
                 # 创建检查点
                 self._builder.iteration_manager.checkpoint(
@@ -299,6 +309,9 @@ class WorkflowOperationTools:
                 self._generate_workflow_structure()
             )
 
+            # 通知状态机：规划被修改（新增 spec）
+            self._builder.fsm.on_plan_modified(added_specs=[name])
+
             # 创建检查点
             self._builder.iteration_manager.checkpoint(
                 label=f"add_agent_{name}",
@@ -308,9 +321,13 @@ class WorkflowOperationTools:
 
             # 使用显示名称进行用户友好的反馈
             friendly_name = display_name or name
+            pending_msg = self._builder.fsm.describe_pending()
+            msg = f"已添加「{friendly_name}」到工作流规划"
+            if pending_msg:
+                msg += f"\n{pending_msg}"
             return OperationResult(
                 success=True,
-                message=f"已添加「{friendly_name}」到工作流规划",
+                message=msg,
                 data={"plan": self._builder.current_plan.to_dict()},
                 workflow_changed=True,
             )
@@ -359,6 +376,9 @@ class WorkflowOperationTools:
             self._builder.current_plan.workflow_structure = (
                 self._generate_workflow_structure()
             )
+
+            # 通知状态机：规划被修改（移除 spec）
+            self._builder.fsm.on_plan_modified(removed_specs=[spec_to_remove.name])
 
             # 创建检查点
             self._builder.iteration_manager.checkpoint(
@@ -485,6 +505,9 @@ class WorkflowOperationTools:
                 self._generate_workflow_structure()
             )
 
+            # 通知状态机：规划被修改
+            self._builder.fsm.on_plan_modified()
+
             # 创建检查点
             self._builder.iteration_manager.checkpoint(
                 label=f"modify_agent_{agent_name}",
@@ -555,6 +578,9 @@ class WorkflowOperationTools:
                 self._generate_workflow_structure()
             )
 
+            # 通知状态机：规划被修改
+            self._builder.fsm.on_plan_modified()
+
             # 创建检查点
             self._builder.iteration_manager.checkpoint(
                 label=f"modify_deps_{agent_name}",
@@ -614,6 +640,9 @@ class WorkflowOperationTools:
             self._builder.current_plan.workflow_structure = (
                 self._generate_workflow_structure()
             )
+
+            # 通知状态机：规划被修改
+            self._builder.fsm.on_plan_modified()
 
             # 创建检查点
             self._builder.iteration_manager.checkpoint(
@@ -678,6 +707,9 @@ class WorkflowOperationTools:
                 self._generate_workflow_structure()
             )
 
+            # 通知状态机：规划被修改
+            self._builder.fsm.on_plan_modified()
+
             # 创建检查点
             self._builder.iteration_manager.checkpoint(
                 label="reorder_workflow",
@@ -724,6 +756,9 @@ class WorkflowOperationTools:
 
             if plan:
                 self._builder.current_plan = plan
+
+                # 通知状态机：规划完全替换
+                self._builder.fsm.on_plan_created()
 
                 self._builder.iteration_manager.checkpoint(
                     label="regenerate_plan",
@@ -866,6 +901,9 @@ class WorkflowOperationTools:
                             "reason": str(agent_error),
                         }
                     )
+
+            # 通知状态机：Agents 全量生成完成
+            self._builder.fsm.on_agents_generated()
 
             self._builder.iteration_manager.checkpoint(
                 label="generate_agents",
@@ -1033,6 +1071,9 @@ class WorkflowOperationTools:
                         )
                     except Exception as cb_error:
                         logger.warning(f"进度回调执行失败: {cb_error}")
+
+                # 通知状态机：Agent 被重新生成
+                self._builder.fsm.on_agent_regenerated(target_spec.name)
 
                 # 创建检查点
                 self._builder.iteration_manager.checkpoint(
@@ -1305,6 +1346,12 @@ class WorkflowOperationTools:
                 f"（已合并来自 {source_checkpoint_label} 的 {len(added_names)} 个 Agent）"
             ).strip()
 
+            # 通知状态机：规划被修改（合并新增 specs）
+            merged_spec_names = [
+                a.get("name", "") for a in agents_to_add if a.get("name")
+            ]
+            self._builder.fsm.on_plan_modified(added_specs=merged_spec_names)
+
             # 6. 创建检查点
             self._builder.iteration_manager.checkpoint(
                 label=f"merge_plans_{source_checkpoint_label}",
@@ -1379,6 +1426,9 @@ class WorkflowOperationTools:
             if plan:
                 # 4. 更新状态
                 self._builder.current_plan = plan
+
+                # 通知状态机：规划完全替换
+                self._builder.fsm.on_plan_created()
 
                 # 5. 创建检查点
                 self._builder.iteration_manager.checkpoint(
@@ -1543,6 +1593,9 @@ class WorkflowOperationTools:
             if workflow:
                 self._builder.draft_workflow = workflow
 
+                # 通知状态机：工作流组装完成
+                self._builder.fsm.on_workflow_assembled()
+
                 self._builder.iteration_manager.checkpoint(
                     label="assemble_workflow",
                     stage=self._builder.current_stage,
@@ -1566,7 +1619,10 @@ class WorkflowOperationTools:
 
     async def approve_current_state(self) -> OperationResult:
         """
-        批准当前状态，进入下一阶段
+        批准当前状态，进入下一阶段。
+
+        由 BuilderStateMachine.resolve_approve() 决定实际执行什么操作，
+        而非硬编码基于 InteractionStage 的 if-elif 分支。
 
         Returns:
             操作结果
@@ -1574,13 +1630,14 @@ class WorkflowOperationTools:
         if not self._ensure_builder():
             return OperationResult(success=False, message="没有可批准的内容")
 
-        from .interactive_builder import InteractionStage
-
-        current_stage = self._builder.current_stage
+        from .interactive_builder import ApproveAction
 
         try:
-            if current_stage == InteractionStage.PLAN:
-                # 1. 先发送批准消息（在生成之前）
+            action = self._builder.fsm.resolve_approve()
+            logger.info(f"approve_current_state: FSM resolved action = {action.value}")
+
+            if action == ApproveAction.GENERATE_ALL_AGENTS:
+                # 发送批准消息
                 if self._progress_callback:
                     try:
                         await self._progress_callback(
@@ -1590,15 +1647,11 @@ class WorkflowOperationTools:
                                 "message": "规划已批准，正在生成 Agents...",
                             }
                         )
-                        # 让出事件循环，确保消息能够立即发送到前端
                         await asyncio.sleep(0)
                     except Exception as cb_error:
                         logger.warning(f"批准消息回调执行失败: {cb_error}")
 
-                # 2. 执行生成
                 result = await self.generate_agents_from_plan()
-
-                # 3. 返回最终汇总（不再包含"规划已批准"前缀，因为已经单独发送）
                 if result.success:
                     return OperationResult(
                         success=True,
@@ -1608,8 +1661,60 @@ class WorkflowOperationTools:
                     )
                 return result
 
-            elif current_stage == InteractionStage.AGENT:
-                # 1. 先发送批准消息
+            elif action == ApproveAction.GENERATE_NEW_AGENTS:
+                # 增量生成新增的 Agents
+                if self._progress_callback:
+                    try:
+                        await self._progress_callback(
+                            {
+                                "type": "approval_started",
+                                "stage": "agent",
+                                "message": "正在生成新增的 Agents...",
+                            }
+                        )
+                        await asyncio.sleep(0)
+                    except Exception as cb_error:
+                        logger.warning(f"批准消息回调执行失败: {cb_error}")
+
+                result = await self._generate_incremental_agents()
+                if result.success:
+                    return OperationResult(
+                        success=True,
+                        message=result.message,
+                        data=result.data,
+                        workflow_changed=True,
+                    )
+                return result
+
+            elif action == ApproveAction.REGENERATE_ALL_AGENTS:
+                # 规划大幅变动，全量重新生成
+                if self._progress_callback:
+                    try:
+                        await self._progress_callback(
+                            {
+                                "type": "approval_started",
+                                "stage": "plan",
+                                "message": "规划已变更，正在重新生成所有 Agents...",
+                            }
+                        )
+                        await asyncio.sleep(0)
+                    except Exception as cb_error:
+                        logger.warning(f"批准消息回调执行失败: {cb_error}")
+
+                # 清空现有 agents 再全量生成
+                self._builder.draft_agents.clear()
+                result = await self.generate_agents_from_plan()
+                if result.success:
+                    return OperationResult(
+                        success=True,
+                        message=result.message,
+                        data=result.data,
+                        workflow_changed=True,
+                    )
+                return result
+
+            elif action == ApproveAction.ASSEMBLE_WORKFLOW:
+                # Agents 就绪，组装/重新组装工作流
                 if self._progress_callback:
                     try:
                         await self._progress_callback(
@@ -1619,12 +1724,10 @@ class WorkflowOperationTools:
                                 "message": "Agents 已批准，正在组装工作流...",
                             }
                         )
-                        # 让出事件循环，确保消息能够立即发送到前端
                         await asyncio.sleep(0)
                     except Exception as cb_error:
                         logger.warning(f"批准消息回调执行失败: {cb_error}")
 
-                # 2. 组装工作流
                 result = await self.assemble_workflow()
                 if result.success:
                     return OperationResult(
@@ -1635,8 +1738,8 @@ class WorkflowOperationTools:
                     )
                 return result
 
-            elif current_stage == InteractionStage.WORKFLOW:
-                # 工作流已完成
+            elif action == ApproveAction.CONFIRM_READY:
+                # 一切就绪
                 self._builder.iteration_manager.checkpoint(
                     label="workflow_approved",
                     stage=self._builder.current_stage,
@@ -1649,10 +1752,142 @@ class WorkflowOperationTools:
                     workflow_changed=False,
                 )
 
-            return OperationResult(success=True, message="当前状态已确认")
+            else:  # ApproveAction.NOTHING_TO_DO
+                return OperationResult(success=True, message="当前没有需要确认的内容。")
 
         except Exception as e:
             logger.error(f"批准状态失败: {e}, traceback: {traceback.format_exc()}")
+            return OperationResult(success=False, message=str(e))
+
+    async def _generate_incremental_agents(
+        self, progress_callback: Optional[Callable] = None
+    ) -> OperationResult:
+        """
+        增量生成 Agents —— 仅为 FSM 中标记的新增 specs 生成，不重复生成已有的。
+
+        Returns:
+            操作结果
+        """
+        if not self._ensure_builder() or not self._builder.current_plan:
+            return OperationResult(success=False, message="当前没有工作流规划")
+
+        callback = progress_callback or self._progress_callback
+        new_spec_names = set(self._builder.fsm.new_specs_since_generation)
+
+        if not new_spec_names:
+            return OperationResult(
+                success=True,
+                message="没有需要增量生成的 Agent",
+                workflow_changed=False,
+            )
+
+        try:
+            from .interactive_builder import InteractionStage
+
+            specs_to_generate = [
+                spec
+                for spec in self._builder.current_plan.agent_specs
+                if spec.name in new_spec_names
+            ]
+
+            if not specs_to_generate:
+                return OperationResult(
+                    success=True,
+                    message="没有找到需要生成的 Agent 规格",
+                    workflow_changed=False,
+                )
+
+            generated = []
+            failed = []
+            total = len(specs_to_generate)
+
+            for i, spec in enumerate(specs_to_generate):
+                display_name = spec.display_name or spec.name
+
+                if callback:
+                    try:
+                        await callback(
+                            {
+                                "type": "agent_generation_progress",
+                                "current": i + 1,
+                                "total": total,
+                                "agent_name": spec.name,
+                                "display_name": display_name,
+                                "status": "generating",
+                                "message": f"正在生成 {display_name}...",
+                            }
+                        )
+                        await asyncio.sleep(0)
+                    except Exception as cb_error:
+                        logger.warning(f"进度回调执行失败: {cb_error}")
+
+                full_description = f"Agent名称: {spec.name}\n显示名称: {display_name}\n任务: {spec.task}"
+                if spec.dependencies:
+                    full_description += f"\n依赖: {', '.join(spec.dependencies)}"
+
+                try:
+                    agent = await self.meta_agent.create_agent(
+                        task_description=full_description,
+                        tools=spec.suggested_tools or None,
+                    )
+
+                    if agent:
+                        if not agent.display_name:
+                            agent.display_name = display_name
+                        self._builder.draft_agents.append(agent)
+                        generated.append(spec.name)
+
+                        if callback:
+                            try:
+                                await callback(
+                                    {
+                                        "type": "agent_generation_progress",
+                                        "current": i + 1,
+                                        "total": total,
+                                        "agent_name": agent.name,
+                                        "display_name": agent.display_name,
+                                        "status": "completed",
+                                        "message": f"{agent.display_name} 生成完成",
+                                    }
+                                )
+                                await asyncio.sleep(0)
+                            except Exception as cb_error:
+                                logger.warning(f"进度回调执行失败: {cb_error}")
+                    else:
+                        failed.append(spec.name)
+
+                except Exception as agent_error:
+                    logger.error(f"增量生成 Agent {spec.name} 失败: {agent_error}")
+                    failed.append(spec.name)
+
+            # 通知状态机：增量生成完成
+            if generated:
+                self._builder.fsm.on_incremental_agents_generated(generated)
+
+            self._builder.iteration_manager.checkpoint(
+                label="incremental_generate_agents",
+                stage=self._builder.current_stage,
+                state=self._builder._get_current_state(),
+            )
+
+            message = f"已增量生成 {len(generated)} 个 Agent"
+            if failed:
+                message += f"（{len(failed)} 个失败）"
+
+            return OperationResult(
+                success=len(generated) > 0,
+                message=message,
+                data={
+                    "generated": generated,
+                    "failed": failed,
+                },
+                workflow_changed=True,
+            )
+
+        except Exception as e:
+            logger.error(
+                f"增量生成 Agent 失败: {e}, traceback: {traceback.format_exc()}"
+            )
             return OperationResult(success=False, message=str(e))
 
     async def rollback_to_checkpoint(
@@ -1727,6 +1962,20 @@ class WorkflowOperationTools:
 
         if not self._builder.draft_workflow:
             return OperationResult(success=False, message="没有可保存的工作流定义")
+
+        # FSM 前置校验：确保工作流不是过期的
+        fsm = self._builder.fsm
+        if not fsm.can_save:
+            if fsm.needs_agent_generation:
+                return OperationResult(
+                    success=False,
+                    message="有新增或变更的 Agent 尚未生成，请先说'确认'来生成后再保存。",
+                )
+            if fsm.needs_workflow_assembly:
+                return OperationResult(
+                    success=False,
+                    message="Agent 已变更，工作流需要重新组装后才能保存。请先说'确认'来重新组装。",
+                )
 
         try:
             from pathlib import Path as FilePath
@@ -2661,6 +2910,10 @@ class WorkflowOperationTools:
             except (ValueError, IndexError):
                 # 如果版本号格式不正确，使用默认递增
                 agent.version = "1.0.1"
+
+            # 通知状态机：Agent 被修改
+            if self._builder:
+                self._builder.fsm.on_agent_regenerated(agent_name)
 
             display_name = agent.display_name or agent.name
             return OperationResult(

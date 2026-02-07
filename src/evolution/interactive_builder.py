@@ -24,6 +24,7 @@ from typing import (
     List,
     Optional,
     Protocol,
+    Set,
     Union,
     runtime_checkable,
 )
@@ -70,6 +71,358 @@ class InteractionLevel(str, Enum):
     MINIMAL = "minimal"  # 只在关键节点征求意见
     MODERATE = "moderate"  # 每个 Agent 生成后征求意见
     COMPREHENSIVE = "comprehensive"  # 每步都征求意见
+
+
+class ArtifactStatus(str, Enum):
+    """制品层状态 —— 用于三层脏标记状态机"""
+
+    ABSENT = "absent"  # 尚未创建
+    CURRENT = "current"  # 已创建且是最新的
+    STALE = "stale"  # 已创建但依赖项已变更，需要重新生成
+
+
+class ApproveAction(str, Enum):
+    """'确认/批准' 操作在当前上下文下的实际语义"""
+
+    GENERATE_ALL_AGENTS = "generate_all_agents"
+    GENERATE_NEW_AGENTS = "generate_new_agents"
+    REGENERATE_ALL_AGENTS = "regenerate_all_agents"
+    ASSEMBLE_WORKFLOW = "assemble_workflow"
+    CONFIRM_READY = "confirm_ready"
+    NOTHING_TO_DO = "nothing_to_do"
+
+
+@dataclass
+class BuilderStateMachine:
+    """
+    工作流构建状态机 —— 基于分层脏标记
+
+    核心理念：三层制品（Plan → Agents → Workflow）各自有独立状态，
+    下层变更自动传播 "脏标记" 到上层。
+
+    使用方式：
+      - 所有改变构建状态的操作，完成后调用对应的 on_xxx() 事件
+      - 查询 needs_agent_generation / needs_workflow_assembly 等属性决定下一步
+      - resolve_approve() 统一解析 "确认" 指令的实际语义
+    """
+
+    # ── 三层制品状态 ──
+    plan_status: ArtifactStatus = ArtifactStatus.ABSENT
+    agents_status: ArtifactStatus = ArtifactStatus.ABSENT
+    workflow_status: ArtifactStatus = ArtifactStatus.ABSENT
+
+    # ── 版本追踪（用于精确判断是否过期）──
+    plan_version: int = 0
+    agents_version: int = 0
+    workflow_version: int = 0
+    agents_based_on_plan_version: int = 0
+    workflow_based_on_agents_version: int = 0
+
+    # ── 细粒度变更追踪 ──
+    new_specs_since_generation: Set[str] = field(default_factory=set)
+    removed_specs_since_generation: Set[str] = field(default_factory=set)
+    modified_agents_since_assembly: Set[str] = field(default_factory=set)
+
+    # ── 执行状态 ──
+    is_executing: bool = False
+    is_paused: bool = False
+
+    # ═══════════════════════════════════════════════════
+    #  状态变更事件（所有状态转移都通过这些方法）
+    # ═══════════════════════════════════════════════════
+
+    def on_plan_created(self) -> None:
+        """规划首次创建或完全替换（regenerate_plan / iterate_plan）"""
+        self.plan_status = ArtifactStatus.CURRENT
+        self.plan_version += 1
+        # 全新规划 → 清空增量追踪
+        self.new_specs_since_generation.clear()
+        self.removed_specs_since_generation.clear()
+        # 上层自动失效
+        self._invalidate_agents()
+        self._invalidate_workflow()
+
+    def on_plan_modified(
+        self,
+        added_specs: Optional[List[str]] = None,
+        removed_specs: Optional[List[str]] = None,
+    ) -> None:
+        """规划被局部修改（add/remove/modify agent spec, modify deps 等）"""
+        self.plan_version += 1
+        self.plan_status = ArtifactStatus.CURRENT
+
+        if added_specs:
+            self.new_specs_since_generation.update(added_specs)
+        if removed_specs:
+            self.removed_specs_since_generation.update(removed_specs)
+
+        # 脏标记向上传播
+        if self.agents_status == ArtifactStatus.CURRENT:
+            self.agents_status = ArtifactStatus.STALE
+        if self.workflow_status == ArtifactStatus.CURRENT:
+            self.workflow_status = ArtifactStatus.STALE
+
+    def on_agents_generated(self) -> None:
+        """全量生成 Agents 完成（generate_agents_from_plan）"""
+        self.agents_version += 1
+        self.agents_status = ArtifactStatus.CURRENT
+        self.agents_based_on_plan_version = self.plan_version
+        self.new_specs_since_generation.clear()
+        self.removed_specs_since_generation.clear()
+        # workflow 失效
+        self._invalidate_workflow()
+
+    def on_agent_regenerated(self, agent_name: str) -> None:
+        """单个 Agent 被重新生成或更新"""
+        self.agents_version += 1
+        self.modified_agents_since_assembly.add(agent_name)
+        # 从 "新增未生成" 集合中移除（如果存在）
+        self.new_specs_since_generation.discard(agent_name)
+        # workflow 需要重新组装
+        if self.workflow_status == ArtifactStatus.CURRENT:
+            self.workflow_status = ArtifactStatus.STALE
+
+    def on_incremental_agents_generated(self, spec_names: List[str]) -> None:
+        """增量生成了部分 Agents（仅新增的 specs）"""
+        self.agents_version += 1
+        for name in spec_names:
+            self.new_specs_since_generation.discard(name)
+
+        # 如果所有增量都已处理完，恢复 agents 为 current
+        if (
+            not self.new_specs_since_generation
+            and not self.removed_specs_since_generation
+        ):
+            self.agents_status = ArtifactStatus.CURRENT
+            self.agents_based_on_plan_version = self.plan_version
+
+        if self.workflow_status == ArtifactStatus.CURRENT:
+            self.workflow_status = ArtifactStatus.STALE
+
+    def on_workflow_assembled(self) -> None:
+        """工作流组装完成"""
+        self.workflow_version += 1
+        self.workflow_status = ArtifactStatus.CURRENT
+        self.workflow_based_on_agents_version = self.agents_version
+        self.modified_agents_since_assembly.clear()
+
+    def on_workflow_saved(self) -> None:
+        """工作流已保存（不改变构建状态）"""
+        pass
+
+    def on_execution_started(self) -> None:
+        self.is_executing = True
+        self.is_paused = False
+
+    def on_execution_completed(self) -> None:
+        self.is_executing = False
+        self.is_paused = False
+
+    def on_execution_paused(self) -> None:
+        self.is_paused = True
+
+    def on_execution_resumed(self) -> None:
+        self.is_paused = False
+
+    # ═══════════════════════════════════════════════════
+    #  查询接口
+    # ═══════════════════════════════════════════════════
+
+    @property
+    def needs_agent_generation(self) -> bool:
+        """是否需要（重新）生成 Agents"""
+        return self.agents_status in (ArtifactStatus.ABSENT, ArtifactStatus.STALE)
+
+    @property
+    def needs_workflow_assembly(self) -> bool:
+        """是否需要（重新）组装工作流"""
+        return self.workflow_status in (ArtifactStatus.ABSENT, ArtifactStatus.STALE)
+
+    @property
+    def can_save(self) -> bool:
+        """工作流是否处于可保存状态"""
+        return self.workflow_status == ArtifactStatus.CURRENT
+
+    @property
+    def can_execute(self) -> bool:
+        """工作流是否处于可执行状态"""
+        return self.workflow_status == ArtifactStatus.CURRENT and not self.is_executing
+
+    @property
+    def has_pending_changes(self) -> bool:
+        """是否有未落地的变更"""
+        return (
+            self.agents_status == ArtifactStatus.STALE
+            or self.workflow_status == ArtifactStatus.STALE
+            or bool(self.new_specs_since_generation)
+        )
+
+    def get_available_actions(self) -> List[str]:
+        """根据当前状态返回所有可用操作"""
+        actions: List[str] = []
+
+        if self.plan_status == ArtifactStatus.ABSENT:
+            return ["create_plan"]
+
+        # Plan 层操作：只要 plan 存在就可以修改
+        actions.extend(
+            [
+                "add_agent_to_plan",
+                "remove_agent_from_plan",
+                "modify_agent_spec",
+                "modify_dependencies",
+                "iterate_plan",
+            ]
+        )
+
+        # Agents 层操作
+        if self.needs_agent_generation:
+            actions.append("generate_agents")
+        if self.agents_status != ArtifactStatus.ABSENT:
+            actions.extend(["regenerate_agent", "update_agent_definition"])
+
+        # Workflow 层操作
+        if self.agents_status == ArtifactStatus.CURRENT:
+            if self.needs_workflow_assembly:
+                actions.append("assemble_workflow")
+        if self.can_save:
+            actions.append("save_workflow")
+        if self.can_execute:
+            actions.append("execute_workflow")
+
+        # 通用操作
+        actions.extend(["rollback", "get_status"])
+
+        return actions
+
+    def resolve_approve(self) -> "ApproveAction":
+        """
+        核心方法：解析 "确认/批准" 指令在当前上下文下的语义。
+
+        替代原来 approve_current_state 中基于 InteractionStage 的 if-elif 分支。
+        """
+        # 优先级 1：plan 刚建好，agents 尚未生成
+        if (
+            self.plan_status == ArtifactStatus.CURRENT
+            and self.agents_status == ArtifactStatus.ABSENT
+        ):
+            return ApproveAction.GENERATE_ALL_AGENTS
+
+        # 优先级 2：plan 局部修改，只有新增的 spec 没生成
+        if (
+            self.new_specs_since_generation
+            and self.agents_status == ArtifactStatus.STALE
+        ):
+            return ApproveAction.GENERATE_NEW_AGENTS
+
+        # 优先级 3：agents 是 stale（plan 大幅变动），需要全量重生成
+        if self.agents_status == ArtifactStatus.STALE:
+            return ApproveAction.REGENERATE_ALL_AGENTS
+
+        # 优先级 4：agents 是 current 但 workflow 需要（重新）组装
+        if (
+            self.agents_status == ArtifactStatus.CURRENT
+            and self.needs_workflow_assembly
+        ):
+            return ApproveAction.ASSEMBLE_WORKFLOW
+
+        # 优先级 5：一切就绪
+        if self.workflow_status == ArtifactStatus.CURRENT:
+            return ApproveAction.CONFIRM_READY
+
+        return ApproveAction.NOTHING_TO_DO
+
+    def describe_pending(self) -> str:
+        """生成面向用户的待处理事项描述"""
+        pending: List[str] = []
+        if self.new_specs_since_generation:
+            names = ", ".join(self.new_specs_since_generation)
+            pending.append(f"新增的 Agent（{names}）尚需生成")
+        if self.removed_specs_since_generation:
+            names = ", ".join(self.removed_specs_since_generation)
+            pending.append(f"已删除的 Agent（{names}）需清理")
+        if self.modified_agents_since_assembly:
+            names = ", ".join(self.modified_agents_since_assembly)
+            pending.append(f"已修改的 Agent（{names}）需重新组装工作流")
+        if self.needs_workflow_assembly and not self.modified_agents_since_assembly:
+            pending.append("工作流需要重新组装")
+        if self.needs_agent_generation and not self.new_specs_since_generation:
+            pending.append("Agents 需要重新生成")
+
+        if pending:
+            return "待处理：" + "；".join(pending) + "。说'确认'可自动处理。"
+        return ""
+
+    # ═══════════════════════════════════════════════════
+    #  序列化 / 反序列化
+    # ═══════════════════════════════════════════════════
+
+    def to_dict(self) -> Dict[str, Any]:
+        """序列化为字典（用于 checkpoint 存储）"""
+        return {
+            "plan_status": self.plan_status.value,
+            "agents_status": self.agents_status.value,
+            "workflow_status": self.workflow_status.value,
+            "plan_version": self.plan_version,
+            "agents_version": self.agents_version,
+            "workflow_version": self.workflow_version,
+            "agents_based_on_plan_version": self.agents_based_on_plan_version,
+            "workflow_based_on_agents_version": self.workflow_based_on_agents_version,
+            "new_specs_since_generation": list(self.new_specs_since_generation),
+            "removed_specs_since_generation": list(self.removed_specs_since_generation),
+            "modified_agents_since_assembly": list(self.modified_agents_since_assembly),
+            "is_executing": self.is_executing,
+            "is_paused": self.is_paused,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BuilderStateMachine":
+        """从字典反序列化"""
+        return cls(
+            plan_status=ArtifactStatus(data.get("plan_status", "absent")),
+            agents_status=ArtifactStatus(data.get("agents_status", "absent")),
+            workflow_status=ArtifactStatus(data.get("workflow_status", "absent")),
+            plan_version=data.get("plan_version", 0),
+            agents_version=data.get("agents_version", 0),
+            workflow_version=data.get("workflow_version", 0),
+            agents_based_on_plan_version=data.get("agents_based_on_plan_version", 0),
+            workflow_based_on_agents_version=data.get(
+                "workflow_based_on_agents_version", 0
+            ),
+            new_specs_since_generation=set(data.get("new_specs_since_generation", [])),
+            removed_specs_since_generation=set(
+                data.get("removed_specs_since_generation", [])
+            ),
+            modified_agents_since_assembly=set(
+                data.get("modified_agents_since_assembly", [])
+            ),
+            is_executing=data.get("is_executing", False),
+            is_paused=data.get("is_paused", False),
+        )
+
+    @classmethod
+    def init_from_loaded(cls) -> "BuilderStateMachine":
+        """从数据库加载工作流后，初始化 FSM 到全部就绪状态"""
+        return cls(
+            plan_status=ArtifactStatus.CURRENT,
+            agents_status=ArtifactStatus.CURRENT,
+            workflow_status=ArtifactStatus.CURRENT,
+            plan_version=1,
+            agents_version=1,
+            workflow_version=1,
+            agents_based_on_plan_version=1,
+            workflow_based_on_agents_version=1,
+        )
+
+    # ── 内部辅助方法 ──
+
+    def _invalidate_agents(self) -> None:
+        if self.agents_status == ArtifactStatus.CURRENT:
+            self.agents_status = ArtifactStatus.STALE
+
+    def _invalidate_workflow(self) -> None:
+        if self.workflow_status == ArtifactStatus.CURRENT:
+            self.workflow_status = ArtifactStatus.STALE
 
 
 @dataclass
@@ -185,9 +538,23 @@ class BuilderState:
     current_stage: InteractionStage
     plan: Optional[Dict[str, Any]]
     iteration_count: int
+    fsm_state: Optional[Dict[str, Any]] = None  # BuilderStateMachine 的序列化状态
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = {
+            "draft_agents": self.draft_agents,
+            "draft_workflow": self.draft_workflow,
+            "current_stage": (
+                self.current_stage.value
+                if isinstance(self.current_stage, Enum)
+                else self.current_stage
+            ),
+            "plan": self.plan,
+            "iteration_count": self.iteration_count,
+        }
+        if self.fsm_state is not None:
+            result["fsm_state"] = self.fsm_state
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "BuilderState":
@@ -197,6 +564,7 @@ class BuilderState:
             current_stage=InteractionStage(data.get("current_stage", "plan")),
             plan=data.get("plan"),
             iteration_count=data.get("iteration_count", 0),
+            fsm_state=data.get("fsm_state"),
         )
 
 
@@ -961,6 +1329,9 @@ class InteractiveWorkflowBuilder:
         self.task_description: str = ""
         self.current_stage: InteractionStage = InteractionStage.PLAN
 
+        # 分层脏标记状态机（与 current_stage 并行运行，逐步替代）
+        self.fsm: BuilderStateMachine = BuilderStateMachine()
+
         # 已加载的数据库 ID（用于判断是更新还是新建）
         self.loaded_workflow_db_id: Optional[str] = None  # 已加载工作流的数据库 ID
         self.loaded_agent_db_ids: Dict[str, str] = {}  # agent_id -> 数据库 ID 映射
@@ -989,6 +1360,7 @@ class InteractiveWorkflowBuilder:
             current_stage=self.current_stage,
             plan=self.current_plan.to_dict() if self.current_plan else None,
             iteration_count=len(self.iteration_manager.iterations),
+            fsm_state=self.fsm.to_dict(),
         )
 
     async def start_interactive_session(
@@ -1897,6 +2269,24 @@ class InteractiveWorkflowBuilder:
                 estimated_steps=state.plan["estimated_steps"],
                 notes=state.plan.get("notes"),
             )
+
+        # 恢复 FSM 状态
+        if state.fsm_state:
+            self.fsm = BuilderStateMachine.from_dict(state.fsm_state)
+        else:
+            # 向后兼容：从旧的 current_stage 推导 FSM 状态
+            self.fsm = BuilderStateMachine()
+            if state.plan:
+                self.fsm.plan_status = ArtifactStatus.CURRENT
+                self.fsm.plan_version = 1
+            if state.draft_agents:
+                self.fsm.agents_status = ArtifactStatus.CURRENT
+                self.fsm.agents_version = 1
+                self.fsm.agents_based_on_plan_version = 1
+            if state.draft_workflow:
+                self.fsm.workflow_status = ArtifactStatus.CURRENT
+                self.fsm.workflow_version = 1
+                self.fsm.workflow_based_on_agents_version = 1
 
     def get_session_summary(self) -> Dict[str, Any]:
         """获取会话摘要"""

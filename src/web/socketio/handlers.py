@@ -491,6 +491,10 @@ class SocketIOHandler:
                     ops.builder.draft_agents = loaded_agents
                     # ========== 关键：设置 current_stage 为 WORKFLOW ==========
                     ops.builder.current_stage = InteractionStage.WORKFLOW
+                    # 初始化 FSM 到全部就绪状态
+                    from src.evolution.interactive_builder import BuilderStateMachine
+
+                    ops.builder.fsm = BuilderStateMachine.init_from_loaded()
                     # 保存数据库 ID 用于后续更新
                     ops.builder.loaded_workflow_db_id = workflow_detail.id
                     ops.builder.loaded_agent_db_ids = loaded_agent_db_ids
@@ -498,6 +502,7 @@ class SocketIOHandler:
                     # 初始化构建器
                     from src.evolution.interactive_builder import (
                         InteractiveWorkflowBuilder,
+                        BuilderStateMachine,
                     )
 
                     ops._builder = InteractiveWorkflowBuilder(
@@ -508,6 +513,8 @@ class SocketIOHandler:
                     ops._builder.draft_workflow = workflow
                     ops._builder.draft_agents = loaded_agents
                     ops._builder.current_stage = InteractionStage.WORKFLOW
+                    # 初始化 FSM 到全部就绪状态
+                    ops._builder.fsm = BuilderStateMachine.init_from_loaded()
                     ops._builder.loaded_workflow_db_id = workflow_detail.id
                     ops._builder.loaded_agent_db_ids = loaded_agent_db_ids
 
@@ -960,6 +967,8 @@ class SocketIOHandler:
                 ops = self.builder.operations
                 if ops.builder:
                     ops.builder.draft_agents.append(agent_def)
+                    # 通知 FSM：Agent 被添加（类似 regenerate）
+                    ops.builder.fsm.on_agent_regenerated(agent_def.name)
                     if not hasattr(ops.builder, "loaded_agent_db_ids"):
                         ops.builder.loaded_agent_db_ids = {}
                     ops.builder.loaded_agent_db_ids[agent_def.agent_id] = target_id

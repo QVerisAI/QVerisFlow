@@ -691,6 +691,21 @@ class ConversationalWorkflowBuilder:
             "availableModels": self._get_available_models(),  # 可用模型列表
         }
 
+        # 注入 FSM 状态（前端可用于显示脏标记提示、启用/禁用按钮等）
+        fsm = self.operations.fsm
+        if fsm:
+            state["fsm"] = {
+                "plan_status": fsm.plan_status.value,
+                "agents_status": fsm.agents_status.value,
+                "workflow_status": fsm.workflow_status.value,
+                "can_save": fsm.can_save,
+                "can_execute": fsm.can_execute,
+                "has_pending_changes": fsm.has_pending_changes,
+                "pending_generation": list(fsm.new_specs_since_generation),
+                "modified_since_assembly": list(fsm.modified_agents_since_assembly),
+            }
+            state["available_actions"] = fsm.get_available_actions()
+
         # 获取已生成的 draft_agents (完整的 AgentDefinition)
         draft_agents = self.operations.get_draft_agents()
         draft_agent_map = {}

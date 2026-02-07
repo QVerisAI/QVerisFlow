@@ -771,48 +771,47 @@ class DialogueAgent:
                 workflow_changed=False,
             )
 
+    # ── 意图匹配正则模式（替代精确关键词列表）──
+    _INTENT_PATTERNS = {
+        "approve": [
+            r"^(确认|批准|同意|通过|可以|好的?|行|ok|是的?|没问题|对)$",
+            r"(确认|批准).*(规划|agents?|工作流|智能体|所有|生成|组装)",
+            r"(开始|请).*(生成|组装)",
+            r"^(看起来不错|就这样|就按这个|生成agents?|生成 agents?|批准生成|开始生成)$",
+        ],
+        "execute": [
+            r"^(执行|运行|开始执行|试试看效果|执行工作流|运行工作流|跑一下|run|execute)$",
+        ],
+        "save": [
+            r"(保存|存一下|save|先保存)",
+        ],
+        "rollback": [
+            r"(回滚|撤销|撤回|回退|undo)",
+        ],
+    }
+
     async def _handle_direct_command(
         self, user_message: str
     ) -> Optional[DialogueResponse]:
         """
         直接处理关键命令，绕过 LLM 解释
 
-        对于批准/确认等关键操作，直接调用对应工具，确保可靠执行
+        使用正则意图匹配（替代精确关键词列表），确保更宽泛的表述也能命中。
+        实际执行语义由 FSM (BuilderStateMachine) 决定。
 
         Returns:
             如果是直接命令则返回 DialogueResponse，否则返回 None
         """
+        import re
+
         msg = user_message.strip().lower()
+        intent = self._classify_intent(msg)
 
-        # 批准/确认命令 - 直接调用 approve_current_state
-        approval_keywords = [
-            "确认",
-            "确认规划",
-            "确认agents",
-            "确认 agents",
-            "确认工作流",
-            "批准",
-            "批准规划",
-            "批准生成",
-            "开始生成",
-            "生成agents",
-            "生成 agents",
-            "ok",
-            "好的",
-            "可以",
-            "同意",
-            "通过",
-            "是的",
-            "对",
-            "行",
-            "看起来不错",
-        ]
-
-        if msg in approval_keywords:
-            logger.info(f"直接处理批准命令: {user_message}")
+        # 批准/确认命令 - 由 FSM 驱动的 approve_current_state
+        if intent == "approve":
+            logger.info(f"直接处理批准命令（意图匹配）: {user_message}")
             result = await self.ops.approve_current_state()
 
-            # 添加到对话历史
             self.conversation_history.append({"role": "user", "content": user_message})
             self.conversation_history.append(
                 {"role": "assistant", "content": result.message}
@@ -825,42 +824,26 @@ class DialogueAgent:
             )
 
         # 执行命令
-        execution_keywords = [
-            "执行",
-            "执行工作流",
-            "运行",
-            "运行工作流",
-            "开始执行",
-            "试试看效果",
-        ]
-        if msg in execution_keywords:
-            logger.info(f"直接处理执行命令: {user_message}")
+        if intent == "execute":
+            logger.info(f"直接处理执行命令（意图匹配）: {user_message}")
 
-            # 先记录用户消息
             self.conversation_history.append({"role": "user", "content": user_message})
 
-            # 执行工作流（执行过程中的状态更新通过 event_callback 实时推送）
             result = await self.ops.execute_workflow()
 
-            # ========== 关键修复 ==========
-            # 不再发送 "工作流执行完成" 消息，因为 workflow_completed 事件已经通过
-            # _handle_execution_event 发送了完成消息。返回空消息避免重复。
-            # 只记录到对话历史，不返回给用户显示。
             self.conversation_history.append(
                 {"role": "assistant", "content": result.message}
             )
 
-            # 返回空消息（所有状态更新已通过执行事件推送）
             return DialogueResponse(
-                message="",  # 不发送消息，避免与 workflow_completed 事件重复
+                message="",
                 workflow_changed=result.workflow_changed,
                 suggested_actions=["暂停", "停止"] if result.success else [],
             )
 
         # 保存命令
-        save_keywords = ["保存", "保存工作流", "先保存下来"]
-        if msg in save_keywords:
-            logger.info(f"直接处理保存命令: {user_message}")
+        if intent == "save":
+            logger.info(f"直接处理保存命令（意图匹配）: {user_message}")
             result = await self.ops.save_workflow()
 
             self.conversation_history.append({"role": "user", "content": user_message})
@@ -874,8 +857,7 @@ class DialogueAgent:
             )
 
         # 回滚命令
-        rollback_keywords = ["回滚", "撤销", "撤回"]
-        if msg in rollback_keywords:
+        if intent == "rollback":
             logger.info(f"直接处理回滚命令: {user_message}")
             result = await self.ops.rollback_to_checkpoint()
 
@@ -1076,20 +1058,38 @@ class DialogueAgent:
         # 不是直接命令，返回 None 继续 LLM 处理
         return None
 
-    def _get_suggested_actions_for_stage(self) -> List[str]:
-        """根据当前阶段返回建议操作（自然语言，最多 3 个）"""
-        stage = self.ops.get_current_stage()
-        max_actions = 3
+    def _classify_intent(self, msg: str) -> Optional[str]:
+        """
+        将用户消息分类为意图（使用正则宽松匹配）。
 
-        if stage == "plan":
-            actions = ["看起来不错", "我想调整一下", "重新生成"]
-        elif stage == "agent":
-            actions = ["看起来不错", "我想调整一下", "重新生成"]
-        elif stage == "workflow":
-            actions = ["试试看效果", "先保存下来", "我想调整一下"]
-        else:
+        Returns:
+            意图字符串（"approve", "execute", "save", "rollback"）或 None
+        """
+        import re
+
+        for intent, patterns in self._INTENT_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, msg):
+                    return intent
+        return None
+
+    def _get_suggested_actions_for_stage(self) -> List[str]:
+        """根据 FSM 状态返回建议操作（自然语言，最多 3 个）"""
+        from .interactive_builder import ArtifactStatus
+
+        fsm = self.ops.fsm
+        if fsm is None:
             return []
-        return actions[:max_actions]
+
+        if fsm.needs_agent_generation:
+            return ["确认生成 Agents", "我想调整规划", "重新生成"]
+        if fsm.needs_workflow_assembly:
+            return ["确认组装工作流", "我想调整 Agent", "重新生成"]
+        if fsm.can_execute:
+            return ["试试看效果", "先保存下来", "我想调整一下"]
+        if fsm.plan_status == ArtifactStatus.CURRENT:
+            return ["看起来不错", "我想调整一下", "重新生成"]
+        return []
 
     def _build_messages(self, user_message: str) -> List[Dict[str, str]]:
         """构建消息列表"""
@@ -1118,9 +1118,23 @@ class DialogueAgent:
         """构建丰富的上下文信息，包含完整规划详情、Agent 信息和检查点历史"""
         parts = []
 
-        # 1. 当前阶段
+        # 1. 当前阶段 + FSM 状态
         stage = self.ops.get_current_stage()
-        parts.append(f"## 当前阶段: {stage}")
+        fsm = self.ops.fsm
+        if fsm:
+            parts.append(
+                f"## 构建状态\n"
+                f"Plan: {fsm.plan_status.value} (v{fsm.plan_version}) | "
+                f"Agents: {fsm.agents_status.value} (v{fsm.agents_version}) | "
+                f"Workflow: {fsm.workflow_status.value} (v{fsm.workflow_version})"
+            )
+            pending = fsm.describe_pending()
+            if pending:
+                parts.append(f">>> {pending}")
+            available = fsm.get_available_actions()
+            parts.append(f"可用操作: {', '.join(available)}")
+        else:
+            parts.append(f"## 当前阶段: {stage}")
 
         # 2. 完整规划信息（不截断）
         plan = self.ops.get_current_plan()
