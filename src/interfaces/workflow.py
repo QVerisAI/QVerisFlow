@@ -12,6 +12,7 @@ class WorkflowStatus(Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -116,6 +117,32 @@ class IWorkflowEngine(ABC):
 
         Returns:
             是否成功取消
+        """
+        ...
+
+    @abstractmethod
+    async def pause(self, workflow_id: str) -> bool:
+        """
+        暂停工作流执行
+
+        Args:
+            workflow_id: 工作流 ID
+
+        Returns:
+            是否成功暂停
+        """
+        ...
+
+    @abstractmethod
+    async def resume_execution(self, workflow_id: str) -> bool:
+        """
+        恢复已暂停的工作流执行
+
+        Args:
+            workflow_id: 工作流 ID
+
+        Returns:
+            是否成功恢复
         """
         ...
 

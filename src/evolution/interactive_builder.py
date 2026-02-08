@@ -123,10 +123,6 @@ class BuilderStateMachine:
     removed_specs_since_generation: Set[str] = field(default_factory=set)
     modified_agents_since_assembly: Set[str] = field(default_factory=set)
 
-    # ── 执行状态 ──
-    is_executing: bool = False
-    is_paused: bool = False
-
     # ═══════════════════════════════════════════════════
     #  状态变更事件（所有状态转移都通过这些方法）
     # ═══════════════════════════════════════════════════
@@ -210,20 +206,6 @@ class BuilderStateMachine:
         """工作流已保存（不改变构建状态）"""
         pass
 
-    def on_execution_started(self) -> None:
-        self.is_executing = True
-        self.is_paused = False
-
-    def on_execution_completed(self) -> None:
-        self.is_executing = False
-        self.is_paused = False
-
-    def on_execution_paused(self) -> None:
-        self.is_paused = True
-
-    def on_execution_resumed(self) -> None:
-        self.is_paused = False
-
     # ═══════════════════════════════════════════════════
     #  查询接口
     # ═══════════════════════════════════════════════════
@@ -245,8 +227,8 @@ class BuilderStateMachine:
 
     @property
     def can_execute(self) -> bool:
-        """工作流是否处于可执行状态"""
-        return self.workflow_status == ArtifactStatus.CURRENT and not self.is_executing
+        """工作流是否处于可执行状态（仅检查构建状态，执行状态由 ExecutionFSM 管理）"""
+        return self.workflow_status == ArtifactStatus.CURRENT
 
     @property
     def has_pending_changes(self) -> bool:
@@ -371,8 +353,6 @@ class BuilderStateMachine:
             "new_specs_since_generation": list(self.new_specs_since_generation),
             "removed_specs_since_generation": list(self.removed_specs_since_generation),
             "modified_agents_since_assembly": list(self.modified_agents_since_assembly),
-            "is_executing": self.is_executing,
-            "is_paused": self.is_paused,
         }
 
     @classmethod
@@ -396,8 +376,6 @@ class BuilderStateMachine:
             modified_agents_since_assembly=set(
                 data.get("modified_agents_since_assembly", [])
             ),
-            is_executing=data.get("is_executing", False),
-            is_paused=data.get("is_paused", False),
         )
 
     @classmethod

@@ -36,6 +36,12 @@ from ..interfaces.workflow import (
     IWorkflowResult,
     WorkflowStatus,
 )
+from .execution_fsm import (
+    ExecutionFSM,
+    ExecutionState,
+    ExecutionEvent,
+    InvalidTransitionError,
+)
 from ..utils.safe_eval import safe_eval_condition, safe_eval_expression
 from .events import (
     ExecutionEventType,
@@ -243,10 +249,9 @@ class WorkflowEngine(IWorkflowEngine):
         # 应用层工作流配置（从 app_config.yaml 加载）
         self._app_workflow_config = app_workflow_config or {}
 
-        # 运行中的工作流
-        self._running_workflows: Dict[str, WorkflowStatus] = {}
+        # 运行中的工作流状态（通过 FSM 管理）
+        self._execution_fsms: Dict[str, ExecutionFSM] = {}
         self._workflow_results: Dict[str, WorkflowResult] = {}
-        self._cancel_flags: Dict[str, bool] = {}
 
         # 工作流定义缓存（用于恢复）
         self._workflow_definitions: Dict[str, WorkflowDefinition] = {}
@@ -255,10 +260,6 @@ class WorkflowEngine(IWorkflowEngine):
         self._llm_client_cache: Dict[str, Any] = {}
 
         # === 流式执行支持 ===
-        # 暂停标志: workflow_id -> bool
-        self._pause_flags: Dict[str, bool] = {}
-        # 暂停事件: workflow_id -> asyncio.Event
-        self._pause_events: Dict[str, asyncio.Event] = {}
         # 跳过节点: workflow_id -> Set[node_id]
         self._skip_nodes: Dict[str, Set[str]] = {}
         # 节点输入修改: workflow_id -> {node_id: new_input}
@@ -343,6 +344,11 @@ class WorkflowEngine(IWorkflowEngine):
 
         logger.info(f"开始执行工作流: {workflow_id}")
 
+        # 创建 FSM 并启动
+        fsm = ExecutionFSM(workflow_id)
+        self._execution_fsms[workflow_id] = fsm
+        fsm.transition_sync(ExecutionEvent.START)
+
         # 初始化结果
         result = WorkflowResult(
             workflow_id=workflow_id,
@@ -350,9 +356,7 @@ class WorkflowEngine(IWorkflowEngine):
             started_at=started_at.isoformat(),
         )
 
-        self._running_workflows[workflow_id] = WorkflowStatus.RUNNING
         self._workflow_results[workflow_id] = result
-        self._cancel_flags[workflow_id] = False
 
         try:
             # 验证工作流（检查循环依赖）
@@ -408,11 +412,20 @@ class WorkflowEngine(IWorkflowEngine):
             )
 
             for node_index, node_id in enumerate(execution_order):
-                # 检查取消标志
-                if self._cancel_flags.get(workflow_id):
+                # 检查取消标志（通过 FSM）
+                if fsm.state == ExecutionState.CANCELLED:
                     result.status = WorkflowStatus.CANCELLED
                     result.error = "工作流被取消"
                     break
+
+                # 检查暂停标志（通过 FSM）— 非流式路径也支持暂停
+                if fsm.state == ExecutionState.PAUSED:
+                    await fsm.pause_event.wait()
+                    # 唤醒后检查是否在暂停期间被取消
+                    if fsm.state == ExecutionState.CANCELLED:
+                        result.status = WorkflowStatus.CANCELLED
+                        result.error = "工作流被取消"
+                        break
 
                 node = self._get_node(workflow_definition, node_id)
                 if not node:
@@ -506,6 +519,18 @@ class WorkflowEngine(IWorkflowEngine):
             logger.exception(f"工作流 {workflow_id} 执行异常")
 
         finally:
+            # 更新 FSM 到终态（如果尚未到达终态）
+            if not fsm.is_terminal:
+                if result.status == WorkflowStatus.COMPLETED:
+                    fsm.transition_sync(ExecutionEvent.COMPLETE)
+                elif result.status == WorkflowStatus.FAILED:
+                    fsm.transition_sync(ExecutionEvent.FAIL)
+                elif result.status == WorkflowStatus.CANCELLED:
+                    try:
+                        fsm.transition_sync(ExecutionEvent.STOP)
+                    except InvalidTransitionError:
+                        pass  # 可能已经被外部取消
+
             # 清理
             completed_at = datetime.now()
             result.completed_at = completed_at.isoformat()
@@ -513,12 +538,7 @@ class WorkflowEngine(IWorkflowEngine):
                 completed_at - started_at
             ).total_seconds() * 1000
 
-            self._running_workflows[workflow_id] = result.status
             self._workflow_results[workflow_id] = result
-
-            # 清理取消标志
-            if workflow_id in self._cancel_flags:
-                del self._cancel_flags[workflow_id]
 
         logger.info(
             f"工作流 {workflow_id} 执行完成: {result.status.value}, "
@@ -529,13 +549,13 @@ class WorkflowEngine(IWorkflowEngine):
 
     async def cancel(self, workflow_id: str) -> bool:
         """取消工作流执行"""
-        if workflow_id in self._running_workflows:
-            if self._running_workflows[workflow_id] == WorkflowStatus.RUNNING:
-                self._cancel_flags[workflow_id] = True
-                # 如果工作流被暂停，需要唤醒它才能取消
-                if workflow_id in self._pause_events:
-                    self._pause_events[workflow_id].set()
+        fsm = self._execution_fsms.get(workflow_id)
+        if fsm and fsm.can_transition(ExecutionEvent.STOP):
+            try:
+                await fsm.transition(ExecutionEvent.STOP)
                 return True
+            except InvalidTransitionError:
+                return False
         return False
 
     # ========== 流式执行支持 ==========
@@ -564,14 +584,16 @@ class WorkflowEngine(IWorkflowEngine):
 
         logger.info(f"开始流式执行工作流: {workflow_id}")
 
+        # 创建 FSM 并启动
+        fsm = ExecutionFSM(workflow_id)
+        self._execution_fsms[workflow_id] = fsm
+        fsm.transition_sync(ExecutionEvent.START)
+
         # 注册事件回调
         if event_callback:
             self._event_callbacks[workflow_id] = event_callback
 
         # 初始化控制状态
-        self._pause_flags[workflow_id] = False
-        self._pause_events[workflow_id] = asyncio.Event()
-        self._pause_events[workflow_id].set()  # 初始非暂停状态
         self._skip_nodes[workflow_id] = set()
         self._modified_inputs[workflow_id] = {}
         self._injected_context[workflow_id] = {}
@@ -597,9 +619,7 @@ class WorkflowEngine(IWorkflowEngine):
             started_at=started_at.isoformat(),
         )
 
-        self._running_workflows[workflow_id] = WorkflowStatus.RUNNING
         self._workflow_results[workflow_id] = result
-        self._cancel_flags[workflow_id] = False
 
         # Initialize variables before try block so they're accessible in finally
         context: Dict[str, Any] = {
@@ -626,8 +646,8 @@ class WorkflowEngine(IWorkflowEngine):
             total_nodes = len(execution_order)
 
             for node_id in execution_order:
-                # 检查取消标志
-                if self._cancel_flags.get(workflow_id):
+                # 检查取消标志（通过 FSM）
+                if fsm.state == ExecutionState.CANCELLED:
                     result.status = WorkflowStatus.CANCELLED
                     result.error = "工作流被取消"
 
@@ -687,8 +707,8 @@ class WorkflowEngine(IWorkflowEngine):
                     )
                     break
 
-                # 检查暂停标志
-                if self._pause_flags.get(workflow_id):
+                # 检查暂停标志（通过 FSM）
+                if fsm.state == ExecutionState.PAUSED:
                     await self._emit_event(
                         workflow_id,
                         {
@@ -697,8 +717,14 @@ class WorkflowEngine(IWorkflowEngine):
                             "timestamp": datetime.now().isoformat(),
                         },
                     )
-                    # 等待恢复
-                    await self._pause_events[workflow_id].wait()
+                    # 等待恢复（或取消）
+                    await fsm.pause_event.wait()
+                    # 关键修复：唤醒后先检查是否在暂停期间被取消
+                    # 避免先发 workflow_resumed 再发 workflow_cancelled 的事件闪烁
+                    if fsm.state == ExecutionState.CANCELLED:
+                        result.status = WorkflowStatus.CANCELLED
+                        result.error = "工作流在暂停期间被取消"
+                        break
                     await self._emit_event(
                         workflow_id,
                         {
@@ -870,6 +896,18 @@ class WorkflowEngine(IWorkflowEngine):
             logger.exception(f"工作流 {workflow_id} 执行异常")
 
         finally:
+            # 更新 FSM 到终态（如果尚未到达终态）
+            if not fsm.is_terminal:
+                if result.status == WorkflowStatus.COMPLETED:
+                    fsm.transition_sync(ExecutionEvent.COMPLETE)
+                elif result.status == WorkflowStatus.FAILED:
+                    fsm.transition_sync(ExecutionEvent.FAIL)
+                elif result.status == WorkflowStatus.CANCELLED:
+                    try:
+                        fsm.transition_sync(ExecutionEvent.STOP)
+                    except InvalidTransitionError:
+                        pass  # 可能已经被外部取消
+
             # 清理
             completed_at = datetime.now()
             result.completed_at = completed_at.isoformat()
@@ -877,7 +915,6 @@ class WorkflowEngine(IWorkflowEngine):
                 completed_at - started_at
             ).total_seconds() * 1000
 
-            self._running_workflows[workflow_id] = result.status
             self._workflow_results[workflow_id] = result
 
             # 构建节点结果列表（用于前端持久化显示）
@@ -1180,7 +1217,6 @@ class WorkflowEngine(IWorkflowEngine):
         "success",
         "verification_score",
         "iterations",
-        "output_files",
     }
 
     def _extract_user_facing_output(self, output: Any) -> Any:
@@ -1208,6 +1244,9 @@ class WorkflowEngine(IWorkflowEngine):
                 # 保留 data_format 字段，供前端报告渲染使用
                 if result.get("data_format"):
                     user_output["data_format"] = result["data_format"]
+                # 保留 output_files 字段，供前端展示完整的输出文件列表
+                if result.get("output_files"):
+                    user_output["output_files"] = result["output_files"]
                 return user_output
             # 否则返回整个 result（已经是用户数据）
             return result
@@ -1287,26 +1326,12 @@ class WorkflowEngine(IWorkflowEngine):
 
         return str(output)[:80]
 
-    def _cleanup_streaming_state(self, workflow_id: str, force: bool = False) -> None:
-        """清理流式执行状态
+    def _cleanup_streaming_state(self, workflow_id: str) -> None:
+        """清理流式执行的辅助状态（FSM 本身保留用于后续查询）
 
         Args:
             workflow_id: 工作流 ID
-            force: 是否强制清理（即使处于暂停状态）
         """
-        # 如果处于暂停状态且非强制，保留暂停相关状态以支持恢复
-        is_paused = self._pause_flags.get(workflow_id, False)
-
-        if workflow_id in self._cancel_flags:
-            del self._cancel_flags[workflow_id]
-
-        # 暂停状态下保留 _pause_flags 和 _pause_events 以支持恢复
-        if force or not is_paused:
-            if workflow_id in self._pause_flags:
-                del self._pause_flags[workflow_id]
-            if workflow_id in self._pause_events:
-                del self._pause_events[workflow_id]
-
         if workflow_id in self._skip_nodes:
             del self._skip_nodes[workflow_id]
         if workflow_id in self._modified_inputs:
@@ -1328,18 +1353,16 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否成功
         """
-        if workflow_id not in self._running_workflows:
+        fsm = self._execution_fsms.get(workflow_id)
+        if not fsm or not fsm.can_transition(ExecutionEvent.PAUSE):
             return False
 
-        if self._running_workflows[workflow_id] != WorkflowStatus.RUNNING:
+        try:
+            await fsm.transition(ExecutionEvent.PAUSE)
+            logger.info(f"工作流 {workflow_id} 已暂停")
+            return True
+        except InvalidTransitionError:
             return False
-
-        self._pause_flags[workflow_id] = True
-        if workflow_id in self._pause_events:
-            self._pause_events[workflow_id].clear()
-
-        logger.info(f"工作流 {workflow_id} 已暂停")
-        return True
 
     async def resume_execution(self, workflow_id: str) -> bool:
         """
@@ -1351,16 +1374,16 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否成功
         """
-        # 检查暂停标志是否存在且为 True
-        if not self._pause_flags.get(workflow_id, False):
+        fsm = self._execution_fsms.get(workflow_id)
+        if not fsm or not fsm.can_transition(ExecutionEvent.RESUME):
             return False
 
-        self._pause_flags[workflow_id] = False
-        if workflow_id in self._pause_events:
-            self._pause_events[workflow_id].set()
-
-        logger.info(f"工作流 {workflow_id} 已恢复")
-        return True
+        try:
+            await fsm.transition(ExecutionEvent.RESUME)
+            logger.info(f"工作流 {workflow_id} 已恢复")
+            return True
+        except InvalidTransitionError:
+            return False
 
     def is_paused(self, workflow_id: str) -> bool:
         """
@@ -1372,7 +1395,8 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否处于暂停状态
         """
-        return self._pause_flags.get(workflow_id, False)
+        fsm = self._execution_fsms.get(workflow_id)
+        return fsm.is_paused if fsm else False
 
     def is_running(self, workflow_id: str) -> bool:
         """
@@ -1384,7 +1408,20 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否正在运行
         """
-        return self._running_workflows.get(workflow_id) == WorkflowStatus.RUNNING
+        fsm = self._execution_fsms.get(workflow_id)
+        return fsm.is_running if fsm else False
+
+    def get_fsm(self, workflow_id: str) -> Optional[ExecutionFSM]:
+        """
+        获取指定工作流的执行状态机
+
+        Args:
+            workflow_id: 工作流 ID
+
+        Returns:
+            ExecutionFSM 实例，如果不存在则返回 None
+        """
+        return self._execution_fsms.get(workflow_id)
 
     async def skip_node(self, workflow_id: str, node_id: str) -> bool:
         """
@@ -1397,7 +1434,8 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否成功
         """
-        if workflow_id not in self._running_workflows:
+        fsm = self._execution_fsms.get(workflow_id)
+        if not fsm or fsm.is_terminal:
             return False
 
         if workflow_id not in self._skip_nodes:
@@ -1421,7 +1459,8 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否成功
         """
-        if workflow_id not in self._running_workflows:
+        fsm = self._execution_fsms.get(workflow_id)
+        if not fsm or fsm.is_terminal:
             return False
 
         if workflow_id not in self._modified_inputs:
@@ -1442,7 +1481,8 @@ class WorkflowEngine(IWorkflowEngine):
         Returns:
             是否成功
         """
-        if workflow_id not in self._running_workflows:
+        fsm = self._execution_fsms.get(workflow_id)
+        if not fsm or fsm.is_terminal:
             return False
 
         if workflow_id not in self._injected_context:
@@ -1454,7 +1494,19 @@ class WorkflowEngine(IWorkflowEngine):
 
     async def get_status(self, workflow_id: str) -> WorkflowStatus:
         """获取工作流状态"""
-        return self._running_workflows.get(workflow_id, WorkflowStatus.PENDING)
+        fsm = self._execution_fsms.get(workflow_id)
+        if not fsm:
+            return WorkflowStatus.PENDING
+        # Map ExecutionState to WorkflowStatus
+        state_map = {
+            ExecutionState.IDLE: WorkflowStatus.PENDING,
+            ExecutionState.RUNNING: WorkflowStatus.RUNNING,
+            ExecutionState.PAUSED: WorkflowStatus.PAUSED,
+            ExecutionState.COMPLETED: WorkflowStatus.COMPLETED,
+            ExecutionState.FAILED: WorkflowStatus.FAILED,
+            ExecutionState.CANCELLED: WorkflowStatus.CANCELLED,
+        }
+        return state_map.get(fsm.state, WorkflowStatus.PENDING)
 
     async def resume(
         self, workflow_id: str, checkpoint_id: Optional[str] = None
@@ -1492,6 +1544,11 @@ class WorkflowEngine(IWorkflowEngine):
                     workflow_id=workflow_id,
                 )
 
+        # 创建 FSM 并启动
+        fsm = ExecutionFSM(workflow_id)
+        self._execution_fsms[workflow_id] = fsm
+        fsm.transition_sync(ExecutionEvent.START)
+
         # 恢复执行状态
         started_at = datetime.now()
         result = WorkflowResult(
@@ -1501,9 +1558,7 @@ class WorkflowEngine(IWorkflowEngine):
             started_at=started_at.isoformat(),
         )
 
-        self._running_workflows[workflow_id] = WorkflowStatus.RUNNING
         self._workflow_results[workflow_id] = result
-        self._cancel_flags[workflow_id] = False
 
         try:
             # 恢复上下文和节点输出
@@ -1521,10 +1576,19 @@ class WorkflowEngine(IWorkflowEngine):
 
             nodes_executed = 0
             for node_id in execution_order:
-                if self._cancel_flags.get(workflow_id):
+                # 检查取消标志（通过 FSM）
+                if fsm.state == ExecutionState.CANCELLED:
                     result.status = WorkflowStatus.CANCELLED
                     result.error = "工作流被取消"
                     break
+
+                # 检查暂停标志（通过 FSM）
+                if fsm.state == ExecutionState.PAUSED:
+                    await fsm.pause_event.wait()
+                    if fsm.state == ExecutionState.CANCELLED:
+                        result.status = WorkflowStatus.CANCELLED
+                        result.error = "工作流在暂停期间被取消"
+                        break
 
                 node = self._get_node(workflow_def, node_id)
                 if not node:
@@ -1600,17 +1664,25 @@ class WorkflowEngine(IWorkflowEngine):
             logger.exception(f"工作流 {workflow_id} 恢复执行异常")
 
         finally:
+            # 更新 FSM 到终态（如果尚未到达终态）
+            if not fsm.is_terminal:
+                if result.status == WorkflowStatus.COMPLETED:
+                    fsm.transition_sync(ExecutionEvent.COMPLETE)
+                elif result.status == WorkflowStatus.FAILED:
+                    fsm.transition_sync(ExecutionEvent.FAIL)
+                elif result.status == WorkflowStatus.CANCELLED:
+                    try:
+                        fsm.transition_sync(ExecutionEvent.STOP)
+                    except InvalidTransitionError:
+                        pass
+
             completed_at = datetime.now()
             result.completed_at = completed_at.isoformat()
             result.total_duration_ms = (
                 completed_at - started_at
             ).total_seconds() * 1000
 
-            self._running_workflows[workflow_id] = result.status
             self._workflow_results[workflow_id] = result
-
-            if workflow_id in self._cancel_flags:
-                del self._cancel_flags[workflow_id]
 
         logger.info(f"工作流 {workflow_id} 恢复执行完成: {result.status.value}")
         return result

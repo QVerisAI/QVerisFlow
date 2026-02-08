@@ -81,8 +81,7 @@ class WorkflowOperationTools:
         # 失败的 Agent 列表（用于支持重新生成）
         self._failed_agents: List[Dict[str, Any]] = []
 
-        # 执行状态
-        self._is_executing = False
+        # 执行状态（实际状态由 WorkflowEngine 的 ExecutionFSM 管理）
         self._execution_task = None
         self._current_workflow_id: Optional[str] = None  # 当前执行的工作流 ID
 
@@ -2258,13 +2257,11 @@ class WorkflowOperationTools:
                     await self._progress_callback(event)
 
             # 使用流式执行
-            self._is_executing = True
             result = await self._workflow_engine.execute_with_streaming(
                 workflow_definition=self._builder.draft_workflow,
                 initial_context=params or {},
                 event_callback=event_callback,
             )
-            self._is_executing = False
 
             # WorkflowResult 是一个 dataclass，需要正确访问其属性
             # 构建详细的结果数据，包含 execution_id 用于前端查询
@@ -2304,7 +2301,6 @@ class WorkflowOperationTools:
             )
 
         except Exception as e:
-            self._is_executing = False
             # 通知执行失败
             if self._progress_callback:
                 await self._progress_callback(
@@ -2319,7 +2315,7 @@ class WorkflowOperationTools:
 
     async def pause_execution(self) -> OperationResult:
         """暂停执行"""
-        if not self._is_executing or not self._current_workflow_id:
+        if not self._current_workflow_id or not self._is_workflow_active():
             return OperationResult(success=False, message="没有正在执行的工作流")
 
         if self._workflow_engine:
@@ -2364,86 +2360,14 @@ class WorkflowOperationTools:
 
         if self._workflow_engine:
             workflow_id = self._current_workflow_id
-            # 设置取消标志
-            self._workflow_engine._cancel_flags[workflow_id] = True
-            self._is_executing = False
-
-            # 构建当前已完成节点的结果数据（用于前端持久化显示）
-            node_results_data = {}
-            current_result = self._workflow_engine._workflow_results.get(workflow_id)
-            if current_result and current_result.node_results:
-                # 尝试获取工作流定义以获取节点名称
-                # workflow_id 格式为 "{workflow_definition_id}_{uuid}"
-                base_workflow_id = (
-                    workflow_id.rsplit("_", 1)[0] if "_" in workflow_id else workflow_id
+            # 通过 engine.cancel() 走 FSM 标准路径
+            success = await self._workflow_engine.cancel(workflow_id)
+            if success:
+                logger.info(f"工作流已停止: {workflow_id}")
+                return OperationResult(
+                    success=True, message="工作流已停止执行。当前执行已被取消。"
                 )
-                workflow_def = self._workflow_engine._workflow_definitions.get(
-                    base_workflow_id
-                )
-                node_name_map = {}
-                if workflow_def:
-                    node_name_map = {
-                        node.node_id: node.name for node in workflow_def.nodes
-                    }
-
-                for nid, nr in current_result.node_results.items():
-                    # 从节点输出中提取摘要信息
-                    output_summary, output_narrative, output_highlights = (
-                        self._workflow_engine._extract_narrative_fields(
-                            nr.output if isinstance(nr.output, dict) else None
-                        )
-                    )
-                    output_preview = self._workflow_engine._truncate_output(
-                        nr.output, max_length=100
-                    )
-                    if isinstance(output_preview, dict):
-                        output_preview = str(output_preview)[:100]
-                    node_results_data[nid] = {
-                        "node_name": node_name_map.get(nid, nid),
-                        "status": nr.status,
-                        "duration_ms": nr.duration_ms,
-                        "output": nr.output,
-                        "output_preview": output_preview,
-                        "output_summary": output_summary,
-                        "output_narrative": output_narrative,
-                        "output_highlights": output_highlights,
-                        "error": nr.error,
-                    }
-
-            # 立即发送取消事件，让前端及时更新状态
-            # 包含当前已完成的节点结果，用于持久化显示
-            await self._workflow_engine._emit_event(
-                workflow_id,
-                {
-                    "event_type": "workflow_cancelled",
-                    "workflow_id": workflow_id,
-                    "timestamp": datetime.now().isoformat(),
-                    "data": {
-                        "status": "cancelled",
-                        "node_results": node_results_data,
-                        "total_duration_ms": (
-                            current_result.total_duration_ms if current_result else 0
-                        ),
-                        "nodes_completed": len(
-                            [
-                                r
-                                for r in node_results_data.values()
-                                if r.get("status") == "success"
-                            ]
-                        ),
-                        "total_nodes": len(node_results_data),
-                    },
-                },
-            )
-
-            # 如果工作流被暂停，唤醒它以便能够终止
-            if workflow_id in self._workflow_engine._pause_events:
-                self._workflow_engine._pause_events[workflow_id].set()
-
-            logger.info(f"工作流已停止: {workflow_id}")
-            return OperationResult(
-                success=True, message="工作流已停止执行。当前执行已被取消。"
-            )
+            return OperationResult(success=False, message="停止失败，工作流可能已结束")
         return OperationResult(success=False, message="工作流引擎未初始化")
 
     async def skip_node(self, node_id: Optional[str] = None) -> OperationResult:
@@ -2453,7 +2377,7 @@ class WorkflowOperationTools:
         Args:
             node_id: 要跳过的节点 ID，如果不指定则尝试跳过当前正在等待的节点
         """
-        if not self._is_executing or not self._current_workflow_id:
+        if not self._current_workflow_id or not self._is_workflow_active():
             return OperationResult(success=False, message="没有正在执行的工作流")
 
         if not self._workflow_engine:
@@ -2491,7 +2415,7 @@ class WorkflowOperationTools:
         Args:
             context: 要注入的上下文数据（键值对）
         """
-        if not self._is_executing or not self._current_workflow_id:
+        if not self._current_workflow_id or not self._is_workflow_active():
             return OperationResult(success=False, message="没有正在执行的工作流")
 
         if not self._workflow_engine:
@@ -2756,8 +2680,51 @@ class WorkflowOperationTools:
                     try:
                         with open(output_file, "r", encoding="utf-8") as f:
                             node_detail["output"] = json.load(f)
-                    except:
+                    except Exception:
                         pass
+
+                # 扫描 output 目录中的附加文件（.md 报告等）
+                # Agent 的正式输出产物在 output/ 目录下，result.json 可能仅包含摘要，
+                # 附加文件（如 .md 报告）往往包含最完整的分析内容
+                output_dir = node_workspace / "output"
+                if output_dir.exists():
+                    additional_files = []
+                    try:
+                        for fp in sorted(output_dir.iterdir()):
+                            if not fp.is_file() or fp.name == "result.json":
+                                continue
+                            file_info = {
+                                "filename": fp.name,
+                                "path": str(fp.relative_to(node_workspace)),
+                                "size_bytes": fp.stat().st_size,
+                                "type": fp.suffix.lstrip("."),
+                            }
+                            # 文本类文件嵌入内容（上限 500KB）
+                            if (
+                                fp.suffix
+                                in (
+                                    ".md",
+                                    ".txt",
+                                    ".csv",
+                                    ".json",
+                                    ".html",
+                                    ".xml",
+                                    ".yaml",
+                                    ".yml",
+                                )
+                                and fp.stat().st_size < 500_000
+                            ):
+                                try:
+                                    file_info["content"] = fp.read_text(
+                                        encoding="utf-8"
+                                    )
+                                except Exception:
+                                    pass
+                            additional_files.append(file_info)
+                    except OSError:
+                        pass
+                    if additional_files:
+                        node_detail["output_files"] = additional_files
 
                 node_results[node_id] = node_detail
 
@@ -3019,14 +2986,24 @@ class WorkflowOperationTools:
             ckpt.to_dict() for ckpt in self._builder.iteration_manager.get_checkpoints()
         ]
 
+    def _is_workflow_active(self) -> bool:
+        """检查当前工作流是否处于活跃状态（运行中或暂停中），通过 FSM 查询"""
+        if not self._workflow_engine or not self._current_workflow_id:
+            return False
+        return self._workflow_engine.is_running(
+            self._current_workflow_id
+        ) or self._workflow_engine.is_paused(self._current_workflow_id)
+
     def get_execution_status(self) -> Dict[str, Any]:
-        """获取执行状态"""
+        """获取执行状态（委托给 WorkflowEngine 的 FSM）"""
+        is_executing = False
         is_paused = False
         if self._workflow_engine and self._current_workflow_id:
+            is_executing = self._workflow_engine.is_running(self._current_workflow_id)
             is_paused = self._workflow_engine.is_paused(self._current_workflow_id)
 
         return {
-            "is_executing": self._is_executing,
+            "is_executing": is_executing or is_paused,  # 活跃中（运行或暂停）
             "is_paused": is_paused,
             "current_workflow_id": self._current_workflow_id,
             "has_workflow": self._builder and self._builder.draft_workflow is not None,
