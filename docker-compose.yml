@@ -1,10 +1,32 @@
+# ===========================================
+# QVerisFlow Docker Compose 配置
+# ===========================================
+#
+# 使用方式:
+#
+# 1. 仅启动基础设施（裸机部署 bare-metal 模式）:
+#    docker compose up -d postgres redis minio minio-init
+#
+# 2. 全量 Docker 部署（应用 + 基础设施）:
+#    docker compose --profile app up -d
+#
+# 3. 仅启动特定服务:
+#    docker compose up -d postgres    # 仅 PostgreSQL
+#    docker compose up -d redis       # 仅 Redis
+#    docker compose up -d minio       # 仅 MinIO
+#
+
 version: '3.8'
 
 services:
+  # =========================================
+  # 基础设施服务（裸机/Docker 模式均可使用）
+  # =========================================
+
   # PostgreSQL 数据库
   postgres:
     image: postgres:15-alpine
-    container_name: agent_framework_postgres
+    container_name: qveris_postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -21,12 +43,12 @@ services:
       retries: 5
     restart: unless-stopped
     networks:
-      - agent_framework_network
+      - qveris_network
 
   # Redis 缓存
   redis:
     image: redis:7-alpine
-    container_name: agent_framework_redis
+    container_name: qveris_redis
     command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
     ports:
       - "${REDIS_PORT:-6379}:6379"
@@ -39,12 +61,12 @@ services:
       retries: 5
     restart: unless-stopped
     networks:
-      - agent_framework_network
+      - qveris_network
 
   # MinIO 对象存储
   minio:
     image: minio/minio:latest
-    container_name: agent_framework_minio
+    container_name: qveris_minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
@@ -61,19 +83,117 @@ services:
       retries: 3
     restart: unless-stopped
     networks:
-      - agent_framework_network
+      - qveris_network
 
   # MinIO 初始化（创建存储桶）
   minio-init:
     image: minio/mc:latest
-    container_name: agent_framework_minio_init
+    container_name: qveris_minio_init
     depends_on:
       minio:
         condition: service_healthy
     entrypoint: >
       /bin/sh -c " mc alias set myminio http://minio:9000 ${MINIO_ACCESS_KEY:-minioadmin} ${MINIO_SECRET_KEY:-minioadmin}; mc mb myminio/${MINIO_BUCKET:-agent-framework} --ignore-existing; mc anonymous set download myminio/${MINIO_BUCKET:-agent-framework}/public; echo 'MinIO bucket created successfully'; "
     networks:
-      - agent_framework_network
+      - qveris_network
+
+  # =========================================
+  # 应用服务（仅 Docker 部署模式使用）
+  # 通过 --profile app 激活
+  # =========================================
+
+  # 后端 API 服务
+  qveris-api:
+    profiles: [ "app" ]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qveris_api
+    environment:
+      # 部署模式设为 docker，服务间通过容器名通信
+      DEPLOY_MODE: docker
+      # PostgreSQL - 使用容器服务名
+      ENABLE_POSTGRES: ${ENABLE_POSTGRES:-true}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-agent_framework}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # Redis - 使用容器服务名
+      ENABLE_REDIS: ${ENABLE_REDIS:-true}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+      # MinIO - 使用容器服务名
+      ENABLE_OSS: ${ENABLE_OSS:-true}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-agent-framework}
+      MINIO_SECURE: "false"
+      # 本地数据目录（映射到容器内）
+      LOCAL_DATA_DIR: /app/data
+      WORKSPACE_DIR: /app/data/workspaces
+      STORAGE_DIR: /app/data/storage
+      LOG_DIR: /app/data/logs
+      TEMP_DIR: /app/data/temp
+      # LLM API Keys（从宿主机 .env 透传）
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      QWEN_API_KEY: ${QWEN_API_KEY:-}
+      GLM_API_KEY: ${GLM_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      KIMI_API_KEY: ${KIMI_API_KEY:-}
+      MINIMAX_API_KEY: ${MINIMAX_API_KEY:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-kimi-k2.5}
+      # QVeris
+      QVERIS_API_KEY: ${QVERIS_API_KEY:-}
+      QVERIS_BASE_URL: ${QVERIS_BASE_URL:-https://qveris.ai/api/v1}
+      # Web
+      WEB_HOST: "0.0.0.0"
+      WEB_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    volumes:
+      # 持久化本地数据到宿主机
+      - ./data:/app/data
+      # 挂载配置文件（方便修改不重建镜像）
+      - ./config:/app/config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - qveris_network
+
+  # 前端 UI（生产模式，构建后的静态文件由 nginx 提供）
+  qveris-web:
+    profiles: [ "app" ]
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile
+    container_name: qveris_web
+    ports:
+      - "${WEB_UI_PORT:-3000}:80"
+    depends_on:
+      qveris-api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - qveris_network
 
 volumes:
   postgres_data:
@@ -84,5 +204,5 @@ volumes:
     driver: local
 
 networks:
-  agent_framework_network:
+  qveris_network:
     driver: bridge

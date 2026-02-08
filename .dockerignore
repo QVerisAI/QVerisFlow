@@ -1,0 +1,54 @@
+# ===========================================
+# QVerisFlow 后端 .dockerignore
+# ===========================================
+
+# Git
+.git
+.gitignore
+
+# Python
+.venv
+__pycache__
+*.py[codz]
+*.egg-info
+dist/
+build/
+.eggs/
+
+# IDE
+.cursor
+.vscode
+.idea
+*.swp
+*.swo
+
+# 环境配置（通过 docker-compose 环境变量注入）
+.env
+.env.*
+!.env.example
+
+# 测试
+tests/
+pytest.ini
+.pytest_cache/
+htmlcov/
+.coverage
+
+# 文档
+docs/
+*.md
+LICENSE
+
+# 前端（有独立的 Dockerfile）
+web-ui/
+
+# 运行时数据
+data/
+storage/
+workspaces/
+traces/
+
+# 其他
+.DS_Store
+*.log
+node_modules/

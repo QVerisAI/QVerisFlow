@@ -1,0 +1,14 @@
+# ===========================================
+# QVerisFlow 前端 .dockerignore
+# ===========================================
+
+node_modules/
+dist/
+.git
+.gitignore
+*.md
+.vscode
+.cursor
+.DS_Store
+Dockerfile
+.dockerignore
