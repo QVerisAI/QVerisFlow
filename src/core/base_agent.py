@@ -146,9 +146,12 @@ class BaseAgent:
                 final_state = await self.graph.ainvoke(initial_state, config)
                 span.add_event("graph_execution_completed")
 
-                # 写入最终结果
+                # 写入最终结果（丰富 output 文件信息）
                 if final_state.get("result"):
-                    self.workspace.write_result(final_state["result"])
+                    enriched_result = self.workspace.enrich_result_with_output_files(
+                        final_state["result"]
+                    )
+                    self.workspace.write_result(enriched_result)
 
                 # 记录成功指标
                 duration_ms = (datetime.now() - start_time).total_seconds() * 1000

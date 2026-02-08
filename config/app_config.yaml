@@ -146,7 +146,6 @@ models:
       - coding
       - vision
       - long_context
-      - tool_use
     cost_tier: "high"
 
   minimax-m2.1:

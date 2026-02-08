@@ -579,6 +579,10 @@ def main():
         host=args.host,
         port=args.port,
         reload=args.reload,
+        reload_dirs=["src", "config"] if args.reload else None,
+        reload_excludes=(
+            ["data/*", "logs/*", "*.pyc", "__pycache__"] if args.reload else None
+        ),
         workers=args.workers,
         log_level="info",
     )

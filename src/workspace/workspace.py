@@ -171,6 +171,110 @@ class AgentWorkspace:
         with open(result_file, "r", encoding="utf-8") as f:
             return json.load(f)
 
+    # ========== 输出文件丰富 ==========
+
+    # 可嵌入内容的文本类文件后缀
+    _TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json", ".html", ".xml", ".yaml", ".yml"}
+    # 嵌入内容的最大文件大小（500 KB）
+    _MAX_EMBED_SIZE = 500_000
+    # 判断 data 为"仅摘要"时 raw_content 中的文件引用关键词
+    _FILE_REF_KEYWORDS = ("报告路径", "output/", "报告已保存", "已保存至", "已写入")
+
+    def enrich_result_with_output_files(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        扫描 output/ 目录，将非 result.json 的文件元信息注入 result。
+
+        规则:
+        1. 始终在 result 中添加 output_files 元数据列表（文件名、相对路径、大小、类型）
+        2. 如果 result["data"] 只是摘要（仅有 raw_content 键且引用了文件路径），
+           而 output/ 中存在更详细的 .md 文件，则用该文件内容替换 data 字段，
+           并将 data_format 设为 "markdown"
+
+        Args:
+            result: Agent 执行产生的原始 result 字典
+
+        Returns:
+            丰富后的 result 字典（浅拷贝，不修改原始对象）
+        """
+        if not self.output_dir.exists():
+            return result
+
+        # 收集 output/ 下除 result.json 外的文件
+        output_file_infos = []
+        md_files = []  # 单独记录 markdown 文件以便后续替换判断
+
+        try:
+            for fp in sorted(self.output_dir.iterdir()):
+                if not fp.is_file() or fp.name == "result.json":
+                    continue
+
+                file_info: Dict[str, Any] = {
+                    "filename": fp.name,
+                    "path": str(fp.relative_to(self.root)),
+                    "size_bytes": fp.stat().st_size,
+                    "type": fp.suffix.lstrip("."),
+                }
+                output_file_infos.append(file_info)
+
+                if fp.suffix == ".md":
+                    md_files.append(fp)
+        except OSError as e:
+            logger.warning(f"扫描 output 目录失败: {e}")
+            return result
+
+        # 如果没有附加文件，直接返回
+        if not output_file_infos:
+            return result
+
+        # 浅拷贝以避免修改原始 state
+        enriched = dict(result)
+
+        # 1) 添加文件元数据
+        enriched["output_files"] = output_file_infos
+
+        # 2) 判断 data 是否仅为摘要，如果是则用 .md 文件内容替换
+        if md_files:
+            data = enriched.get("data")
+            if self._is_data_summary_only(data):
+                # 选择最大的 .md 文件（通常是最详细的报告）
+                best_md = max(md_files, key=lambda f: f.stat().st_size)
+                try:
+                    if best_md.stat().st_size < self._MAX_EMBED_SIZE:
+                        md_content = best_md.read_text(encoding="utf-8")
+                        enriched["data"] = md_content
+                        enriched["data_format"] = "markdown"
+                        logger.info(
+                            f"已用 {best_md.name} 的内容替换 result.data "
+                            f"(原始 data 仅为摘要，文件 {best_md.stat().st_size} bytes)"
+                        )
+                except OSError as e:
+                    logger.warning(f"读取 md 文件失败: {e}")
+
+        return enriched
+
+    def _is_data_summary_only(self, data: Any) -> bool:
+        """
+        判断 result["data"] 是否仅为摘要性内容。
+
+        保守策略——仅在以下情况返回 True：
+        - data 是 dict 且唯一键为 "raw_content"
+        - 且 raw_content 文本中包含文件引用关键词（表明详细内容写到了文件中）
+        """
+        if not isinstance(data, dict):
+            return False
+
+        # 必须仅有 raw_content 这一个键（或 raw_content + 少量空值键）
+        non_empty_keys = {k for k, v in data.items() if v}
+        if non_empty_keys != {"raw_content"}:
+            return False
+
+        raw_content = data.get("raw_content", "")
+        if not isinstance(raw_content, str):
+            return False
+
+        # 检查是否包含文件引用关键词
+        return any(kw in raw_content for kw in self._FILE_REF_KEYWORDS)
+
     # ========== 草稿管理 ==========
 
     def write_draft(self, content: str, version: Optional[int] = None) -> str:

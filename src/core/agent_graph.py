@@ -556,11 +556,24 @@ class AgentGraphBuilder:
         self.stream_callback: Optional[Any] = None  # Callable[[Dict], Awaitable[None]]
 
         # 获取 LangChain 客户端
-        self.langchain_llm = (
-            llm_client.get_langchain_client()
-            if hasattr(llm_client, "get_langchain_client")
-            else llm_client
-        )
+        # 当 Agent 有工具时，强制禁用 Kimi/Moonshot 的 thinking 模式。
+        # 原因：thinking 模式要求多轮对话中所有 assistant 消息都包含 reasoning_content，
+        # 但 LangChain 在序列化 AIMessage（含 tool_calls）时无法可靠地保留该字段，
+        # 导致 Kimi API 返回 400: "thinking is enabled but reasoning_content is missing"。
+        has_tools = bool(tools)
+        if hasattr(llm_client, "get_langchain_client"):
+            if has_tools:
+                self.langchain_llm = llm_client.get_langchain_client(thinking=False)
+                # 仅在原本启用了 thinking 时打印警告
+                if getattr(llm_client, "thinking", None) is True:
+                    logger.warning(
+                        "⚠️ 检测到 Kimi/Moonshot thinking 模式已启用，但 Agent 有工具绑定。"
+                        "已自动禁用 thinking 模式以避免 reasoning_content 兼容性问题。"
+                    )
+            else:
+                self.langchain_llm = llm_client.get_langchain_client()
+        else:
+            self.langchain_llm = llm_client
 
         # 如果有工具，绑定到 LLM
         if self.tools:

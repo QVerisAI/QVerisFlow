@@ -2,6 +2,12 @@
 
 from .smart_router import SmartRouter, RoutingStrategy
 from .workflow_engine import WorkflowEngine, WorkflowResult, NodeExecutionResult
+from .execution_fsm import (
+    ExecutionFSM,
+    ExecutionState,
+    ExecutionEvent,
+    InvalidTransitionError,
+)
 from .hooks import HooksManager, HookEvent, HookAction, CommonHooks
 from .sub_agent_manager import (
     SubAgentManager,
@@ -19,6 +25,11 @@ __all__ = [
     "WorkflowEngine",
     "WorkflowResult",
     "NodeExecutionResult",
+    # 执行状态机
+    "ExecutionFSM",
+    "ExecutionState",
+    "ExecutionEvent",
+    "InvalidTransitionError",
     # Hooks
     "HooksManager",
     "HookEvent",

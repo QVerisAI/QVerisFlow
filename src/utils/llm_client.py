@@ -238,8 +238,8 @@ class ClientFactory:
             f"🔄 创建全新的 LangChain 客户端（无共享 HTTP 客户端）: {model_name}"
         )
 
-        # 准备额外的模型参数
-        model_kwargs = {}
+        # 准备额外的请求体参数（直接传给 ChatOpenAI 的 extra_body 参数）
+        extra_body = None
 
         # 检查是否为 Kimi/Moonshot 模型
         # Kimi 模型对 thinking 模式和 temperature 有严格要求：
@@ -255,7 +255,7 @@ class ClientFactory:
 
             if enable_thinking:
                 # 启用 thinking 模式
-                model_kwargs["extra_body"] = {
+                extra_body = {
                     "thinking": {"type": "enabled", "budget_tokens": 10000},
                 }
                 # thinking 模式启用时，temperature 必须为 1.0
@@ -265,7 +265,7 @@ class ClientFactory:
                 )
             else:
                 # 禁用 thinking 模式
-                model_kwargs["extra_body"] = {
+                extra_body = {
                     "thinking": {"type": "disabled"},
                 }
                 # thinking 模式禁用时，temperature 必须为 0.6
@@ -287,9 +287,9 @@ class ClientFactory:
             # 这样每个 ChatOpenAI 实例都有自己独立的 HTTP 客户端
         }
 
-        # 只有当 model_kwargs 非空时才传入，避免传入空字典或 None 导致错误
-        if model_kwargs:
-            chat_kwargs["model_kwargs"] = model_kwargs
+        # 直接传递 extra_body 参数，避免通过 model_kwargs 传递引发 UserWarning
+        if extra_body is not None:
+            chat_kwargs["extra_body"] = extra_body
 
         client = ChatOpenAI(**chat_kwargs)
 
@@ -1262,16 +1262,25 @@ class UnifiedLLMClient:
 
     # ===== 向后兼容接口 =====
 
-    def get_langchain_client(self, fresh: bool = True) -> ChatOpenAI:
+    def get_langchain_client(
+        self, fresh: bool = True, thinking: Optional[bool] = None
+    ) -> ChatOpenAI:
         """
         获取 LangChain 客户端
 
         Args:
             fresh: 是否创建新的客户端实例（默认 True，避免状态累积问题）
+            thinking: 覆盖 thinking 模式设置（None=使用实例配置）。
+                      当 Agent 有工具绑定时，建议传入 False 以禁用 thinking 模式，
+                      因为 Kimi thinking 模式要求所有 assistant 消息包含 reasoning_content，
+                      而 LangChain 的多轮工具调用消息无法可靠保留该字段。
 
         Returns:
             ChatOpenAI 客户端实例
         """
+        # 使用覆盖值或实例配置
+        thinking_mode = thinking if thinking is not None else self.thinking
+
         # 根据模型调整参数（处理 moonshot 等特殊模型的限制）
         adjusted_temp, adjusted_max_tokens = self._adjust_params_for_model(
             self.temperature, self.max_tokens
@@ -1289,7 +1298,7 @@ class UnifiedLLMClient:
                 timeout=self.timeout,
                 max_retries=self.max_retries,
                 use_cache=False,  # 禁用 ChatOpenAI 缓存
-                thinking=self.thinking,  # 传递 thinking 参数
+                thinking=thinking_mode,
             )
 
         # 向后兼容：返回缓存的客户端（不推荐）
@@ -1306,7 +1315,7 @@ class UnifiedLLMClient:
             timeout=self.timeout,
             max_retries=self.max_retries,
             use_cache=False,
-            thinking=self.thinking,  # 传递 thinking 参数
+            thinking=thinking_mode,
         )
 
     def get_async_openai_client(self) -> AsyncOpenAI:
