@@ -67,7 +67,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
     # 默认配置
     WEB_HOST=0.0.0.0 \
     WEB_PORT=8000 \
-    LOG_LEVEL=INFO
+    LOG_LEVEL=INFO \
+    LOG_FILE=true \
+    LOG_DIR=/app/data/logs
 
 # 创建数据目录
 RUN mkdir -p /app/data/workspaces /app/data/storage /app/data/logs /app/data/temp /app/data/checkpoints /app/data/traces \

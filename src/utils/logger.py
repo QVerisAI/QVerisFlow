@@ -20,13 +20,22 @@ class LogConfig:
     # 默认格式字符串
     DEFAULT_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - [%(filename)s:%(funcName)s:%(lineno)d] - %(message)s"
 
+    # 默认日志文件名
+    DEFAULT_LOG_FILENAME = "qverisflow.log"
+    DEFAULT_ERROR_LOG_FILENAME = "qverisflow-error.log"
+
     def __init__(self):
         self.level: str = os.getenv("LOG_LEVEL", "INFO")
         self.console_output: bool = os.getenv("LOG_CONSOLE", "true").lower() == "true"
-        self.file_output: bool = os.getenv("LOG_FILE", "false").lower() == "true"
+        self.file_output: bool = os.getenv("LOG_FILE", "true").lower() == "true"
         self.file_path: Optional[str] = os.getenv("LOG_FILE_PATH")
         self.max_file_size: int = int(os.getenv("LOG_MAX_SIZE", "10485760"))  # 10MB
         self.backup_count: int = int(os.getenv("LOG_BACKUP_COUNT", "5"))
+
+        # 自动从 LOG_DIR 派生 file_path（当未显式指定时）
+        if not self.file_path and self.file_output:
+            log_dir = os.getenv("LOG_DIR", "./logs")
+            self.file_path = os.path.join(log_dir, self.DEFAULT_LOG_FILENAME)
 
         # 日志格式：支持 "json" 关键字或自定义格式字符串
         format_value = os.getenv("LOG_FORMAT", "")
@@ -92,9 +101,10 @@ class LoggerManager:
             console_handler.setFormatter(formatter)
             root_logger.addHandler(console_handler)
 
-        # 文件处理器
-        if self.config.file_output and self.config.file_path:
+        # 文件处理器（主日志 + error 日志）
+        if self.config.file_output:
             self._setup_file_handler(root_logger, formatter)
+            self._setup_error_file_handler(root_logger, formatter)
 
     def _create_json_formatter(self) -> logging.Formatter:
         """创建 JSON 格式化器"""
@@ -120,7 +130,7 @@ class LoggerManager:
     def _setup_file_handler(
         self, logger: logging.Logger, formatter: logging.Formatter
     ) -> None:
-        """设置文件处理器"""
+        """设置文件处理器（主日志，记录所有级别）"""
         try:
             log_file = Path(self.config.file_path)
             log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -136,6 +146,30 @@ class LoggerManager:
 
         except Exception as e:
             print(f"⚠️  文件日志设置失败: {e}")
+
+    def _setup_error_file_handler(
+        self, logger: logging.Logger, formatter: logging.Formatter
+    ) -> None:
+        """设置 error 文件处理器（仅记录 WARNING 及以上级别）"""
+        try:
+            error_log = (
+                Path(self.config.file_path).parent
+                / LogConfig.DEFAULT_ERROR_LOG_FILENAME
+            )
+            error_log.parent.mkdir(parents=True, exist_ok=True)
+
+            error_handler = logging.handlers.RotatingFileHandler(
+                error_log,
+                maxBytes=self.config.max_file_size,
+                backupCount=self.config.backup_count,
+                encoding="utf-8",
+            )
+            error_handler.setLevel(logging.WARNING)
+            error_handler.setFormatter(formatter)
+            logger.addHandler(error_handler)
+
+        except Exception as e:
+            print(f"⚠️  Error 文件日志设置失败: {e}")
 
     def get_logger(self, name: str) -> logging.Logger:
         """获取指定名称的日志器"""
@@ -187,23 +221,44 @@ def setup_logging(
     level: str = "INFO",
     file_path: Optional[str] = None,
     console_output: bool = True,
-    file_output: bool = False,
+    file_output: bool = True,
 ) -> None:
     """
     设置日志配置
 
     Args:
         level: 日志级别 (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        file_path: 日志文件路径
+        file_path: 日志文件路径（为 None 时自动从 LOG_DIR 派生）
         console_output: 是否输出到控制台
         file_output: 是否输出到文件
     """
     manager = _get_manager()
     manager.config.level = level
-    manager.config.file_path = file_path
+    if file_path is not None:
+        manager.config.file_path = file_path
     manager.config.console_output = console_output
     manager.config.file_output = file_output
+    # 当启用文件输出但未指定路径时，自动派生
+    if file_output and not manager.config.file_path:
+        log_dir = os.getenv("LOG_DIR", "./logs")
+        manager.config.file_path = os.path.join(log_dir, LogConfig.DEFAULT_LOG_FILENAME)
     manager._setup_root_logger()
+
+
+def setup_uvicorn_logging() -> None:
+    """
+    统一 uvicorn 日志到框架的 handler
+
+    将 uvicorn、uvicorn.error、uvicorn.access 的 handler
+    替换为与 root logger 一致的 handler，使其日志也输出到文件。
+    """
+    root_handlers = logging.getLogger().handlers
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        uv_logger = logging.getLogger(name)
+        uv_logger.handlers.clear()
+        for h in root_handlers:
+            uv_logger.addHandler(h)
+        uv_logger.propagate = False
 
 
 def log_error(error: Exception, context: str = "") -> None:
@@ -240,6 +295,7 @@ def get_module_logger(module_name: str) -> logging.Logger:
 __all__ = [
     "get_logger",
     "setup_logging",
+    "setup_uvicorn_logging",
     "log_error",
     "log_performance",
     "get_module_logger",

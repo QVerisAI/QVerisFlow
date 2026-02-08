@@ -5,11 +5,12 @@ JSON 响应优化工具
 """
 
 import json
-import logging
 import re
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def optimize_json_response(content: str) -> Optional[str]:

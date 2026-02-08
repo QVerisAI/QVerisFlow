@@ -6,6 +6,7 @@ agent_versions/
 versions_example/
 workspaces/
 data/
+logs/
 uv.lock
 node_modules/
 

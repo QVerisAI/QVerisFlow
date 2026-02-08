@@ -27,7 +27,7 @@ try:
 except ImportError:
     raise ImportError("请安装 web 依赖: pip install -e '.[web]'")
 
-from src.utils.logger import get_logger
+from src.utils.logger import get_logger, setup_uvicorn_logging
 
 logger = get_logger()
 
@@ -138,6 +138,8 @@ async def init_dependencies():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    # 统一 uvicorn 日志到框架 handler（使 uvicorn 日志也输出到文件）
+    setup_uvicorn_logging()
     # 启动时初始化
     await init_dependencies()
     yield
@@ -564,7 +566,9 @@ app = create_app()
 def main():
     """命令行入口"""
     import argparse
+    import os
     import uvicorn
+    from src.utils.logger import setup_logging
 
     parser = argparse.ArgumentParser(description="对话式工作流构建器 Web 服务")
     parser.add_argument("--host", default="0.0.0.0", help="监听地址")
@@ -573,6 +577,10 @@ def main():
     parser.add_argument("--workers", type=int, default=1, help="工作进程数")
 
     args = parser.parse_args()
+
+    # 显式初始化文件日志（确保 uvicorn 启动前日志已就绪）
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    setup_logging(level=log_level, file_output=True)
 
     uvicorn.run(
         "src.web.app:app",
@@ -584,7 +592,7 @@ def main():
             ["data/*", "logs/*", "*.pyc", "__pycache__"] if args.reload else None
         ),
         workers=args.workers,
-        log_level="info",
+        log_level=log_level.lower(),
     )
 
 
