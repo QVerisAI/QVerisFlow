@@ -37,6 +37,7 @@ htmlcov/
 # 文档
 docs/
 *.md
+!README.md
 LICENSE
 
 # 前端（有独立的 Dockerfile）

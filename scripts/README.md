@@ -2,6 +2,46 @@
 
 本目录包含开发和运维相关的脚本。
 
+## 部署方式
+
+QVerisFlow 支持两种部署方式：
+
+### 方式一：全 Docker 部署（推荐生产环境）
+
+```bash
+# 一键启动所有服务（包括应用）
+docker compose --profile app up -d
+
+# 查看服务状态
+docker compose --profile app ps
+
+# 查看日志
+docker compose --profile app logs -f qveris-api
+
+# 停止所有服务
+docker compose --profile app down
+```
+
+**说明：**
+- 应用容器启动时会自动初始化数据库表
+- 数据持久化到 `./data` 目录和 Docker volumes
+- 首次启动需要构建镜像，可能需要几分钟
+
+### 方式二：裸机开发（本地开发推荐）
+
+```bash
+# 1. 仅启动基础设施
+docker compose up -d postgres redis minio minio-init
+
+# 2. 初始化数据库
+python scripts/init_db.py
+
+# 3. 启动应用
+./scripts/start_services.sh
+```
+
+---
+
 ## 快速开始
 
 ### 1. 启动开发环境
@@ -88,7 +128,18 @@ python scripts/test_integration.py
 
 ### init_postgres.sql
 
-PostgreSQL 初始化 SQL 脚本，在容器首次启动时自动执行。
+PostgreSQL 初始化 SQL 脚本，在容器首次启动时自动执行。创建必要的扩展和枚举类型。
+
+### docker_entrypoint.sh
+
+Docker 容器启动入口脚本。功能：
+1. 等待依赖服务（PostgreSQL、Redis）就绪
+2. 自动初始化数据库表（如果不存在）
+3. 启动应用
+
+**环境变量：**
+- `SKIP_DB_INIT=true`: 跳过数据库初始化
+- `DB_INIT_TIMEOUT=60`: 等待数据库超时时间（秒）
 
 ## 服务端口
 

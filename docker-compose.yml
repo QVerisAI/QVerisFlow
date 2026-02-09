@@ -16,8 +16,6 @@
 #    docker compose up -d minio       # 仅 MinIO
 #
 
-version: '3.8'
-
 services:
   # =========================================
   # 基础设施服务（裸机/Docker 模式均可使用）
@@ -190,7 +188,7 @@ services:
       dockerfile: Dockerfile
     container_name: qveris_web
     ports:
-      - "${WEB_UI_PORT:-3000}:80"
+      - "${WEB_UI_PORT:-3001}:80"
     depends_on:
       qveris-api:
         condition: service_healthy
