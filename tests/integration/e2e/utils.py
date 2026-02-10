@@ -222,7 +222,7 @@ class TestDataGenerator:
 
     @staticmethod
     def generate_agent_state(iteration: int = 1) -> Dict[str, Any]:
-        """生成 Agent 状态"""
+        """生成智能体状态"""
         return {
             "agent_id": "test_agent",
             "task_id": "test_task",
@@ -318,7 +318,7 @@ class AssertionHelpers:
 
     @staticmethod
     def assert_agent_result_success(result: Dict[str, Any]):
-        """断言 Agent 执行成功"""
+        """断言智能体执行成功"""
         assert result is not None, "Result should not be None"
         assert "success" in result, "Result should have 'success' key"
         assert (
@@ -327,7 +327,7 @@ class AssertionHelpers:
 
     @staticmethod
     def assert_agent_result_failure(result: Dict[str, Any]):
-        """断言 Agent 执行失败"""
+        """断言智能体执行失败"""
         assert result is not None, "Result should not be None"
         assert result.get("success") is False, "Agent should fail"
 

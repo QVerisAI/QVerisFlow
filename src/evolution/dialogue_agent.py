@@ -420,7 +420,7 @@ class DialogueAgent:
                 },
             },
         },
-        # ========== 工作流库和 Agent 库管理工具 ==========
+        # ========== 工作流库和智能体库管理工具 ==========
         {
             "type": "function",
             "function": {
@@ -613,7 +613,7 @@ class DialogueAgent:
             "get_agent_definition": self._handle_get_agent_definition,
             "regenerate_agent": self._handle_regenerate_agent,
             "iterate_plan": self._handle_iterate_plan,
-            # 工作流库和 Agent 库管理
+            # 工作流库和智能体库管理
             "search_workflows": self._handle_search_workflows,
             "load_saved_workflow": self._handle_load_saved_workflow,
             "search_agents": self._handle_search_agents,
@@ -643,7 +643,7 @@ class DialogueAgent:
 - 保存工作流（save_workflow）
 - 执行工作流（execute_workflow）
 
-### 工作流库和 Agent 库管理
+### 工作流库和智能体库管理
 - **搜索工作流（search_workflows）** - 查找已保存的工作流
 - **加载工作流（load_saved_workflow）** - 加载已保存的工作流到当前会话
 - **搜索 Agent（search_agents）** - 查找已保存的 Agent
@@ -695,7 +695,7 @@ class DialogueAgent:
 - 如果当前阶段是 `plan`，需要先批准规划（approve_current_state）
 - 如果当前阶段是 `workflow`，直接执行（execute_workflow）
 
-## 工作流库和 Agent 库使用
+## 工作流库和智能体库使用
 当用户想要查看或使用已保存的工作流和 Agent 时：
 
 **搜索工作流：**
@@ -1912,7 +1912,7 @@ class DialogueAgent:
             include_history=args.get("include_history", True),
         )
 
-    # ========== 工作流库和 Agent 库管理处理器 ==========
+    # ========== 工作流库和智能体库管理处理器 ==========
 
     async def _handle_search_workflows(self, args: Dict[str, Any]) -> OperationResult:
         """搜索已保存的工作流"""

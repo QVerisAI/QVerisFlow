@@ -74,6 +74,23 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def utc_now_iso_z() -> str:
+    """
+    获取当前 UTC 时间的 ISO 格式字符串（带 Z 后缀）
+    
+    用于 WebSocket 消息等需要明确 Z 后缀的场景。
+    格式: "YYYY-MM-DDTHH:MM:SS.sssZ"
+    
+    Returns:
+        str: ISO 格式的时间字符串，例如 "2025-01-01T12:00:00.000Z"
+        
+    Example:
+        >>> timestamp_str = utc_now_iso_z()
+        >>> message['timestamp'] = timestamp_str
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def to_utc_naive(dt: datetime) -> datetime:
     """
     将 datetime 对象转换为 UTC naive datetime
@@ -126,6 +143,7 @@ __all__ = [
     'utc_now_naive',
     'utc_now_aware', 
     'utc_now_iso',
+    'utc_now_iso_z',
     'to_utc_naive',
     'to_utc_aware',
     'utc_now',  # 向后兼容

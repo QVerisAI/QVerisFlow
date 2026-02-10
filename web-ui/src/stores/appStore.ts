@@ -34,6 +34,7 @@ interface AppState {
   updateOrAddProgressMessage: (agentName: string, message: Message) => void;
   updateMessageById: (messageId: string, updates: Partial<Message>) => void;
   clearMessages: () => void;
+  resetConversation: () => void;  // 重置整个对话状态到初始空白状态
   removeMessagesByDataType: (dataType: string) => void;
   // 批量消息操作（用于渐进式加载）
   prependMessagesBatch: (messages: Message[]) => void;  // 头部插入（加载更早的消息）
@@ -84,22 +85,22 @@ interface AppState {
   isLoading: boolean;
   setIsLoading: (loading: boolean) => void;
 
-  // === Agent 生成相关 ===
+  // === 智能体生成相关 ===
 
-  // Agent 生成进度
+  // 智能体生成进度
   generationProgress: GenerationProgress | null;
   setGenerationProgress: (progress: GenerationProgress | null) => void;
 
-  // 选中的 Agent（用于详情面板）
+  // 选中的智能体（用于详情面板）
   selectedAgent: AgentDefinition | null;
   selectedNodeId: string | null;
   setSelectedAgent: (agent: AgentDefinition | null, nodeId?: string | null) => void;
 
-  // Agent 编辑模式
+  // 智能体编辑模式
   isEditingAgent: boolean;
   setIsEditingAgent: (editing: boolean) => void;
 
-  // 更新 Agent 定义
+  // 更新智能体定义
   updateAgentInWorkflow: (agentName: string, updates: Partial<AgentDefinition>) => void;
 
   // === 执行历史 ===
@@ -127,7 +128,7 @@ interface AppState {
   setWorkflowListLoading: (loading: boolean) => void;
   setCurrentWorkflowMeta: (meta: { id: string; workflowId: string; name: string; description: string } | null) => void;
 
-  // === Agent 库 ===
+  // === 智能体库 ===
   agentLibrary: AgentLibraryItem[];
   agentTemplates: AgentLibraryItem[];
   agentLibraryLoading: boolean;
@@ -222,6 +223,27 @@ export const useAppStore = create<AppState>((set) => ({
 
   clearMessages: () => set({ messages: [], hasMoreHistory: false }),
 
+  // 重置整个对话状态到初始空白状态（包含工作流状态、节点状态等）
+  resetConversation: () => set({
+    messages: [],
+    hasMoreHistory: false,
+    workflowState: null,
+    mode: 'idle',
+    highlightedNodes: [],
+    nodeStates: {},
+    realtimeNodeOutputs: {},
+    workflowNodeIdMap: {},
+    checkpoints: [],
+    suggestedActions: [],
+    executionProgress: { nodesCompleted: 0, totalNodes: 0, currentNode: null },
+    generationProgress: null,
+    selectedAgent: null,
+    selectedNodeId: null,
+    isEditingAgent: false,
+    currentWorkflowMeta: null,
+    isLoading: false,
+  }),
+
   // 按 data.type 清理消息（用于加载新工作流时清理旧的工作流卡片消息）
   removeMessagesByDataType: (dataType) => set((state) => ({
     messages: state.messages.filter(m => m.data?.type !== dataType)
@@ -306,13 +328,13 @@ export const useAppStore = create<AppState>((set) => ({
   isLoading: false,
   setIsLoading: (loading) => set({ isLoading: loading }),
 
-  // === Agent 生成相关 ===
+  // === 智能体生成相关 ===
 
-  // Agent 生成进度
+  // 智能体生成进度
   generationProgress: null,
   setGenerationProgress: (progress) => set({ generationProgress: progress }),
 
-  // 选中的 Agent
+  // 选中的智能体
   selectedAgent: null,
   selectedNodeId: null,
   setSelectedAgent: (agent, nodeId = null) => set({
@@ -320,15 +342,15 @@ export const useAppStore = create<AppState>((set) => ({
     selectedNodeId: nodeId,
   }),
 
-  // Agent 编辑模式
+  // 智能体编辑模式
   isEditingAgent: false,
   setIsEditingAgent: (editing) => set({ isEditingAgent: editing }),
 
-  // 更新 Agent 定义
+  // 更新智能体定义
   updateAgentInWorkflow: (agentName, updates) => set((state) => {
     const result: Partial<AppState> = {};
 
-    // 更新 workflowState.agents 列表中对应的 agent
+    // 更新 workflowState.agents 列表中对应的智能体
     if (state.workflowState?.agents) {
       const updatedAgents = state.workflowState.agents.map((agent) => {
         if (agent.name === agentName) {
@@ -342,7 +364,7 @@ export const useAppStore = create<AppState>((set) => ({
       };
     }
 
-    // 如果当前选中的 agent 是要更新的，也更新 selectedAgent
+    // 如果当前选中的智能体是要更新的，也更新 selectedAgent
     if (state.selectedAgent?.name === agentName) {
       result.selectedAgent = { ...state.selectedAgent, ...updates } as AgentDefinition;
     }
@@ -386,7 +408,7 @@ export const useAppStore = create<AppState>((set) => ({
   setWorkflowListLoading: (loading) => set({ workflowListLoading: loading }),
   setCurrentWorkflowMeta: (meta) => set({ currentWorkflowMeta: meta }),
 
-  // === Agent 库 ===
+  // === 智能体库 ===
   agentLibrary: [],
   agentTemplates: [],
   agentLibraryLoading: false,

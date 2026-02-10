@@ -92,7 +92,7 @@ export default function WorkflowInfoCard({ info }: WorkflowInfoCardProps) {
             </div>
             <div>
               <div className="text-lg font-semibold text-slate-800">{info.agent_count}</div>
-              <div className="text-[10px] text-slate-500">Agent 数量</div>
+              <div className="text-[10px] text-slate-500">智能体数量</div>
             </div>
           </div>
 

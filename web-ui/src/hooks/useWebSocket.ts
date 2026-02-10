@@ -1195,14 +1195,14 @@ export function useWebSocket() {
       })));
     }, 'hook_checkpoint');
 
-    // Agent 生成进度
+    // 智能体生成进度
     const unsubGenerationProgress = wsService.on(WSMessageType.AGENT_GENERATION_PROGRESS, (msg) => {
       // 过滤过期的进度消息（超过 5 分钟）
       const msgTime = new Date(msg.timestamp).getTime();
       const now = Date.now();
       const MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟
       if (now - msgTime > MAX_AGE_MS) {
-        console.log('[WS] 忽略过期的 Agent 生成进度:', msg.timestamp);
+        console.log('[WS] 忽略过期的智能体生成进度:', msg.timestamp);
         return;
       }
 
@@ -1224,7 +1224,7 @@ export function useWebSocket() {
       }
     }, 'hook_generation_progress');
 
-    // Agent 更新
+    // 智能体更新
     const unsubAgentUpdated = wsService.on(WSMessageType.AGENT_UPDATED, (msg) => {
       const payload = msg.payload as {
         agent_name: string;
@@ -1234,7 +1234,7 @@ export function useWebSocket() {
       };
       // 后端可能发送 data 或 updates，兼容两种格式
       const updates = payload.data || payload.updates || {};
-      console.log('Agent updated:', payload.agent_name, updates);
+      console.log('智能体更新:', payload.agent_name, updates);
       updateAgentInWorkflow(payload.agent_name, updates);
     }, 'hook_agent_updated');
 
@@ -1284,6 +1284,12 @@ export function useWebSocket() {
         author: w.author as string || 'system',
         createdAt: w.created_at as string || '',
         updatedAt: w.updated_at as string || '',
+        // P1: 执行历史字段
+        lastExecutionAt: w.last_execution_at as string | undefined,
+        lastExecutionStatus: w.last_execution_status as 'success' | 'failed' | 'running' | undefined,
+        executionCount: w.execution_count as number | undefined,
+        // P2: 定时任务配置
+        scheduleConfig: w.schedule_config as { enabled: boolean; cronExpression: string; timezone?: string; notifyOnComplete?: boolean; notifyOnFailure?: boolean } | undefined,
       })));
     }, 'hook_workflows_list');
 
@@ -1375,9 +1381,9 @@ export function useWebSocket() {
       });
     }, 'hook_workflow_deleted');
 
-    // === Agent 管理响应 ===
+    // === 智能体管理响应 ===
 
-    // Agent 列表
+    // 智能体列表
     const unsubAgentsList = wsService.on(WSMessageType.AGENTS_LIST, (msg) => {
       const payload = msg.payload as { agents: Array<Record<string, unknown>>; total: number };
       const store = useAppStore.getState();
@@ -1386,6 +1392,7 @@ export function useWebSocket() {
         id: a.id as string,
         agentId: a.agent_id as string,
         name: a.name as string,
+        displayName: (a.display_name as string) || '',
         description: a.description as string || '',
         version: a.version as string || '1.0.0',
         status: a.status as string || 'draft',
@@ -1396,10 +1403,14 @@ export function useWebSocket() {
         isTemplate: a.is_template as boolean || false,
         createdAt: a.created_at as string || '',
         updatedAt: a.updated_at as string || '',
+        usedInWorkflows: (a.used_in_workflows as Array<{ name: string; workflow_id: string }> || []).map(w => ({
+          name: w.name,
+          workflowId: w.workflow_id,
+        })),
       })));
     }, 'hook_agents_list');
 
-    // Agent 模板列表
+    // 智能体模板列表
     const unsubAgentTemplates = wsService.on(WSMessageType.AGENT_TEMPLATES, (msg) => {
       const payload = msg.payload as { templates: Array<Record<string, unknown>>; total: number };
       const store = useAppStore.getState();
@@ -1407,6 +1418,7 @@ export function useWebSocket() {
         id: t.id as string,
         agentId: t.agent_id as string,
         name: t.name as string,
+        displayName: (t.display_name as string) || '',
         description: t.description as string || '',
         version: t.version as string || '1.0.0',
         status: 'active',
@@ -1415,14 +1427,16 @@ export function useWebSocket() {
         modelName: t.model_name as string || '',
         tags: t.tags as string[] || [],
         isTemplate: true,
+        usedInWorkflows: [],
         createdAt: '',
         updatedAt: '',
       })));
     }, 'hook_agent_templates');
 
-    // Agent 已复用
+    // 智能体已复用
     const unsubAgentReused = wsService.on(WSMessageType.AGENT_REUSED, (msg) => {
       const payload = msg.payload as { agent_id: string; name: string; message: string };
+      console.log('智能体已复用:', payload.agent_id, payload.name, payload.message);
       addMessage({
         role: 'system',
         content: `✅ ${payload.message}`,
@@ -1430,6 +1444,35 @@ export function useWebSocket() {
         messageType: 'text',
       });
     }, 'hook_agent_reused');
+
+    // === 定时任务管理响应 ===
+
+    // 定时任务已设置
+    const unsubWorkflowScheduled = wsService.on(WSMessageType.WORKFLOW_SCHEDULED, (msg) => {
+      const payload = msg.payload as { workflow_id: string; workflow_db_id: string; message: string };
+      console.log('定时任务已设置:', payload.workflow_id, payload.workflow_db_id, payload.message);
+      addMessage({
+        role: 'system',
+        content: `✅ ${payload.message}`,
+        timestamp: new Date().toISOString(),
+        messageType: 'text',
+      });
+      // 刷新工作流列表以更新定时任务状态
+      wsService.send(WSMessageType.LIST_WORKFLOWS, {});
+    }, 'hook_workflow_scheduled');
+
+    // 定时任务已取消
+    const unsubWorkflowUnscheduled = wsService.on(WSMessageType.WORKFLOW_UNSCHEDULED, (msg) => {
+      const payload = msg.payload as { workflow_id: string; workflow_db_id: string; message: string };
+      addMessage({
+        role: 'system',
+        content: `✅ ${payload.message}`,
+        timestamp: new Date().toISOString(),
+        messageType: 'text',
+      });
+      // 刷新工作流列表以更新定时任务状态
+      wsService.send(WSMessageType.LIST_WORKFLOWS, {});
+    }, 'hook_workflow_unscheduled');
 
     // 清理
     return () => {
@@ -1455,6 +1498,8 @@ export function useWebSocket() {
       unsubAgentsList();
       unsubAgentTemplates();
       unsubAgentReused();
+      unsubWorkflowScheduled();
+      unsubWorkflowUnscheduled();
     };
   }, [addMessage, updateOrAddProgressMessage, setWorkflowState, setHighlightedNodes, setSuggestedActions, setExecutionProgress, updateNodeState, setIsLoading, setCheckpoints, setGenerationProgress, updateAgentInWorkflow, setMode, clearRealtimeNodeOutputs, prependMessagesBatch, addMessagesBatch, setHasMoreHistory, setIsLoadingHistory]);
 

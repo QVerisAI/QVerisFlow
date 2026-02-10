@@ -27,7 +27,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     ? message.data as unknown as GenerationProgressEvent
     : undefined;
 
-  // === 过滤过期的 Agent 生成进度消息 ===
+  // === 过滤过期的智能体生成进度消息 ===
   // 这是最后一道防线，确保即使消息进入了列表，也不会被渲染
   if (progressData) {
     try {
@@ -65,7 +65,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
     ? message.data as unknown as WorkflowSearchResult
     : undefined;
 
-  // 检查是否是 Agent 搜索结果
+  // 检查是否是智能体搜索结果
   const agentSearchData = message.data?.type === 'agent_search_result'
     ? message.data as unknown as AgentSearchResult
     : undefined;
@@ -227,8 +227,8 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   // 获取显示内容
   // 消息类型分类：
   // 1. planData - 工作流规划（构建阶段）
-  // 2. summaryData - Agent 生成摘要（构建阶段）
-  // 3. progressData (agent_generation_progress) - Agent 生成进度（构建阶段，实时更新）
+  // 2. summaryData - 智能体生成摘要（构建阶段）
+  // 3. progressData (agent_generation_progress) - 智能体生成进度（构建阶段，实时更新）
   // 4. workflowInfoData (workflow_info_card) - 工作流保存成功信息
   // 5. workflowSearchData / agentSearchData - 搜索结果
   // 6. executionProgressData (execution_progress) - 工作流执行进度（执行阶段，包含节点状态卡片）
@@ -241,16 +241,16 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       return '工作流规划已更新，请查看下方详情：';
     }
 
-    // Agent 生成摘要（所有 Agent 生成完成后的汇总）
+    // 智能体生成摘要（所有智能体生成完成后的汇总）
     if (summaryData) {
-      return 'Agent 生成完成，请查看下方详情：';
+      return '智能体生成完成，请查看下方详情：';
     }
 
-    // Agent 生成进度（单个 Agent 的实时生成状态）
-    // 注意：这是针对 Agent 生成的进度，不是工作流执行进度
+    // 智能体生成进度（单个智能体的实时生成状态）
+    // 注意：这是针对智能体生成的进度，不是工作流执行进度
     if (progressData) {
       const { display_name, current, total, status } = progressData;
-      const agentLabel = display_name || 'Agent';
+      const agentLabel = display_name || '智能体';
       if (status === 'completed') {
         return `✓ ${agentLabel} 生成完成 (${current}/${total})`;
       }
@@ -269,7 +269,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       return message.content || '找到以下工作流：';
     }
     if (agentSearchData) {
-      return message.content || '找到以下 Agent：';
+      return message.content || '找到以下智能体：';
     }
 
     // === 执行阶段消息 ===
@@ -417,7 +417,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           {/* 工作流搜索结果卡片 */}
           {workflowSearchData && <WorkflowSearchCard data={workflowSearchData} />}
 
-          {/* Agent 搜索结果卡片 */}
+          {/* 智能体搜索结果卡片 */}
           {agentSearchData && <AgentSearchCard data={agentSearchData} />}
 
           {/* 执行进度卡片 */}

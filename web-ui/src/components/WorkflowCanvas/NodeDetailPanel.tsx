@@ -629,11 +629,11 @@ export function NodeDetailPanel({
       <div className="px-6 py-5 bg-white border-b border-slate-100 flex-shrink-0">
         <div className="flex items-start justify-between">
           <div className="flex-1 min-w-0 pr-4">
-            {/* Agent 名称 */}
+            {/* 智能体名称 */}
             <h2 className="text-lg font-semibold text-slate-800 truncate">
               {def?.display_name || node.displayName || node.name}
             </h2>
-            {/* Agent ID */}
+            {/* 智能体ID */}
             <div className="mt-1 text-xs text-slate-400 font-mono truncate">
               {def?.agent_id || node.agentId || node.nodeId}
             </div>
@@ -730,7 +730,7 @@ export function NodeDetailPanel({
                   onEdit={(v) => onEdit?.('background_instruction.role_description', v)}
                   onOptimize={() => onOptimize?.('role_description', def.background_instruction?.role_description || '')}
                   optimizable
-                  placeholder="定义 Agent 的角色身份..."
+                  placeholder="定义智能体的角色身份..."
                 />
 
                 <Divider />
@@ -742,7 +742,7 @@ export function NodeDetailPanel({
                   onEdit={(v) => onEdit?.('background_instruction.core_capability', v)}
                   onOptimize={() => onOptimize?.('core_capability', def.background_instruction?.core_capability || '')}
                   optimizable
-                  placeholder="描述 Agent 的核心能力..."
+                  placeholder="描述智能体的核心能力..."
                 />
 
                 <Divider />
@@ -754,7 +754,7 @@ export function NodeDetailPanel({
                   onEdit={(v) => onEdit?.('background_instruction.task_context', v)}
                   onOptimize={() => onOptimize?.('task_context', def.background_instruction?.task_context || '')}
                   optimizable
-                  placeholder="描述任务执行的背景信息..."
+                  placeholder="描述任务执行的智能体背景信息..."
                 />
               </div>
             </ConfigCard>
@@ -1012,7 +1012,7 @@ export function NodeDetailPanel({
             <ConfigCard title="元信息" icon={Info}>
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-slate-500">Agent ID</span>
+                  <span className="text-xs font-medium text-slate-500">智能体ID</span>
                   <div className="flex items-center gap-1">
                     <span className="text-xs font-mono text-slate-600 truncate max-w-[180px]">{def.agent_id}</span>
                     <CopyButton text={def.agent_id} />
@@ -1054,7 +1054,7 @@ export function NodeDetailPanel({
 
         {/* 配置 Tab - 简单信息（没有完整定义时） */}
         {activeTab === 'config' && !def && agent && (
-          <ConfigCard title="Agent 信息" icon={Bot} defaultExpanded>
+          <ConfigCard title="智能体信息" icon={Bot} defaultExpanded>
             {agent.description && (
               <p className="text-sm text-slate-700 leading-relaxed">{agent.description}</p>
             )}

@@ -44,6 +44,12 @@ class WorkflowSummary:
     author: str
     created_at: str
     updated_at: str
+    # 执行历史相关字段
+    last_execution_at: Optional[str] = None
+    last_execution_status: Optional[str] = None
+    execution_count: int = 0
+    # 定时任务配置
+    schedule_config: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -314,7 +320,40 @@ class WorkflowService:
                 or fuzzy_match_jieba(query_lower, m.workflow_id)
             ]
 
-        return [self._model_to_summary(m) for m in models]
+        # 批量获取执行历史信息
+        summaries = []
+        for m in models:
+            summary = self._model_to_summary(m)
+            # 获取该工作流的最近执行记录
+            try:
+                executions = await self.execution_repo.get_by_workflow(
+                    workflow_definition_id=m.id,
+                    limit=1,
+                )
+                if executions:
+                    latest = executions[0]
+                    summary.last_execution_at = (
+                        latest.started_at.isoformat() if latest.started_at else None
+                    )
+                    # 转换状态：completed -> success
+                    if latest.status:
+                        status_value = latest.status.value if hasattr(latest.status, 'value') else str(latest.status)
+                        if status_value == "completed":
+                            summary.last_execution_status = "success"
+                        else:
+                            summary.last_execution_status = status_value
+                # 获取执行总数
+                all_executions = await self.execution_repo.get_by_workflow(
+                    workflow_definition_id=m.id,
+                    limit=1000,  # 获取总数
+                )
+                summary.execution_count = len(all_executions)
+            except Exception as e:
+                logger.warning(f"获取工作流 {m.id} 执行历史失败: {e}")
+
+            summaries.append(summary)
+
+        return summaries
 
     async def update_workflow(
         self,
@@ -552,10 +591,115 @@ class WorkflowService:
 
         return execution.to_dict()
 
+    # ==================== 定时任务管理 ====================
+
+    async def schedule_workflow(
+        self,
+        workflow_db_id: str,
+        schedule_config: Dict[str, Any],
+    ) -> Optional[WorkflowDetail]:
+        """
+        设置工作流定时任务
+
+        Args:
+            workflow_db_id: 工作流数据库 ID
+            schedule_config: 定时任务配置，包含:
+                - enabled: bool 是否启用
+                - cronExpression: str cron 表达式
+                - timezone: str 时区
+                - notifyOnComplete: bool 完成时通知
+                - notifyOnFailure: bool 失败时通知
+
+        Returns:
+            更新后的工作流详情
+        """
+        model = await self.workflow_repo.get_by_id(workflow_db_id)
+        if not model:
+            logger.error(f"工作流不存在: {workflow_db_id}")
+            return None
+
+        # 更新 definition_json 中的 schedule_config
+        definition = model.definition_json.copy() if model.definition_json else {}
+        definition["schedule_config"] = schedule_config
+
+        # 更新记录
+        updated = await self.workflow_repo.update(
+            model.id,
+            {"definition_json": definition},
+        )
+
+        if updated:
+            logger.info(
+                f"设置工作流定时任务: {workflow_db_id}, "
+                f"cron={schedule_config.get('cronExpression')}"
+            )
+            return self._model_to_detail(updated)
+
+        return None
+
+    async def unschedule_workflow(self, workflow_db_id: str) -> Optional[WorkflowDetail]:
+        """
+        取消工作流定时任务
+
+        Args:
+            workflow_db_id: 工作流数据库 ID
+
+        Returns:
+            更新后的工作流详情
+        """
+        model = await self.workflow_repo.get_by_id(workflow_db_id)
+        if not model:
+            logger.error(f"工作流不存在: {workflow_db_id}")
+            return None
+
+        # 移除 schedule_config
+        definition = model.definition_json.copy() if model.definition_json else {}
+        if "schedule_config" in definition:
+            del definition["schedule_config"]
+
+        # 更新记录
+        updated = await self.workflow_repo.update(
+            model.id,
+            {"definition_json": definition},
+        )
+
+        if updated:
+            logger.info(f"取消工作流定时任务: {workflow_db_id}")
+            return self._model_to_detail(updated)
+
+        return None
+
+    async def get_scheduled_workflows(self) -> List[WorkflowSummary]:
+        """
+        获取所有启用定时任务的工作流
+
+        Returns:
+            启用定时任务的工作流摘要列表
+        """
+        # 获取所有活跃工作流
+        models = await self.workflow_repo.get_active_workflows(limit=1000)
+
+        # 过滤出启用定时任务的工作流
+        scheduled_workflows = []
+        for m in models:
+            if m.definition_json:
+                schedule_config = m.definition_json.get("schedule_config")
+                if schedule_config and schedule_config.get("enabled"):
+                    summary = self._model_to_summary(m)
+                    summary.schedule_config = schedule_config
+                    scheduled_workflows.append(summary)
+
+        return scheduled_workflows
+
     # ==================== 辅助方法 ====================
 
     def _model_to_summary(self, model: WorkflowDefinitionModel) -> WorkflowSummary:
         """转换为摘要"""
+        # 获取定时任务配置（如果有）
+        schedule_config = None
+        if model.definition_json:
+            schedule_config = model.definition_json.get("schedule_config")
+
         return WorkflowSummary(
             id=model.id,
             workflow_id=model.workflow_id,
@@ -570,6 +714,11 @@ class WorkflowService:
             author=model.author or "system",
             created_at=model.created_at.isoformat() if model.created_at else "",
             updated_at=model.updated_at.isoformat() if model.updated_at else "",
+            # 执行历史字段（由 list_workflows 方法填充）
+            last_execution_at=None,
+            last_execution_status=None,
+            execution_count=0,
+            schedule_config=schedule_config,
         )
 
     def _model_to_detail(self, model: WorkflowDefinitionModel) -> WorkflowDetail:

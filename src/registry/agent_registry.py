@@ -1,7 +1,7 @@
 """
-Agent 注册表
+智能体注册表
 
-负责 Agent 定义的注册、查找和实例化。
+负责智能体定义的注册、查找和实例化。
 
 重构：消除单例模式，改用工厂函数获取默认实例，支持依赖注入。
 """
@@ -19,16 +19,16 @@ _default_registry: Optional["AgentRegistry"] = None
 
 class AgentRegistry:
     """
-    Agent 注册表 - 支持多种注册方式
+    智能体注册表 - 支持多种注册方式
 
-    重构：
-    - 消除单例模式，支持创建多个独立实例
-    - 使用 get_default() 获取全局默认实例
-    - 支持依赖注入和测试
+     重构：
+     - 消除单例模式，支持创建多个独立实例
+     - 使用 get_default() 获取全局默认实例
+     - 支持依赖注入和测试
     """
 
     def __init__(self):
-        """初始化 Agent 注册表"""
+        """初始化智能体注册表"""
         self._definitions: Dict[str, AgentDefinition] = {}
         self._implementations: Dict[str, Type] = {}
         self._factory_funcs: Dict[str, Any] = {}
@@ -44,7 +44,7 @@ class AgentRegistry:
         获取默认的全局注册表实例
 
         Returns:
-            默认的 AgentRegistry 实例
+            默认的智能体注册表实例
         """
         global _default_registry
         if _default_registry is None:
@@ -57,14 +57,14 @@ class AgentRegistry:
         设置默认的全局注册表实例
 
         Args:
-            registry: 新的默认注册表
+            registry: 新的默认智能体注册表
         """
         global _default_registry
         _default_registry = registry
 
     @classmethod
     def reset_default(cls) -> None:
-        """重置默认注册表（主要用于测试）"""
+        """重置默认智能体注册表（主要用于测试）"""
         global _default_registry
         _default_registry = None
 
@@ -72,10 +72,10 @@ class AgentRegistry:
 
     def register_definition(self, definition: AgentDefinition) -> None:
         """
-        注册 Agent 定义
+        注册智能体定义
 
         Args:
-            definition: Agent 定义
+            definition:智能体定义
         """
         agent_id = definition.agent_id
 
@@ -86,24 +86,24 @@ class AgentRegistry:
         self._index_definition(definition)
 
         logger.info(
-            f"✅ 注册 Agent 定义: {agent_id} "
+            f"✅ 注册智能体定义: {agent_id} "
             f"({definition.execution_type.value}, {definition.domain_type.value})"
         )
 
     def register_implementation(self, agent_id: str, impl_class: Type) -> None:
         """
-        注册 Agent 实现类
+        注册智能体实现类
 
         Args:
-            agent_id: Agent ID
-            impl_class: 实现类
+            agent_id:智能体ID
+            impl_class:智能体实现类
         """
         self._implementations[agent_id] = impl_class
-        logger.info(f"✅ 注册 Agent 实现: {agent_id} -> {impl_class.__name__}")
+        logger.info(f"✅ 注册智能体实现: {agent_id} -> {impl_class.__name__}")
 
     def register_from_yaml(self, yaml_path: str) -> None:
         """
-        从 YAML 文件注册 Agent
+        从 YAML 文件注册智能体
 
         Args:
             yaml_path: YAML 文件路径或目录路径
@@ -120,12 +120,12 @@ class AgentRegistry:
             self._load_yaml_definition(path)
 
     def _load_yaml_definition(self, yaml_path: Path) -> None:
-        """加载单个 YAML 定义"""
+        """加载单个 YAML 智能体定义"""
         try:
             definition = AgentDefinition.from_yaml_file(str(yaml_path))
             self.register_definition(definition)
         except Exception as e:
-            logger.error(f"加载 YAML 定义失败 {yaml_path}: {e}")
+            logger.error(f"加载 YAML 智能体定义失败 {yaml_path}: {e}")
 
     def _index_definition(self, definition: AgentDefinition) -> None:
         """建立索引"""
@@ -156,13 +156,13 @@ class AgentRegistry:
 
     def get_definition(self, agent_id: str) -> Optional[AgentDefinition]:
         """
-        获取 Agent 定义
+        获取智能体定义
 
         Args:
             agent_id: Agent ID
 
         Returns:
-            Agent 定义，如果不存在则返回 None
+           智能体定义，如果不存在则返回 None
         """
         return self._definitions.get(agent_id)
 
@@ -174,7 +174,7 @@ class AgentRegistry:
             domain: 领域类型
 
         Returns:
-            Agent 定义列表
+           智能体定义列表
         """
         agent_ids = self._by_domain.get(domain, [])
         return [self._definitions[aid] for aid in agent_ids]
@@ -189,7 +189,7 @@ class AgentRegistry:
             exec_type: 执行类型
 
         Returns:
-            Agent 定义列表
+           智能体定义列表
         """
         agent_ids = self._by_execution_type.get(exec_type, [])
         return [self._definitions[aid] for aid in agent_ids]
@@ -202,7 +202,7 @@ class AgentRegistry:
             tag: 标签
 
         Returns:
-            Agent 定义列表
+           智能体定义列表
         """
         agent_ids = self._by_tag.get(tag, [])
         return [self._definitions[aid] for aid in agent_ids]
@@ -211,20 +211,20 @@ class AgentRegistry:
 
     def create_agent(self, agent_id: str, **kwargs) -> "BaseAgent":
         """
-        创建 Agent 实例
+        创建智能体实例
 
         Args:
-            agent_id: Agent ID
-            **kwargs: 传递给 Agent 构造函数的参数
+            agent_id:智能体ID
+            **kwargs: 传递给智能体构造函数的参数
 
         Returns:
-            Agent 实例
+           智能体实例
         """
         from ..core import BaseAgent
 
         definition = self._definitions.get(agent_id)
         if not definition:
-            raise ValueError(f"Agent {agent_id} 未注册")
+            raise ValueError(f"智能体 {agent_id} 未注册")
 
         impl_class = self._implementations.get(agent_id)
 
@@ -237,10 +237,10 @@ class AgentRegistry:
 
     def list_all(self) -> List[Dict[str, Any]]:
         """
-        列出所有 Agent 摘要
+        列出所有智能体摘要
 
         Returns:
-            Agent 摘要列表
+           智能体摘要列表
         """
         return [
             {
@@ -268,7 +268,7 @@ class AgentRegistry:
         创建此注册表的副本
 
         Returns:
-            新的 AgentRegistry 实例
+            新的智能体注册表实例
         """
         new_registry = AgentRegistry()
         new_registry._definitions = self._definitions.copy()
@@ -292,27 +292,27 @@ def agent(
     **kwargs,
 ):
     """
-    Agent 注册装饰器
+    智能体注册装饰器
 
-    用法：
-    ```python
-    @agent(
-        agent_id="financial_analyst",
-        name="金融分析师",
-        domain=AgentDomainType.FINANCIAL_ANALYSIS,
-        execution_type=AgentExecutionType.REASONING_EXECUTOR
-    )
-    class FinancialAnalystAgent(BaseAgent):
-        ...
-    ```
+     用法：
+     ```python
+     @agent(
+         agent_id="financial_analyst",
+         name="金融分析师",
+         domain=AgentDomainType.FINANCIAL_ANALYSIS,
+         execution_type=AgentExecutionType.REASONING_EXECUTOR
+     )
+     class FinancialAnalystAgent(BaseAgent):
+         ...
+     ```
 
-    Args:
-        agent_id: Agent 唯一标识
-        name: Agent 名称
-        domain: Agent 领域类型
-        execution_type: 执行类型
-        registry: 要注册到的注册表（可选，默认使用全局默认注册表）
-        **kwargs: 其他参数
+     Args:
+         agent_id:智能体唯一标识
+         name:智能体名称
+         domain:智能体领域类型
+         execution_type:智能体执行类型
+         registry: 要注册到的注册表（可选，默认使用全局默认注册表）
+         **kwargs: 其他参数
     """
 
     def decorator(cls):

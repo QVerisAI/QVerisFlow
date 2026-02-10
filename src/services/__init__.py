@@ -9,6 +9,11 @@ from .session_service import (
     MessageInfo,
     create_session_service,
 )
+from .scheduler_service import (
+    WorkflowSchedulerService,
+    ScheduledJob,
+    scheduler_service,
+)
 
 __all__ = [
     "WorkflowService",
@@ -18,4 +23,7 @@ __all__ = [
     "SessionInfo",
     "MessageInfo",
     "create_session_service",
+    "WorkflowSchedulerService",
+    "ScheduledJob",
+    "scheduler_service",
 ]

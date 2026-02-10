@@ -138,7 +138,7 @@ export default function GenerationSummaryCard({ summary }: GenerationSummaryCard
         <div className="flex items-center gap-2">
           <Bot className="w-4 h-4 text-slate-400" />
           <span className="text-xs text-slate-600">
-            {summary.total_agents} 个 Agent
+            {summary.total_agents} 个智能体
             {hasFailures && (
               <span className="text-red-500 ml-1">
                 （{summary.failed_count} 个失败）
@@ -148,14 +148,14 @@ export default function GenerationSummaryCard({ summary }: GenerationSummaryCard
         </div>
       </div>
 
-      {/* Agent 列表 */}
+      {/* 智能体列表 */}
       <div className="p-3 space-y-2">
-        {/* 成功的 Agents */}
+        {/* 成功的智能体 */}
         {summary.agents.map((agent) => (
           <AgentSummaryItem key={agent.name} agent={agent} />
         ))}
 
-        {/* 失败的 Agents */}
+        {/* 失败的智能体 */}
         {summary.failed_agents && summary.failed_agents.length > 0 && (
           <div className="mt-3 pt-3 border-t border-slate-200">
             <h4 className="text-xs font-medium text-red-600 mb-2 flex items-center gap-1">

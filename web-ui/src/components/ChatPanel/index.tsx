@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
-import { Send, Loader2, FolderOpen, Bot, Plus, Pause, Square } from 'lucide-react';
+import { Send, Loader2, FolderOpen, Bot, Plus, Pause, Square, Trash2 } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { VirtualizedMessageList } from './VirtualizedMessageList';
@@ -16,6 +16,7 @@ export function ChatPanel() {
     setShowAgentLibraryPanel,
     hasMoreHistory,
     isLoadingHistory,
+    resetConversation,
   } = useAppStore();
   const { sendMessage, sendAction, loadMoreHistory } = useWebSocket();
   const [input, setInput] = useState('');
@@ -69,8 +70,8 @@ export function ChatPanel() {
       '确认': 'approve',
       '看起来不错': 'approve',
       '修改规划': null,
-      '添加 Agent': null,
-      '修改 Agent': null,
+      '添加智能体': null,
+      '修改智能体': null,
       '重新生成': 'regenerate',
       '回滚': 'rollback',
       '执行工作流': 'execute',
@@ -132,7 +133,7 @@ export function ChatPanel() {
                 className="flex flex-col items-center gap-2 p-5 w-32 rounded-xl border border-gray-200 hover:border-primary/50 hover:bg-primary/5 transition-all group"
               >
                 <Bot className="w-7 h-7 text-gray-400 group-hover:text-primary transition-colors" />
-                <span className="text-sm font-medium text-gray-700 group-hover:text-primary">Agent 库</span>
+                <span className="text-sm font-medium text-gray-700 group-hover:text-primary">智能体库</span>
               </button>
             </div>
 
@@ -148,7 +149,7 @@ export function ChatPanel() {
               {[
                 '帮我创建一个分析苹果股票的工作流',
                 '构建一个自动化数据处理流程',
-                '设计一个多 Agent 协作的研究助手',
+                '设计一个多智能体协作的研究助手',
               ].map((example, i) => (
                 <button
                   key={i}
@@ -232,8 +233,26 @@ export function ChatPanel() {
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors"
                 >
                   <Bot className="w-4 h-4 text-gray-400" />
-                  Agent 库
+                  智能体库
                 </button>
+                {/* 清空对话按钮（仅当有消息时显示） */}
+                {messages.length > 0 && (
+                  <>
+                    <div className="border-t border-gray-100 my-1" />
+                    <button
+                      onClick={() => {
+                        if (window.confirm('确定要清空对话吗？这将重置当前的工作流构建状态。')) {
+                          resetConversation();
+                        }
+                        setShowQuickMenu(false);
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      清空对话
+                    </button>
+                  </>
+                )}
               </div>
             )}
           </div>

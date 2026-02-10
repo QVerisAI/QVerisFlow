@@ -26,6 +26,7 @@ class AgentSummary:
     id: str
     agent_id: str
     name: str
+    display_name: str  # 用户友好的显示名称（中文）
     description: str
     version: str
     status: str
@@ -264,7 +265,10 @@ class AgentService:
 
         Args:
             agent_id: Agent ID
-            updates: 更新数据
+            updates: 更新数据，支持以下格式：
+                     - {"definition": {...}} - 完整的 Agent 定义字典
+                     - 直接传入完整的 Agent 定义字典（会自动检测）
+                     - 其他字段更新
 
         Returns:
             更新后的 Agent 详情
@@ -274,14 +278,25 @@ class AgentService:
         if not model:
             return None
 
-        # 如果更新了定义
+        # 检测更新类型
+        # 1. 显式使用 "definition" key 包装
         if "definition" in updates:
             updated = await self.agent_repo.update_definition(
                 model.id,
                 updates["definition"],
             )
+        # 2. 直接传入完整的 Agent 定义字典（检测常见的 Agent 定义字段）
+        elif any(key in updates for key in [
+            "agent_id", "system_prompt", "background_instruction",
+            "execution_type", "domain_type", "llm_config", "tools"
+        ]):
+            # 这是一个完整的 Agent 定义字典，作为 definition 更新
+            updated = await self.agent_repo.update_definition(
+                model.id,
+                updates,
+            )
         else:
-            # 更新其他字段
+            # 更新其他字段（如 status, tags 等数据库列）
             updated = await self.agent_repo.update(model.id, updates)
 
         if updated:
@@ -531,6 +546,7 @@ class AgentService:
             id=model.id,
             agent_id=model.agent_id,
             name=model.name,
+            display_name=definition.get("display_name", ""),
             description=model.description or "",
             version=model.version,
             status=model.status.value if model.status else "unknown",

@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { 
-  Save, 
-  X, 
-  Sparkles, 
+import {
+  Save,
+  X,
+  Sparkles,
   Loader2,
   ChevronDown,
   ChevronRight,
@@ -25,7 +25,7 @@ interface EditableSectionProps {
 
 function EditableSection({ title, children, defaultExpanded = true }: EditableSectionProps) {
   const [expanded, setExpanded] = useState(defaultExpanded);
-  
+
   return (
     <div className="border border-slate-200 rounded-xl overflow-hidden mb-4">
       <button
@@ -123,7 +123,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
     user_instruction: { ...agent.user_instruction },
     llm_config: { ...agent.llm_config },
   });
-  
+
   const [optimizingField, setOptimizingField] = useState<string | null>(null);
   const [hasChanges, setHasChanges] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -134,7 +134,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
     setEditedAgent(prev => {
       const parts = path.split('.');
       const newState = { ...prev };
-      
+
       let current: Record<string, unknown> = newState;
       for (let i = 0; i < parts.length - 1; i++) {
         if (!current[parts[i]]) {
@@ -144,7 +144,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
         current = current[parts[i]] as Record<string, unknown>;
       }
       current[parts[parts.length - 1]] = value;
-      
+
       return newState;
     });
   };
@@ -153,7 +153,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
   const getField = (path: string): string => {
     const parts = path.split('.');
     let current: unknown = editedAgent;
-    
+
     for (const part of parts) {
       if (current && typeof current === 'object' && part in current) {
         current = (current as Record<string, unknown>)[part];
@@ -161,7 +161,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
         return '';
       }
     }
-    
+
     return current as string || '';
   };
 
@@ -169,7 +169,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
   const handleOptimize = async (field: string) => {
     setOptimizingField(field);
     setError(null);
-    
+
     try {
       const currentValue = getField(field);
       const optimizedValue = await onOptimize(field, currentValue);
@@ -192,7 +192,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
       {/* 头部 */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 flex-shrink-0">
         <div>
-          <h3 className="font-semibold text-slate-800">编辑 Agent</h3>
+          <h3 className="font-semibold text-slate-800">编辑智能体</h3>
           <p className="text-xs text-slate-500 mt-0.5">{agent.name}</p>
         </div>
         <div className="flex items-center gap-2">
@@ -243,7 +243,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
               onChange={(e) => updateField('description', e.target.value)}
               rows={2}
               className="w-full p-3 text-sm border border-slate-200 rounded-lg resize-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              placeholder="Agent 的简要描述"
+              placeholder="智能体的简要描述"
             />
           </div>
         </EditableSection>
@@ -256,7 +256,7 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
             onChange={(v) => updateField('background_instruction.role_description', v)}
             onOptimize={() => handleOptimize('background_instruction.role_description')}
             isOptimizing={optimizingField === 'background_instruction.role_description'}
-            placeholder="描述 Agent 的角色定位..."
+            placeholder="描述智能体的角色定位..."
             hint="例如：你是一位资深的金融分析师，擅长..."
           />
           <OptimizableField
@@ -265,8 +265,8 @@ export function AgentEditor({ agent, onSave, onOptimize, onClose }: AgentEditorP
             onChange={(v) => updateField('background_instruction.core_capability', v)}
             onOptimize={() => handleOptimize('background_instruction.core_capability')}
             isOptimizing={optimizingField === 'background_instruction.core_capability'}
-            placeholder="描述 Agent 的核心能力..."
-            hint="明确 Agent 能够完成什么任务"
+            placeholder="描述智能体的核心能力..."
+            hint="明确智能体能够完成什么任务"
           />
           <OptimizableField
             label="任务上下文"

@@ -42,10 +42,21 @@ FROM python:3.11-slim AS runtime
 
 WORKDIR /app
 
-# 安装运行时系统依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
-    curl \
+# 设置时区为上海（在安装 tzdata 之前设置，避免交互式提示）
+ENV TZ=Asia/Shanghai
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 安装运行时系统依赖（包含时区数据）
+# 使用重试机制处理网络不稳定问题
+RUN for i in 1 2 3; do \
+        apt-get update && apt-get install -y --no-install-recommends \
+            libpq5 \
+            curl \
+            tzdata \
+        && break || sleep 5; \
+    done \
+    && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
+    && echo $TZ > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
 
 # 创建非 root 用户

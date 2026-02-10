@@ -108,6 +108,8 @@ services:
       dockerfile: Dockerfile
     container_name: qveris_api
     environment:
+      # 时区配置
+      TZ: ${TZ:-Asia/Shanghai}
       # 部署模式设为 docker，服务间通过容器名通信
       DEPLOY_MODE: docker
       # PostgreSQL - 使用容器服务名

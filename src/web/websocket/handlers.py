@@ -83,6 +83,16 @@ class WSMessageType(Enum):
     AGENT_GENERATION_PROGRESS = "agent_generation_progress"  # Agent 生成进度
     AGENT_UPDATED = "agent_updated"  # Agent 配置更新
 
+    # 定时任务管理 (Client -> Server)
+    SCHEDULE_WORKFLOW = "schedule_workflow"  # 设置定时任务
+    UNSCHEDULE_WORKFLOW = "unschedule_workflow"  # 取消定时任务
+    GET_WORKFLOW_SCHEDULES = "get_workflow_schedules"  # 获取定时任务列表
+
+    # 定时任务管理响应 (Server -> Client)
+    WORKFLOW_SCHEDULED = "workflow_scheduled"  # 定时任务已设置
+    WORKFLOW_UNSCHEDULED = "workflow_unscheduled"  # 定时任务已取消
+    WORKFLOW_SCHEDULES = "workflow_schedules"  # 定时任务列表
+
     # 心跳
     PING = "ping"
     PONG = "pong"
@@ -1158,23 +1168,35 @@ class WebSocketHandler:
                     # 检查是否是已加载的 Agent（需要更新）
                     loaded_db_id = loaded_agent_db_ids.get(agent_id)
                     if loaded_db_id:
-                        # 更新已有 Agent
-                        await agent_service.update_agent(agent_id, agent_data)
+                        # 更新已有 Agent（使用 definition 包装以触发正确的更新逻辑）
+                        await agent_service.update_agent(agent_id, {"definition": agent_data})
+                        # 确保已更新的 Agent 为激活状态
+                        await agent_service.activate_agent(agent_id)
                         updated_agents_count += 1
-                        logger.info(f"已更新 Agent: {agent_id}")
+                        logger.info(f"已更新并激活 Agent: {agent_id}")
                     else:
                         # 检查 agent 是否已存在于数据库
                         existing_agent = await agent_repo.get_by_agent_id(agent_id)
                         if not existing_agent:
                             # 创建新 Agent
-                            await agent_service.create_agent_from_dict(
+                            created_agent = await agent_service.create_agent_from_dict(
                                 agent_data=agent_data,
                                 author="websocket",
                             )
+                            # 自动激活已保存的 Agent（从 draft 变为 active）
+                            await agent_service.activate_agent(created_agent.agent_id)
+                            # 更新映射，用于后续保存时识别已存在的 Agent
+                            loaded_agent_db_ids[agent_id] = created_agent.id
                             saved_agents_count += 1
-                            logger.info(f"已保存 Agent 到数据库: {agent_id}")
+                            logger.info(f"已保存并激活 Agent: {agent_id}")
                         else:
-                            logger.info(f"Agent 已存在于数据库，跳过: {agent_id}")
+                            # Agent 已存在于数据库但不在 loaded_agent_db_ids 中
+                            # 应该更新而不是跳过
+                            await agent_service.update_agent(agent_id, {"definition": agent_data})
+                            await agent_service.activate_agent(agent_id)
+                            loaded_agent_db_ids[agent_id] = existing_agent.id
+                            updated_agents_count += 1
+                            logger.info(f"已更新并激活已存在的 Agent: {agent_id}")
                 except Exception as agent_error:
                     logger.warning(f"保存/更新 Agent 失败: {agent_error}")
 
@@ -1214,6 +1236,8 @@ class WebSocketHandler:
 
             # 更新 builder 中的数据库 ID（保存后变为已保存状态）
             self.builder.builder.loaded_workflow_db_id = workflow_detail.id
+            # 同步更新 agent 数据库 ID 映射，确保后续保存能正确识别已存在的 Agent
+            self.builder.builder.loaded_agent_db_ids = loaded_agent_db_ids
 
             logger.info(
                 f"工作流保存完成: {workflow_detail.name}, "

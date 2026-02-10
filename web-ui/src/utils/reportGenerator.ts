@@ -13,6 +13,11 @@
 
 import type { ExecutionSummary, ExecutionNodeResult, NodeActivity } from '../types';
 
+// ─── 报告类型 ────────────────────────────────────────────────
+
+/** 报告类型：result = 结果报告（最终成品），process = 过程报告（执行步骤） */
+export type ReportType = 'result' | 'process';
+
 // ─── 技术字段过滤 ──────────────────────────────────────────
 
 const TECHNICAL_FIELDS = new Set([
@@ -993,7 +998,7 @@ function renderToolbar(): string {
   `;
 }
 
-function renderHeader(summary: ExecutionSummary): string {
+function renderHeader(summary: ExecutionSummary, reportType: ReportType): string {
   const title = buildReportTitle(summary);
   const visibleNodes = getVisibleNodes(summary);
   const totalDisplay = visibleNodes.length;
@@ -1002,9 +1007,11 @@ function renderHeader(summary: ExecutionSummary): string {
   const duration = formatDurationReadable(summary.totalDurationMs);
   const dateStr = formatDateReadable(summary.startedAt);
 
+  const subtitle = reportType === 'result' ? '执行结果报告' : '执行过程报告';
+
   return `
     <div class="report-title">${escapeHtml(title)}</div>
-    <div class="report-subtitle">工作流执行报告</div>
+    <div class="report-subtitle">${subtitle}</div>
     <div class="report-meta">${dateStr} \u00B7 耗时 ${duration} \u00B7 ${completedDisplay}/${totalDisplay} 个步骤完成</div>
   `;
 }
@@ -1221,6 +1228,188 @@ function renderSteps(summary: ExecutionSummary): string {
 
     html += `</div>`;
   });
+
+  return html;
+}
+
+/**
+ * 从节点 fullOutput 中提取实际的 data 内容（markdown 或结构化数据）
+ *
+ * 处理嵌套结构：
+ * - {result: {summary, narrative, data, data_format}} → 取 result.data
+ * - {dep_xxx: {result: {summary, narrative, data}}} → 取第一个 dep 的 result.data
+ * - {data, data_format} → 取 data
+ * - 其他 → 过滤技术字段后返回
+ */
+function extractNodeDataContent(node: ExecutionNodeResult): { content: string; format: 'markdown' | 'json'; rawData: unknown } {
+  const output = node.fullOutput;
+  if (!output || typeof output !== 'object') return { content: '', format: 'json', rawData: null };
+
+  let obj = output as Record<string, unknown>;
+
+  // 层级 1：直接有 result 字段
+  if (typeof obj.result === 'object' && obj.result !== null) {
+    const inner = obj.result as Record<string, unknown>;
+    if ('data' in inner || 'summary' in inner) {
+      obj = inner;
+    }
+  } else {
+    // 层级 2：嵌套在 dep_xxx 等子键中（如 {context, dep_report_generator: {result: {...}}}）
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        const sub = val as Record<string, unknown>;
+        if (typeof sub.result === 'object' && sub.result !== null) {
+          const inner = sub.result as Record<string, unknown>;
+          if ('data' in inner || 'summary' in inner) {
+            obj = inner;
+            break;
+          }
+        }
+        // 也可能直接是 {summary, data, data_format}
+        if ('data' in sub && ('summary' in sub || 'data_format' in sub)) {
+          obj = sub;
+          break;
+        }
+      }
+    }
+  }
+
+  const format = node.dataFormat || detectDataFormat(obj);
+
+  // 提取 data 字段
+  const data = obj.data;
+  if (format === 'markdown' && typeof data === 'string') {
+    return { content: data, format: 'markdown', rawData: data };
+  }
+
+  // JSON data
+  if (data !== undefined && data !== null) {
+    return { content: '', format: 'json', rawData: data };
+  }
+
+  // 回退：过滤技术字段后的整个对象
+  const filtered = filterTechnicalFields(obj);
+  if (Object.keys(filtered).length > 0) {
+    return { content: '', format: 'json', rawData: filtered };
+  }
+
+  return { content: '', format: 'json', rawData: null };
+}
+
+/**
+ * 渲染结果报告的完整主体内容
+ *
+ * 用于 result 类型报告，从最后一个业务节点提取最终成品。
+ * 结构：执行摘要 → 要点 → 详细报告 → 结论
+ *
+ * 策略：
+ * 1. 找到最后一个业务节点（非开始/结束）
+ * 2. 提取其 narrative（执行摘要）、highlights（要点）、data（详细报告 markdown）
+ * 3. 如果节点数据为空，回退到 summary 级别的 finalNarrative / finalOutput
+ */
+function renderFinalOutputContent(summary: ExecutionSummary): string {
+  const visibleNodes = getVisibleNodes(summary);
+
+  // 找最后一个有内容的业务节点
+  let lastNode: ExecutionNodeResult | null = null;
+  for (let i = visibleNodes.length - 1; i >= 0; i--) {
+    const node = visibleNodes[i];
+    if (node.fullOutput || node.outputNarrative || node.outputMarkdown) {
+      lastNode = node;
+      break;
+    }
+  }
+
+  // ── 1. 执行摘要（Narrative） ──
+  let narrative = '';
+  let highlights: string[] = [];
+
+  if (lastNode) {
+    // 优先从最后节点获取
+    narrative = getNodeNarrative(lastNode);
+    highlights = getNodeHighlights(lastNode);
+  }
+
+  // 回退到 summary 级别
+  if (!narrative && summary.finalNarrative) {
+    narrative = escapeHtml(summary.finalNarrative);
+  }
+  if (highlights.length === 0 && summary.finalHighlights && summary.finalHighlights.length > 0) {
+    highlights = summary.finalHighlights;
+  }
+
+  let html = '';
+
+  // 渲染执行摘要
+  if (narrative) {
+    html += `<div class="section-label">执行摘要</div>`;
+    html += `<div class="summary-text">${narrative}</div>`;
+  }
+
+  // 渲染要点
+  if (highlights.length > 0) {
+    if (!narrative) {
+      html += `<div class="section-label">要点</div>`;
+    }
+    html += `<ul class="findings">`;
+    for (const h of highlights) {
+      html += `<li>${escapeHtml(h)}</li>`;
+    }
+    html += `</ul>`;
+  }
+
+  // ── 2. 详细报告（Data 内容） ──
+  let detailHtml = '';
+
+  if (lastNode) {
+    const extracted = extractNodeDataContent(lastNode);
+
+    if (extracted.format === 'markdown' && extracted.content) {
+      // Markdown 格式：直接渲染为 HTML
+      detailHtml = markdownToHtml(extracted.content);
+    } else if (extracted.rawData) {
+      // JSON 格式：结构化渲染
+      detailHtml = renderStructuredData(extracted.rawData);
+    }
+  }
+
+  // 回退到 summary.finalOutputMarkdown 或 summary.finalOutput
+  if (!detailHtml) {
+    if (summary.finalOutputMarkdown) {
+      detailHtml = markdownToHtml(summary.finalOutputMarkdown);
+    } else if (summary.finalOutput) {
+      const dataFormat = detectDataFormat(summary.finalOutput);
+      detailHtml = renderOutputData(summary.finalOutput, dataFormat);
+    }
+  }
+
+  if (detailHtml) {
+    if (narrative || highlights.length > 0) {
+      html += `<hr class="divider">`;
+    }
+    html += `<div class="section-label">详细报告</div>`;
+    html += `<div class="step-data">${detailHtml}</div>`;
+  }
+
+  // ── 3. 结论 ──
+  // 如果有 narrative，在详细报告后添加结论区（与执行摘要呼应）
+  if (narrative && detailHtml) {
+    html += `<hr class="divider">`;
+    html += `<div class="section-label">结论</div>`;
+    html += `<div class="conclusion-text">${narrative}</div>`;
+    if (highlights.length > 0) {
+      html += `<ul class="findings">`;
+      for (const h of highlights) {
+        html += `<li>${escapeHtml(h)}</li>`;
+      }
+      html += `</ul>`;
+    }
+  }
+
+  // 如果什么内容都没有
+  if (!html) {
+    html = `<div class="summary-text" style="color:#94a3b8;">暂无详细数据</div>`;
+  }
 
   return html;
 }
@@ -1542,36 +1731,53 @@ function getExportScript(reportTitle: string): string {
 
 /**
  * 生成完整的 HTML 报告文档
+ *
+ * @param summary    执行摘要数据
+ * @param reportType 报告类型：'result' = 结果报告（最终成品），'process' = 过程报告（执行步骤）
  */
-export function generateReportHtml(summary: ExecutionSummary): string {
+export function generateReportHtml(summary: ExecutionSummary, reportType: ReportType = 'process'): string {
   const reportTitle = buildReportTitle(summary);
+  const typeSuffix = reportType === 'result' ? '结果报告' : '过程报告';
+  const pdfFileName = reportTitle + '-' + typeSuffix;
+
+  // 根据报告类型生成不同的主体内容
+  const bodyContent = reportType === 'result'
+    ? `
+    ${renderFinalOutputContent(summary)}
+    `
+    : `
+    ${renderSummary(summary)}
+    <hr class="divider">
+    ${renderSteps(summary)}
+    ${renderConclusion(summary)}
+    `;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(reportTitle)}</title>
+  <title>${escapeHtml(reportTitle)} - ${typeSuffix}</title>
   <style>${getReportStyles()}</style>
 </head>
 <body>
   ${renderToolbar()}
   <div class="report-container" id="report-content">
-    ${renderHeader(summary)}
+    ${renderHeader(summary, reportType)}
     ${renderStatusBar(summary)}
-    ${renderSummary(summary)}
-    <hr class="divider">
-    ${renderSteps(summary)}
-    ${renderConclusion(summary)}
+    ${bodyContent}
     ${renderFooter(summary)}
   </div>
-  ${getExportScript(reportTitle)}
+  ${getExportScript(pdfFileName)}
 </body>
 </html>`;
 }
 
 /**
  * 在新窗口中打开执行报告
+ *
+ * @param summary    执行摘要数据
+ * @param reportType 报告类型：'result' = 结果报告（最终成品），'process' = 过程报告（执行步骤）
  *
  * 使用 Blob URL 代替 document.write()：
  * - 避免 about:blank 页面（打印时会在页脚显示 about:blank）
@@ -1583,8 +1789,8 @@ export function generateReportHtml(summary: ExecutionSummary): string {
  * - 主应用页面关闭/刷新后，Blob URL 自动失效（浏览器自动回收）
  * - 每次打开报告仅创建一个小 Blob，内存开销可忽略
  */
-export function openReport(summary: ExecutionSummary): void {
-  const html = generateReportHtml(summary);
+export function openReport(summary: ExecutionSummary, reportType: ReportType = 'process'): void {
+  const html = generateReportHtml(summary, reportType);
   const blob = new Blob([html], { type: 'text/html' });
   const url = URL.createObjectURL(blob);
   window.open(url, '_blank');

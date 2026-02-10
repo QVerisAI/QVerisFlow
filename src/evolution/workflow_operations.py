@@ -118,16 +118,60 @@ class WorkflowOperationTools:
         return self._builder is not None
 
     def _init_builder(self, task_description: str) -> None:
-        """初始化构建器"""
-        from .interactive_builder import InteractiveWorkflowBuilder
+        """
+        初始化构建器
+        
+        当为已加载的工作流创建新规划时，会保留数据库 ID 和 FSM 状态，
+        以确保后续保存时能正确更新（而不是创建新的）工作流和 Agent。
+        """
+        from .interactive_builder import InteractiveWorkflowBuilder, BuilderStateMachine, ArtifactStatus
 
         self._task_description = task_description
+
+        # 保存现有 builder 的状态（如果有的话）
+        old_workflow_db_id = None
+        old_agent_db_ids = {}
+        is_loaded_workflow = False
+        if self._builder:
+            old_workflow_db_id = getattr(self._builder, "loaded_workflow_db_id", None)
+            old_agent_db_ids = getattr(self._builder, "loaded_agent_db_ids", {})
+            is_loaded_workflow = old_workflow_db_id is not None
+
         self._builder = InteractiveWorkflowBuilder(
             meta_agent=self.meta_agent,
             callback=None,  # 不使用回调，由 DialogueAgent 处理
             storage_path=self.storage_path,
             max_iterations_per_step=3,
         )
+
+        # 恢复数据库 ID（确保更新操作能正确识别已存在的工作流和 Agent）
+        if old_workflow_db_id:
+            self._builder.loaded_workflow_db_id = old_workflow_db_id
+        if old_agent_db_ids:
+            self._builder.loaded_agent_db_ids = old_agent_db_ids
+
+        # 如果是已加载的工作流，初始化 FSM 到"已有制品但需要更新"状态
+        # 这确保 FSM 状态与数据库 ID 状态一致
+        if is_loaded_workflow:
+            self._builder.fsm = BuilderStateMachine(
+                # 新规划将被创建，所以 plan 初始化为 ABSENT（on_plan_created 会设为 CURRENT）
+                plan_status=ArtifactStatus.ABSENT,
+                # 已有 agents，但基于旧规划，所以是 STALE
+                # 这会让 resolve_approve() 返回 REGENERATE_ALL_AGENTS
+                agents_status=ArtifactStatus.STALE,
+                # 已有 workflow，但需要重新组装
+                workflow_status=ArtifactStatus.STALE,
+                # 版本号保持一致性
+                plan_version=0,
+                agents_version=1,  # 表示已有 agents
+                workflow_version=1,  # 表示已有 workflow
+                agents_based_on_plan_version=0,  # 旧规划版本
+                workflow_based_on_agents_version=0,  # 需要重新组装
+            )
+            logger.info(
+                f"为已加载的工作流初始化 builder: workflow_db_id={old_workflow_db_id}, "
+                f"agent_db_ids={list(old_agent_db_ids.keys())}"
+            )
         self._builder.task_description = task_description
 
     def _get_executions_path(self) -> Path:
@@ -1567,6 +1611,9 @@ class WorkflowOperationTools:
         """
         组装工作流
 
+        当重新组装已加载的工作流时，会保留原有的 workflow_id、name、description 等标识，
+        确保后续保存时能正确更新原有工作流，而不是创建新的工作流。
+
         Returns:
             操作结果
         """
@@ -1577,6 +1624,23 @@ class WorkflowOperationTools:
             from .interactive_builder import InteractionStage
 
             self._builder.current_stage = InteractionStage.WORKFLOW
+
+            # ========== 保存现有工作流的标识（用于重新组装场景）==========
+            existing_workflow_id = None
+            existing_workflow_name = None
+            existing_workflow_description = None
+            existing_workflow_version = None
+            is_reassembly = False
+
+            if self._builder.draft_workflow:
+                existing_workflow_id = self._builder.draft_workflow.workflow_id
+                existing_workflow_name = self._builder.draft_workflow.name
+                existing_workflow_description = self._builder.draft_workflow.description
+                existing_workflow_version = self._builder.draft_workflow.version
+                is_reassembly = True
+                logger.info(
+                    f"重新组装已有工作流: {existing_workflow_name} ({existing_workflow_id})"
+                )
 
             # 确保所有草稿 Agent 都注册到 AgentRegistry
             for agent in self._builder.draft_agents:
@@ -1590,6 +1654,24 @@ class WorkflowOperationTools:
             )
 
             if workflow:
+                # ========== 如果是重新组装，恢复原有的工作流标识 ==========
+                if is_reassembly and existing_workflow_id:
+                    workflow.workflow_id = existing_workflow_id
+                    workflow.name = existing_workflow_name
+                    workflow.description = existing_workflow_description
+                    # 版本号递增（表示工作流结构有变化）
+                    if existing_workflow_version:
+                        try:
+                            parts = existing_workflow_version.split(".")
+                            parts[-1] = str(int(parts[-1]) + 1)
+                            workflow.version = ".".join(parts)
+                        except (ValueError, IndexError):
+                            workflow.version = "1.0.1"
+                    logger.info(
+                        f"已恢复工作流标识: {workflow.name} ({workflow.workflow_id}), "
+                        f"版本: {existing_workflow_version} → {workflow.version}"
+                    )
+
                 self._builder.draft_workflow = workflow
 
                 # 通知状态机：工作流组装完成
@@ -1601,9 +1683,10 @@ class WorkflowOperationTools:
                     state=self._builder._get_current_state(),
                 )
 
+                action = "重新组装" if is_reassembly else "组装"
                 return OperationResult(
                     success=True,
-                    message=f"已组装工作流，包含 {len(workflow.nodes)} 个节点",
+                    message=f"已{action}工作流，包含 {len(workflow.nodes)} 个节点",
                     data={"workflow_id": workflow.workflow_id},
                     workflow_changed=True,
                 )
@@ -2041,7 +2124,8 @@ class WorkflowOperationTools:
                         author=author,
                     )
 
-                    # 保存所有 Agents 到数据库
+                    # 保存或更新所有 Agents 到数据库
+                    updated_agents_count = 0
                     for agent_def in agents:
                         try:
                             agent_data = (
@@ -2049,11 +2133,26 @@ class WorkflowOperationTools:
                                 if hasattr(agent_def, "model_dump")
                                 else agent_def.__dict__
                             )
-                            await agent_service.create_agent_from_dict(
-                                agent_data=agent_data,
-                                author=author,
-                            )
-                            saved_agents_count += 1
+                            agent_id = agent_data.get("agent_id")
+
+                            # 检查 Agent 是否已存在
+                            existing_agent = await agent_repo.get_by_agent_id(agent_id)
+                            if existing_agent:
+                                # 更新已存在的 Agent
+                                await agent_service.update_agent(
+                                    agent_id, {"definition": agent_data}
+                                )
+                                await agent_service.activate_agent(agent_id)
+                                updated_agents_count += 1
+                            else:
+                                # 创建新 Agent
+                                created_agent = await agent_service.create_agent_from_dict(
+                                    agent_data=agent_data,
+                                    author=author,
+                                )
+                                # 自动激活已保存的 Agent（从 draft 变为 active）
+                                await agent_service.activate_agent(created_agent.agent_id)
+                                saved_agents_count += 1
                         except Exception as agent_error:
                             agent_name = getattr(agent_def, "name", "unknown")
                             logger.error(
@@ -2077,7 +2176,7 @@ class WorkflowOperationTools:
                     logger.info(
                         f"工作流已保存到数据库: {workflow_detail.name} "
                         f"(ID: {workflow_detail.workflow_id}), "
-                        f"Agents: {saved_agents_count}/{len(agents)}"
+                        f"Agents: 新建 {saved_agents_count}, 更新 {updated_agents_count} / 共 {len(agents)}"
                         + (f", 失败: {failed_agents}" if failed_agents else "")
                     )
 
@@ -3026,7 +3125,7 @@ class WorkflowOperationTools:
             logger.warning(f"获取可用工具列表失败: {e}")
             return []
 
-    # ========== 工作流库和 Agent 库管理 ==========
+    # ========== 工作流库和智能体库管理 ==========
 
     async def search_workflows(
         self,

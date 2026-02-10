@@ -8,8 +8,10 @@ import { Header } from './components/Header';
 import { WorkflowListPanel } from './components/WorkflowListPanel';
 import { AgentLibraryPanel } from './components/AgentLibraryPanel';
 import { SaveWorkflowDialog } from './components/SaveWorkflowDialog';
+import { ScheduleTaskDialog } from './components/ScheduleTaskDialog';
 import { useAppStore } from './stores/appStore';
 import { useWebSocket } from './hooks/useWebSocket';
+import type { WorkflowSummary } from './types';
 
 function App() {
   const {
@@ -23,6 +25,9 @@ function App() {
     setShowSaveWorkflowDialog,
   } = useAppStore();
   const { connect, isConnected, isReconnecting, reconnectAttempt, smartSave } = useWebSocket();
+
+  // 定时任务弹窗状态
+  const [scheduleWorkflow, setScheduleWorkflow] = useState<WorkflowSummary | null>(null);
 
   // 全局快捷键：Cmd/Ctrl + S 保存工作流
   useEffect(() => {
@@ -176,13 +181,25 @@ function App() {
 
         {/* 弹窗 */}
         {showWorkflowListPanel && (
-          <WorkflowListPanel onClose={() => setShowWorkflowListPanel(false)} />
+          <WorkflowListPanel
+            onClose={() => setShowWorkflowListPanel(false)}
+            onSchedule={(workflow) => {
+              setShowWorkflowListPanel(false);
+              setScheduleWorkflow(workflow);
+            }}
+          />
         )}
         {showAgentLibraryPanel && (
           <AgentLibraryPanel onClose={() => setShowAgentLibraryPanel(false)} />
         )}
         {showSaveWorkflowDialog && (
           <SaveWorkflowDialog onClose={() => setShowSaveWorkflowDialog(false)} />
+        )}
+        {scheduleWorkflow && (
+          <ScheduleTaskDialog
+            workflow={scheduleWorkflow}
+            onClose={() => setScheduleWorkflow(null)}
+          />
         )}
       </div>
     </ReactFlowProvider>

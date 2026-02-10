@@ -28,6 +28,7 @@ except ImportError:
     raise ImportError("请安装 web 依赖: pip install -e '.[web]'")
 
 from src.utils.logger import get_logger, setup_uvicorn_logging
+from src.utils.timestamp import utc_now_iso_z
 
 logger = get_logger()
 
@@ -142,9 +143,27 @@ async def lifespan(app: FastAPI):
     setup_uvicorn_logging()
     # 启动时初始化
     await init_dependencies()
+    
+    # 初始化定时任务调度器
+    try:
+        from src.services.scheduler_service import scheduler_service
+        await scheduler_service.initialize()
+        logger.info("✅ 定时任务调度器已初始化")
+    except Exception as e:
+        logger.warning(f"定时任务调度器初始化失败（功能不可用）: {e}")
+    
     yield
+    
     # 关闭时清理
     logger.info("应用正在关闭...")
+    
+    # 关闭定时任务调度器
+    try:
+        from src.services.scheduler_service import scheduler_service
+        await scheduler_service.shutdown()
+    except Exception:
+        pass
+    
     # 优雅关闭存储服务
     if _storage_service and _storage_service.is_initialized:
         await _storage_service.shutdown()
@@ -245,7 +264,7 @@ def create_app():
                     "history_count": history_count,
                     "mode": builder.mode.value if hasattr(builder, "mode") else "idle",
                 },
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                "timestamp": utc_now_iso_z(),
             },
             room=sid,
         )
@@ -258,7 +277,7 @@ def create_app():
                 {
                     "type": "workflow_update",
                     "payload": initial_state,
-                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "timestamp": utc_now_iso_z(),
                 },
                 room=sid,
             )
@@ -355,6 +374,23 @@ def create_app():
     async def on_unsubscribe(sid, data):
         if sid in sio_handlers:
             await sio_handlers[sid].handle_unsubscribe(data)
+
+    # =============== 定时任务管理事件 ===============
+
+    @sio.on("schedule_workflow")
+    async def on_schedule_workflow(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_schedule_workflow(data)
+
+    @sio.on("unschedule_workflow")
+    async def on_unschedule_workflow(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_unschedule_workflow(data)
+
+    @sio.on("get_workflow_schedules")
+    async def on_get_workflow_schedules(sid, data):
+        if sid in sio_handlers:
+            await sio_handlers[sid].handle_get_workflow_schedules(data)
 
     # =============== FastAPI 应用 ===============
 

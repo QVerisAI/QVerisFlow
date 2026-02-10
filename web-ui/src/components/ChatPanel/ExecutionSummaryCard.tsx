@@ -12,6 +12,7 @@ import {
   PlayCircle,
   StopCircle,
   FileText,
+  ClipboardList,
 } from 'lucide-react';
 import type { ExecutionSummary, ExecutionNodeResult } from '../../types';
 import { formatDuration, formatNodeOutput, formatStartNodeInput } from '../../utils/outputFormatter';
@@ -272,7 +273,7 @@ export default function ExecutionSummaryCard({ summary, onReExecute }: Execution
       )}
 
       {/* 操作栏 */}
-      <div className="px-4 py-2 flex items-center gap-2 border-b border-slate-100">
+      <div className="px-4 py-2 flex items-center gap-2 flex-wrap border-b border-slate-100">
         <button
           type="button"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
@@ -284,10 +285,18 @@ export default function ExecutionSummaryCard({ summary, onReExecute }: Execution
         <button
           type="button"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
-          onClick={() => openReport(summary)}
+          onClick={() => openReport(summary, 'result')}
         >
           <FileText className="w-3.5 h-3.5" />
-          查看完整报告
+          查看结果报告
+        </button>
+        <button
+          type="button"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 transition-colors"
+          onClick={() => openReport(summary, 'process')}
+        >
+          <ClipboardList className="w-3.5 h-3.5" />
+          查看过程报告
         </button>
         <button
           type="button"

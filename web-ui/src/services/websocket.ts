@@ -191,7 +191,7 @@ class SocketIOService {
   }
 
   /**
-   * 发送 Agent 更新请求
+   * 发送智能体更新请求
    */
   updateAgent(agentName: string, updates: Record<string, unknown>): void {
     this.send(WSMessageType.UPDATE_AGENT, { agent_name: agentName, updates });
@@ -309,5 +309,5 @@ class SocketIOService {
   }
 }
 
-// 单例导出（保持与原接口兼容）
+// 单例导出
 export const wsService = new SocketIOService();

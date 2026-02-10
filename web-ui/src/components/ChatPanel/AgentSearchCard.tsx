@@ -119,7 +119,7 @@ export default function AgentSearchCard({ data }: AgentSearchCardProps) {
     // 添加用户消息，保持对话连续性
     addMessage({
       role: 'user',
-      content: `添加 Agent ${name}`,
+      content: `添加智能体 ${name}`,
       timestamp: new Date().toISOString(),
       messageType: 'text',
     });
@@ -129,7 +129,7 @@ export default function AgentSearchCard({ data }: AgentSearchCardProps) {
     return (
       <div className="mt-3 p-4 bg-slate-50 rounded-xl border border-slate-200 text-center">
         <Bot className="w-8 h-8 mx-auto text-slate-300 mb-2" />
-        <p className="text-sm text-slate-500">没有找到 Agent</p>
+        <p className="text-sm text-slate-500">没有找到智能体</p>
         <p className="text-xs text-slate-400 mt-1">尝试不同的搜索关键词</p>
       </div>
     );
@@ -144,7 +144,7 @@ export default function AgentSearchCard({ data }: AgentSearchCardProps) {
             <Bot className="w-3.5 h-3.5 text-purple-600" />
           </div>
           <span className="text-sm font-medium text-slate-700">
-            Agent 库
+            智能体库
           </span>
           <span className="text-xs text-slate-400">
             ({data.total} 个结果)
@@ -152,7 +152,7 @@ export default function AgentSearchCard({ data }: AgentSearchCardProps) {
         </div>
       </div>
 
-      {/* Agent 列表 */}
+      {/* 智能体列表 */}
       <div className="space-y-2 max-h-80 overflow-y-auto">
         {data.agents.map((agent) => (
           <AgentItem
@@ -165,7 +165,7 @@ export default function AgentSearchCard({ data }: AgentSearchCardProps) {
 
       {/* 提示 */}
       <p className="text-[10px] text-slate-400 text-center">
-        点击 Agent 卡片添加到当前工作流
+        点击智能体卡片添加到当前工作流
       </p>
     </div>
   );

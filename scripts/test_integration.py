@@ -165,8 +165,8 @@ async def test_workflow_service():
 
 
 async def test_agent_service():
-    """测试 Agent 服务"""
-    print("\n🧪 测试 Agent 服务...")
+    """测试智能体 服务"""
+    print("\n🧪 测试智能体 服务...")
 
     try:
         from src.services import AgentService
@@ -188,11 +188,11 @@ async def test_agent_service():
         agent_repo = AgentRepository(db._session_factory)
         service = AgentService(agent_repo)
 
-        # 测试创建 Agent
+        # 测试创建智能体
         test_agent = {
             "agent_id": f"test_agent_{int(asyncio.get_event_loop().time() * 1000)}",
             "name": "TestAgent",
-            "description": "集成测试创建的 Agent",
+            "description": "集成测试创建的智能体",
             "version": "1.0.0",
             "execution_type": "executor",
             "domain_type": "general",
@@ -212,31 +212,31 @@ async def test_agent_service():
         }
 
         created = await service.create_agent_from_dict(test_agent, author="test")
-        print(f"  ✅ 创建 Agent: {created.agent_id}")
+        print(f"  ✅ 创建智能体: {created.agent_id}")
 
-        # 测试获取 Agent
+        # 测试获取智能体
         retrieved = await service.get_agent(created.agent_id)
         if retrieved:
-            print(f"  ✅ 获取 Agent: {retrieved.name}")
+            print(f"  ✅ 获取智能体: {retrieved.name}")
         else:
-            print("  ❌ 获取 Agent 失败")
+            print("  ❌ 获取智能体 失败")
             return False
 
-        # 测试列出 Agent
+        # 测试列出智能体
         agents = await service.list_agents()
-        print(f"  ✅ 列出 Agent: 共 {len(agents)} 个")
+        print(f"  ✅ 列出智能体: 共 {len(agents)} 个")
 
-        # 测试删除 Agent
+        # 测试删除智能体
         deleted = await service.delete_agent(created.agent_id)
         if deleted:
-            print(f"  ✅ 删除 Agent: {created.agent_id}")
+            print(f"  ✅ 删除智能体: {created.agent_id}")
 
         await db.close()
-        print("✅ Agent 服务测试通过")
+        print("✅智能体 服务测试通过")
         return True
 
     except Exception as e:
-        print(f"❌ Agent 服务测试失败: {e}")
+        print(f"❌智能体 服务测试失败: {e}")
         import traceback
 
         traceback.print_exc()
@@ -245,7 +245,7 @@ async def test_agent_service():
 
 async def main():
     print("=" * 50)
-    print("🚀 Agent Framework 集成测试")
+    print("🚀智能体 Framework 集成测试")
     print("=" * 50)
 
     results = []
@@ -254,7 +254,7 @@ async def main():
     results.append(("PostgreSQL 连接", await test_database_connection()))
     results.append(("Redis 连接", await test_redis_connection()))
     results.append(("工作流服务", await test_workflow_service()))
-    results.append(("Agent 服务", await test_agent_service()))
+    results.append(("智能体服务", await test_agent_service()))
 
     # 汇总结果
     print("\n" + "=" * 50)

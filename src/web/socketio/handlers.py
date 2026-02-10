@@ -9,7 +9,7 @@ import asyncio
 import time
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, List
 from pathlib import Path
 
 import socketio
@@ -17,6 +17,7 @@ import socketio
 from src.web.websocket.handlers import WSMessageType, WSMessage
 from src.web.socketio.manager import SocketIOConnectionManager
 from src.utils.logger import get_logger
+from src.utils.timestamp import utc_now_iso_z
 from src.evolution.conversational_builder import (
     ConversationalWorkflowBuilder,
     Message,
@@ -127,7 +128,7 @@ class SocketIOHandler:
             "type": event,
             "payload": payload,
             # 使用 UTC 时间，确保时间戳准确（Z 后缀表示 UTC）
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "timestamp": utc_now_iso_z(),
         }
 
         if queue:
@@ -753,6 +754,12 @@ class SocketIOHandler:
                                 "author": w.author,
                                 "created_at": w.created_at,
                                 "updated_at": w.updated_at,
+                                # P1: 执行历史字段
+                                "last_execution_at": w.last_execution_at,
+                                "last_execution_status": w.last_execution_status,
+                                "execution_count": w.execution_count,
+                                # P2: 定时任务配置
+                                "schedule_config": w.schedule_config,
                             }
                             for w in workflows
                         ],
@@ -837,7 +844,7 @@ class SocketIOHandler:
             from src.services import AgentService
             from src.services.agent_service import AgentFilters
             from src.storage.database import AsyncDatabaseManager
-            from src.storage.repositories import AgentRepository
+            from src.storage.repositories import AgentRepository, WorkflowDefinitionRepository
             from src.storage.config import PostgreSQLConfig
             import os
 
@@ -853,6 +860,7 @@ class SocketIOHandler:
 
             try:
                 agent_repo = AgentRepository(db._session_factory)
+                workflow_repo = WorkflowDefinitionRepository(db._session_factory)
                 service = AgentService(agent_repo)
 
                 payload = data.get("payload", {})
@@ -869,6 +877,27 @@ class SocketIOHandler:
 
                 agents = await service.list_agents(filters)
 
+                # 构建 agent_id -> workflows 映射
+                agent_workflow_map: Dict[str, List[Dict[str, str]]] = {}
+                try:
+                    # 获取所有活跃的工作流
+                    workflows = await workflow_repo.get_active_workflows()
+                    for wf in workflows:
+                        definition = wf.definition_json or {}
+                        nodes = definition.get("nodes", [])
+                        wf_info = {"name": wf.name, "workflow_id": wf.workflow_id}
+                        for node in nodes:
+                            # agent_id 可能在节点顶层或 config 中
+                            agent_id = node.get("agent_id") or (node.get("config") or {}).get("agent_id")
+                            if agent_id:
+                                if agent_id not in agent_workflow_map:
+                                    agent_workflow_map[agent_id] = []
+                                # 避免重复添加同一工作流
+                                if wf_info not in agent_workflow_map[agent_id]:
+                                    agent_workflow_map[agent_id].append(wf_info)
+                except Exception as wf_err:
+                    logger.warning(f"获取工作流使用信息失败: {wf_err}")
+
                 # 将 AgentSummary 对象转换为字典
                 await self.emit(
                     WSMessageType.AGENTS_LIST.value,
@@ -878,6 +907,7 @@ class SocketIOHandler:
                                 "id": a.id,
                                 "agent_id": a.agent_id,
                                 "name": a.name,
+                                "display_name": a.display_name,
                                 "description": a.description,
                                 "version": a.version,
                                 "status": a.status,
@@ -888,6 +918,7 @@ class SocketIOHandler:
                                 "is_template": a.is_template,
                                 "created_at": a.created_at,
                                 "updated_at": a.updated_at,
+                                "used_in_workflows": agent_workflow_map.get(a.agent_id, []),
                             }
                             for a in agents
                         ],
@@ -1060,6 +1091,225 @@ class SocketIOHandler:
                 await db.close()
         except Exception as e:
             logger.error(f"获取 Agent 模板失败: {e}")
+            await self.emit(WSMessageType.ERROR.value, {"error": str(e)})
+
+    # ==================== 定时任务管理 ====================
+
+    async def handle_schedule_workflow(self, data: Dict[str, Any]) -> None:
+        """设置工作流定时任务"""
+        try:
+            payload = data.get("payload", {})
+            workflow_id = payload.get("workflow_id", "")
+            workflow_db_id = payload.get("workflow_db_id", "")
+            schedule_config = payload.get("schedule_config", {})
+
+            if not workflow_db_id and not workflow_id:
+                await self.emit(
+                    WSMessageType.ERROR.value,
+                    {"error": "缺少 workflow_id 或 workflow_db_id"},
+                )
+                return
+
+            if not schedule_config:
+                await self.emit(
+                    WSMessageType.ERROR.value, {"error": "缺少 schedule_config"}
+                )
+                return
+
+            from src.services import WorkflowService
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import (
+                WorkflowDefinitionRepository,
+                WorkflowExecutionRepository,
+            )
+            from src.storage.config import PostgreSQLConfig
+            import os
+
+            config = PostgreSQLConfig(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
+            )
+            db = AsyncDatabaseManager(config)
+            await db.connect()
+
+            try:
+                workflow_repo = WorkflowDefinitionRepository(db._session_factory)
+                execution_repo = WorkflowExecutionRepository(db._session_factory)
+                service = WorkflowService(workflow_repo, execution_repo)
+
+                # 如果只有 workflow_id，先获取 workflow_db_id
+                target_id = workflow_db_id
+                if not target_id and workflow_id:
+                    workflow = await service.get_workflow(workflow_id)
+                    if workflow:
+                        target_id = workflow.id
+
+                if not target_id:
+                    await self.emit(
+                        WSMessageType.ERROR.value,
+                        {"error": f"工作流不存在: {workflow_db_id or workflow_id}"},
+                    )
+                    return
+
+                result = await service.schedule_workflow(target_id, schedule_config)
+
+                if result:
+                    # 注册到调度器
+                    from src.services.scheduler_service import scheduler_service
+                    await scheduler_service.add_workflow_schedule(
+                        workflow_db_id=target_id,
+                        workflow_id=result.workflow_id,
+                        schedule_config=schedule_config,
+                    )
+
+                    await self.emit(
+                        WSMessageType.WORKFLOW_SCHEDULED.value,
+                        {
+                            "workflow_id": result.workflow_id,
+                            "workflow_db_id": target_id,
+                            "schedule_config": schedule_config,
+                            "message": f"工作流 '{result.name}' 定时任务已设置",
+                        },
+                    )
+                else:
+                    await self.emit(
+                        WSMessageType.ERROR.value, {"error": "设置定时任务失败"}
+                    )
+            finally:
+                await db.close()
+        except Exception as e:
+            logger.error(f"设置定时任务失败: {e}", exc_info=True)
+            await self.emit(WSMessageType.ERROR.value, {"error": str(e)})
+
+    async def handle_unschedule_workflow(self, data: Dict[str, Any]) -> None:
+        """取消工作流定时任务"""
+        try:
+            payload = data.get("payload", {})
+            workflow_id = payload.get("workflow_id", "")
+            workflow_db_id = payload.get("workflow_db_id", "")
+
+            if not workflow_db_id and not workflow_id:
+                await self.emit(
+                    WSMessageType.ERROR.value,
+                    {"error": "缺少 workflow_id 或 workflow_db_id"},
+                )
+                return
+
+            from src.services import WorkflowService
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import (
+                WorkflowDefinitionRepository,
+                WorkflowExecutionRepository,
+            )
+            from src.storage.config import PostgreSQLConfig
+            import os
+
+            config = PostgreSQLConfig(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
+            )
+            db = AsyncDatabaseManager(config)
+            await db.connect()
+
+            try:
+                workflow_repo = WorkflowDefinitionRepository(db._session_factory)
+                execution_repo = WorkflowExecutionRepository(db._session_factory)
+                service = WorkflowService(workflow_repo, execution_repo)
+
+                # 如果只有 workflow_id，先获取 workflow_db_id
+                target_id = workflow_db_id
+                if not target_id and workflow_id:
+                    workflow = await service.get_workflow(workflow_id)
+                    if workflow:
+                        target_id = workflow.id
+
+                if not target_id:
+                    await self.emit(
+                        WSMessageType.ERROR.value,
+                        {"error": f"工作流不存在: {workflow_db_id or workflow_id}"},
+                    )
+                    return
+
+                result = await service.unschedule_workflow(target_id)
+
+                if result:
+                    # 从调度器移除
+                    from src.services.scheduler_service import scheduler_service
+                    await scheduler_service.remove_workflow_schedule(target_id)
+
+                    await self.emit(
+                        WSMessageType.WORKFLOW_UNSCHEDULED.value,
+                        {
+                            "workflow_id": result.workflow_id,
+                            "workflow_db_id": target_id,
+                            "message": f"工作流 '{result.name}' 定时任务已取消",
+                        },
+                    )
+                else:
+                    await self.emit(
+                        WSMessageType.ERROR.value, {"error": "取消定时任务失败"}
+                    )
+            finally:
+                await db.close()
+        except Exception as e:
+            logger.error(f"取消定时任务失败: {e}", exc_info=True)
+            await self.emit(WSMessageType.ERROR.value, {"error": str(e)})
+
+    async def handle_get_workflow_schedules(self, data: Dict[str, Any]) -> None:
+        """获取所有定时任务列表"""
+        try:
+            from src.services import WorkflowService
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import (
+                WorkflowDefinitionRepository,
+                WorkflowExecutionRepository,
+            )
+            from src.storage.config import PostgreSQLConfig
+            import os
+
+            config = PostgreSQLConfig(
+                host=os.getenv("POSTGRES_HOST", "localhost"),
+                port=int(os.getenv("POSTGRES_PORT", "5432")),
+                database=os.getenv("POSTGRES_DB", "agent_framework"),
+                user=os.getenv("POSTGRES_USER", "postgres"),
+                password=os.getenv("POSTGRES_PASSWORD", ""),
+            )
+            db = AsyncDatabaseManager(config)
+            await db.connect()
+
+            try:
+                workflow_repo = WorkflowDefinitionRepository(db._session_factory)
+                execution_repo = WorkflowExecutionRepository(db._session_factory)
+                service = WorkflowService(workflow_repo, execution_repo)
+
+                scheduled_workflows = await service.get_scheduled_workflows()
+
+                await self.emit(
+                    WSMessageType.WORKFLOW_SCHEDULES.value,
+                    {
+                        "schedules": [
+                            {
+                                "id": w.id,
+                                "workflow_id": w.workflow_id,
+                                "name": w.name,
+                                "description": w.description,
+                                "schedule_config": w.schedule_config,
+                            }
+                            for w in scheduled_workflows
+                        ],
+                        "total": len(scheduled_workflows),
+                    },
+                )
+            finally:
+                await db.close()
+        except Exception as e:
+            logger.error(f"获取定时任务列表失败: {e}", exc_info=True)
             await self.emit(WSMessageType.ERROR.value, {"error": str(e)})
 
     async def handle_get_execution_history(self, data: Dict[str, Any]) -> None:

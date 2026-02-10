@@ -48,6 +48,16 @@ export enum WSMessageType {
   AGENTS_LIST = 'agents_list',
   AGENT_REUSED = 'agent_reused',
   AGENT_TEMPLATES = 'agent_templates',
+
+  // 定时任务管理 (Client -> Server)
+  SCHEDULE_WORKFLOW = 'schedule_workflow',
+  UNSCHEDULE_WORKFLOW = 'unschedule_workflow',
+  GET_WORKFLOW_SCHEDULES = 'get_workflow_schedules',
+
+  // 定时任务管理响应 (Server -> Client)
+  WORKFLOW_SCHEDULED = 'workflow_scheduled',
+  WORKFLOW_UNSCHEDULED = 'workflow_unscheduled',
+  WORKFLOW_SCHEDULES = 'workflow_schedules',
 }
 
 // 消息
@@ -327,6 +337,16 @@ export interface NodeExecutionResult {
   error?: string;
 }
 
+// 定时任务配置
+export interface ScheduleConfig {
+  enabled: boolean;
+  cronExpression: string;
+  nextExecutionAt?: string;
+  timezone?: string;
+  notifyOnComplete?: boolean;
+  notifyOnFailure?: boolean;
+}
+
 // 工作流摘要（用于列表展示）
 export interface WorkflowSummary {
   id: string;
@@ -342,13 +362,20 @@ export interface WorkflowSummary {
   author: string;
   createdAt: string;
   updatedAt: string;
+  // 执行历史相关
+  lastExecutionAt?: string;
+  lastExecutionStatus?: 'success' | 'failed' | 'running';
+  executionCount?: number;
+  // 定时任务配置
+  scheduleConfig?: ScheduleConfig;
 }
 
-// Agent 库条目（用于列表展示）
+// 智能体库条目（用于列表展示）
 export interface AgentLibraryItem {
   id: string;
   agentId: string;
   name: string;
+  displayName: string;  // 用户友好的显示名称（中文）
   description: string;
   version: string;
   status: string;
@@ -359,6 +386,7 @@ export interface AgentLibraryItem {
   isTemplate: boolean;
   createdAt: string;
   updatedAt: string;
+  usedInWorkflows: { name: string; workflowId: string }[];  // 使用该智能体的工作流列表
 }
 
 // 保存工作流请求
