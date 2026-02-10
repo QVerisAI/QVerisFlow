@@ -47,6 +47,8 @@ class WorkflowSummary:
     # 执行历史相关字段
     last_execution_at: Optional[str] = None
     last_execution_status: Optional[str] = None
+    last_execution_triggered_by: Optional[str] = None  # 'scheduler' or 'manual'
+    last_execution_id: Optional[str] = None
     execution_count: int = 0
     # 定时任务配置
     schedule_config: Optional[Dict[str, Any]] = None
@@ -332,8 +334,10 @@ class WorkflowService:
                 )
                 if executions:
                     latest = executions[0]
+                    # 优先使用 started_at，如果为空则使用 created_at
+                    execution_time = latest.started_at or latest.created_at
                     summary.last_execution_at = (
-                        latest.started_at.isoformat() if latest.started_at else None
+                        execution_time.isoformat() if execution_time else None
                     )
                     # 转换状态：completed -> success
                     if latest.status:
@@ -342,6 +346,20 @@ class WorkflowService:
                             summary.last_execution_status = "success"
                         else:
                             summary.last_execution_status = status_value
+                    
+                    # 获取执行 ID
+                    summary.last_execution_id = latest.id
+                    
+                    # 获取触发来源（从 initial_context 中提取）
+                    if latest.initial_context:
+                        triggered_by = latest.initial_context.get("triggered_by")
+                        if triggered_by == "scheduler":
+                            summary.last_execution_triggered_by = "scheduler"
+                        else:
+                            summary.last_execution_triggered_by = "manual"
+                    else:
+                        summary.last_execution_triggered_by = "manual"
+                        
                 # 获取执行总数
                 all_executions = await self.execution_repo.get_by_workflow(
                     workflow_definition_id=m.id,
@@ -717,6 +735,8 @@ class WorkflowService:
             # 执行历史字段（由 list_workflows 方法填充）
             last_execution_at=None,
             last_execution_status=None,
+            last_execution_triggered_by=None,
+            last_execution_id=None,
             execution_count=0,
             schedule_config=schedule_config,
         )

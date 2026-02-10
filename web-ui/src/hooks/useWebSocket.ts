@@ -332,6 +332,7 @@ export function useWebSocket() {
             total_duration_ms?: number;
             nodes_completed?: number;
             nodes_failed?: number;
+            total_nodes?: number;
           }>;
         };
 
@@ -358,7 +359,7 @@ export function useWebSocket() {
             startedAt: h.started_at,
             completedAt: h.completed_at,
             totalDurationMs: h.total_duration_ms,
-            nodesTotal: (h.nodes_completed || 0) + (h.nodes_failed || 0),
+            nodesTotal: h.total_nodes || (h.nodes_completed || 0) + (h.nodes_failed || 0),
             nodesCompleted: h.nodes_completed || 0,
             nodesFailed: h.nodes_failed || 0,
           }));
@@ -1287,9 +1288,11 @@ export function useWebSocket() {
         // P1: 执行历史字段
         lastExecutionAt: w.last_execution_at as string | undefined,
         lastExecutionStatus: w.last_execution_status as 'success' | 'failed' | 'running' | undefined,
+        lastExecutionTriggeredBy: w.last_execution_triggered_by as 'scheduler' | 'manual' | undefined,
+        lastExecutionId: w.last_execution_id as string | undefined,
         executionCount: w.execution_count as number | undefined,
         // P2: 定时任务配置
-        scheduleConfig: w.schedule_config as { enabled: boolean; cronExpression: string; timezone?: string; notifyOnComplete?: boolean; notifyOnFailure?: boolean } | undefined,
+        scheduleConfig: w.schedule_config as { enabled: boolean; cronExpression: string; nextExecutionAt?: string; timezone?: string; notifyOnComplete?: boolean; notifyOnFailure?: boolean } | undefined,
       })));
     }, 'hook_workflows_list');
 
@@ -1309,6 +1312,7 @@ export function useWebSocket() {
           total_duration_ms?: number;
           nodes_completed?: number;
           nodes_failed?: number;
+          total_nodes?: number;
         }>;
       };
       const store = useAppStore.getState();
@@ -1335,11 +1339,23 @@ export function useWebSocket() {
           startedAt: h.started_at,
           completedAt: h.completed_at,
           totalDurationMs: h.total_duration_ms,
-          nodesTotal: (h.nodes_completed || 0) + (h.nodes_failed || 0),
+          nodesTotal: h.total_nodes || (h.nodes_completed || 0) + (h.nodes_failed || 0),
           nodesCompleted: h.nodes_completed || 0,
           nodesFailed: h.nodes_failed || 0,
         }));
         store.setExecutionHistory(records);
+        
+        // 检查是否有待选中的执行ID（从"查看详情"按钮设置）
+        const { pendingExecutionId } = store;
+        if (pendingExecutionId) {
+          // 确认该执行ID在历史记录中存在
+          const targetRecord = records.find(r => r.executionId === pendingExecutionId);
+          if (targetRecord) {
+            store.selectExecution(pendingExecutionId);
+          }
+          // 无论是否找到，都清除待选中的ID
+          store.setPendingExecutionId(null);
+        }
       }
       addMessage({
         role: 'system',
@@ -1474,6 +1490,130 @@ export function useWebSocket() {
       wsService.send(WSMessageType.LIST_WORKFLOWS, {});
     }, 'hook_workflow_unscheduled');
 
+    // 定时任务执行事件（广播给所有在线客户端）
+    const unsubScheduledExecutionEvent = wsService.on(WSMessageType.SCHEDULED_EXECUTION_EVENT, (msg) => {
+      const payload = msg.payload as {
+        workflow_id: string;
+        workflow_db_id: string;
+        execution_id: string;
+        triggered_by: 'scheduler';
+        event: {
+          event_type: string;
+          workflow_name?: string;
+          message?: string;
+          error?: string;
+          [key: string]: unknown;
+        };
+        timestamp: string;
+      };
+
+      const { event, workflow_id } = payload;
+      const store = useAppStore.getState();
+      
+      // 检查当前画布是否正在显示这个工作流
+      const isCurrentWorkflow = store.currentWorkflowMeta?.workflowId === workflow_id;
+
+      // 根据事件类型更新工作流列表中的状态
+      if (event.event_type === 'workflow_started') {
+        // 更新工作流状态为运行中
+        const updatedList = store.workflowList.map(w => 
+          w.workflowId === workflow_id 
+            ? { 
+                ...w, 
+                lastExecutionStatus: 'running' as const,
+                lastExecutionTriggeredBy: 'scheduler' as const,
+                lastExecutionId: payload.execution_id,
+                lastExecutionAt: payload.timestamp,
+              }
+            : w
+        );
+        store.setWorkflowList(updatedList);
+        
+        // 如果当前画布正在显示这个工作流，添加新的执行记录到 executionHistory
+        if (isCurrentWorkflow) {
+          const totalNodes = (event.total_nodes as number) || 0;
+          const newRecord: ExecutionRecord = {
+            executionId: payload.execution_id,
+            workflowId: workflow_id,
+            status: 'running',
+            startedAt: payload.timestamp,
+            nodesTotal: totalNodes,
+            nodesCompleted: 0,
+            nodesFailed: 0,
+          };
+          store.addExecutionRecord(newRecord);
+        }
+
+        // 添加系统消息通知
+        addMessage({
+          role: 'system',
+          content: `⏰ 定时任务开始执行: ${event.workflow_name || workflow_id}`,
+          timestamp: new Date().toISOString(),
+          messageType: 'text',
+        });
+      } else if (event.event_type === 'workflow_completed') {
+        // 更新工作流状态为成功
+        const updatedList = store.workflowList.map(w => 
+          w.workflowId === workflow_id 
+            ? { 
+                ...w, 
+                lastExecutionStatus: 'success' as const,
+                executionCount: (w.executionCount || 0) + 1,
+              }
+            : w
+        );
+        store.setWorkflowList(updatedList);
+        
+        // 如果当前画布正在显示这个工作流，更新执行记录状态
+        if (isCurrentWorkflow) {
+          const nodesCompleted = (event.nodes_completed as number) || 0;
+          const nodesFailed = (event.nodes_failed as number) || 0;
+          const totalDurationMs = (event.total_duration_ms as number) || 0;
+          store.updateExecutionRecord(payload.execution_id, {
+            status: 'success',
+            completedAt: new Date().toISOString(),
+            nodesCompleted,
+            nodesFailed,
+            totalDurationMs,
+          });
+        }
+
+        addMessage({
+          role: 'system',
+          content: `✅ 定时任务执行成功: ${event.workflow_name || workflow_id}`,
+          timestamp: new Date().toISOString(),
+          messageType: 'text',
+        });
+      } else if (event.event_type === 'workflow_failed') {
+        // 更新工作流状态为失败
+        const updatedList = store.workflowList.map(w => 
+          w.workflowId === workflow_id 
+            ? { 
+                ...w, 
+                lastExecutionStatus: 'failed' as const,
+                executionCount: (w.executionCount || 0) + 1,
+              }
+            : w
+        );
+        store.setWorkflowList(updatedList);
+        
+        // 如果当前画布正在显示这个工作流，更新执行记录状态
+        if (isCurrentWorkflow) {
+          store.updateExecutionRecord(payload.execution_id, {
+            status: 'failed',
+            completedAt: new Date().toISOString(),
+          });
+        }
+
+        addMessage({
+          role: 'system',
+          content: `❌ 定时任务执行失败: ${event.workflow_name || workflow_id}${event.error ? ` - ${event.error}` : ''}`,
+          timestamp: new Date().toISOString(),
+          messageType: 'text',
+        });
+      }
+    }, 'hook_scheduled_execution_event');
+
     // 清理
     return () => {
       unsubConnected();
@@ -1500,6 +1640,7 @@ export function useWebSocket() {
       unsubAgentReused();
       unsubWorkflowScheduled();
       unsubWorkflowUnscheduled();
+      unsubScheduledExecutionEvent();
     };
   }, [addMessage, updateOrAddProgressMessage, setWorkflowState, setHighlightedNodes, setSuggestedActions, setExecutionProgress, updateNodeState, setIsLoading, setCheckpoints, setGenerationProgress, updateAgentInWorkflow, setMode, clearRealtimeNodeOutputs, prependMessagesBatch, addMessagesBatch, setHasMoreHistory, setIsLoadingHistory]);
 

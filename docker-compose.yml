@@ -138,6 +138,12 @@ services:
       STORAGE_DIR: /app/data/storage
       LOG_DIR: /app/data/logs
       TEMP_DIR: /app/data/temp
+      # 定时任务执行记录存储路径
+      SCHEDULED_EXECUTION_PATH: /app/data/scheduled_executions
+      # 定时任务执行记录保留策略
+      SCHEDULED_MAX_EXECUTIONS: ${SCHEDULED_MAX_EXECUTIONS:-10}
+      SCHEDULED_MAX_AGE_DAYS: ${SCHEDULED_MAX_AGE_DAYS:-30}
+      SCHEDULED_CLEANUP_INTERVAL: ${SCHEDULED_CLEANUP_INTERVAL:-24}
       # LLM API Keys（从宿主机 .env 透传）
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

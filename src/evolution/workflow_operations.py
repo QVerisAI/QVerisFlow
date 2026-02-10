@@ -2706,7 +2706,52 @@ class WorkflowOperationTools:
             操作结果，包含执行详情（所有节点的 input/output）
         """
         try:
-            # 使用统一的路径获取方法
+            # 首先尝试从数据库获取执行记录
+            try:
+                from src.storage.database import AsyncDatabaseManager
+                from src.services.workflow_service import WorkflowService
+                
+                db = AsyncDatabaseManager()
+                await db.connect()
+                try:
+                    service = WorkflowService(db.session)
+                    db_detail = await service.get_execution_detail(execution_id)
+                    
+                    if db_detail:
+                        # 数据库中找到了执行记录，构造返回结果
+                        status = db_detail.get("status", "pending")
+                        # 规范化状态
+                        if status == "completed":
+                            status = "success"
+                        
+                        # 从 initial_context 获取触发来源
+                        initial_context = db_detail.get("initial_context", {}) or {}
+                        triggered_by = initial_context.get("triggered_by", "manual")
+                        
+                        result_data = {
+                            "executionId": db_detail.get("id"),
+                            "workflowId": db_detail.get("workflow_definition_id"),
+                            "status": status,
+                            "startedAt": db_detail.get("started_at"),
+                            "completedAt": db_detail.get("completed_at"),
+                            "totalDurationMs": db_detail.get("total_duration_ms", 0),
+                            "error": db_detail.get("error"),
+                            "triggeredBy": triggered_by,
+                            "nodeResults": db_detail.get("node_results", {}),
+                            "source": "database",  # 标记数据来源
+                        }
+                        
+                        return OperationResult(
+                            success=True,
+                            message="成功获取执行详情（数据库）",
+                            data=result_data,
+                        )
+                finally:
+                    await db.close()
+            except Exception as db_err:
+                logger.debug(f"从数据库获取执行记录失败，尝试从文件系统获取: {db_err}")
+            
+            # 从本地文件系统查找（旧逻辑作为后备）
             executions_dir = self._get_executions_path()
 
             # 查找对应的执行目录

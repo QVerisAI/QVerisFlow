@@ -90,8 +90,8 @@ async def init_dependencies():
         await _storage_service.initialize(storage_config)
         logger.info(f"✅ 存储服务已初始化 ({_storage_service})")
 
-        # 初始化工具注册表
-        _tool_registry = ToolRegistry()
+        # 初始化工具注册表 - 使用全局默认实例，确保所有组件共享同一个注册表
+        _tool_registry = ToolRegistry.get_default()
 
         # 注册内置工具（file_ls, file_read, file_write, file_edit, file_append 等）
         register_builtin_tools(_tool_registry)
@@ -101,7 +101,7 @@ async def init_dependencies():
         qveris_adapter = create_qveris_adapter(_tool_registry)
         if qveris_adapter:
             qveris_adapter.register_meta_tools()
-            logger.info("✅ QVeris 工具已注册")
+            logger.info("✅ QVeris 工具已注册 (qveris_search_tools, qveris_execute_tool)")
 
         # 初始化 LLM 客户端
         _llm_client = _config_loader.create_llm_client()
@@ -144,13 +144,66 @@ async def lifespan(app: FastAPI):
     # 启动时初始化
     await init_dependencies()
     
+    # 修复僵尸 running 状态的执行记录（服务重启后，内存中的执行状态丢失）
+    try:
+        from src.storage.database import AsyncDatabaseManager
+        from src.storage.repositories.workflow_repository import WorkflowExecutionRepository
+        
+        db = AsyncDatabaseManager()
+        await db.connect()
+        execution_repo = WorkflowExecutionRepository(db._session_factory)
+        fixed_count = await execution_repo.fix_stale_running_executions()
+        if fixed_count > 0:
+            logger.info(f"✅ 已修复 {fixed_count} 个僵尸 running 状态的执行记录")
+        else:
+            logger.debug("无需修复僵尸执行记录")
+        await db.close()
+    except Exception as e:
+        logger.warning(f"修复僵尸执行记录失败: {e}")
+    
     # 初始化定时任务调度器
     try:
         from src.services.scheduler_service import scheduler_service
+        # 设置 Socket.IO 实例，用于广播定时任务执行事件
+        if sio:
+            scheduler_service.set_sio(sio)
         await scheduler_service.initialize()
         logger.info("✅ 定时任务调度器已初始化")
     except Exception as e:
         logger.warning(f"定时任务调度器初始化失败（功能不可用）: {e}")
+    
+    # 初始化并执行首次清理，然后注册定期清理任务
+    try:
+        from src.services.workspace_cleanup import get_cleanup_service, cleanup_scheduled_executions
+        from src.config import get_scheduled_execution_config
+        
+        cleanup_config = get_scheduled_execution_config()
+        retention = cleanup_config.get("retention", {})
+        cleanup_interval_hours = int(retention.get("cleanup_interval_hours", 24))
+        
+        if cleanup_interval_hours > 0:
+            # 启动时执行一次清理
+            logger.info("执行启动时清理...")
+            cleanup_result = await cleanup_scheduled_executions()
+            logger.info(f"✅ 启动清理完成: 删除 {cleanup_result['directories_removed']} 个目录")
+            
+            # 注册定期清理任务
+            from src.services.scheduler_service import scheduler_service
+            if scheduler_service._scheduler:
+                # 添加清理任务到 APScheduler
+                scheduler_service._scheduler.add_job(
+                    cleanup_scheduled_executions,
+                    'interval',
+                    hours=cleanup_interval_hours,
+                    id='workspace_cleanup',
+                    name='定时任务执行记录清理',
+                    replace_existing=True,
+                )
+                logger.info(f"✅ 已注册定期清理任务（每 {cleanup_interval_hours} 小时执行）")
+        else:
+            logger.info("定期清理已禁用（cleanup_interval_hours=0）")
+    except Exception as e:
+        logger.warning(f"清理服务初始化失败（功能不可用）: {e}")
     
     yield
     

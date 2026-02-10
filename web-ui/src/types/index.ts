@@ -58,6 +58,7 @@ export enum WSMessageType {
   WORKFLOW_SCHEDULED = 'workflow_scheduled',
   WORKFLOW_UNSCHEDULED = 'workflow_unscheduled',
   WORKFLOW_SCHEDULES = 'workflow_schedules',
+  SCHEDULED_EXECUTION_EVENT = 'scheduled_execution_event',  // 定时任务执行事件（广播）
 }
 
 // 消息
@@ -365,9 +366,30 @@ export interface WorkflowSummary {
   // 执行历史相关
   lastExecutionAt?: string;
   lastExecutionStatus?: 'success' | 'failed' | 'running';
+  lastExecutionTriggeredBy?: 'scheduler' | 'manual';  // 执行触发来源
+  lastExecutionId?: string;  // 最近执行的 ID
   executionCount?: number;
   // 定时任务配置
   scheduleConfig?: ScheduleConfig;
+}
+
+// 定时任务执行事件（从后端广播）
+export interface ScheduledExecutionEvent {
+  workflow_id: string;
+  workflow_db_id: string;
+  execution_id: string;
+  triggered_by: 'scheduler';
+  event: {
+    event_type: string;
+    workflow_name?: string;
+    total_nodes?: number;
+    message?: string;
+    error?: string;
+    node_id?: string;
+    node_name?: string;
+    [key: string]: unknown;
+  };
+  timestamp: string;
 }
 
 // 智能体库条目（用于列表展示）

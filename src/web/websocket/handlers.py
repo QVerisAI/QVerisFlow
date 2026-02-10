@@ -92,6 +92,7 @@ class WSMessageType(Enum):
     WORKFLOW_SCHEDULED = "workflow_scheduled"  # 定时任务已设置
     WORKFLOW_UNSCHEDULED = "workflow_unscheduled"  # 定时任务已取消
     WORKFLOW_SCHEDULES = "workflow_schedules"  # 定时任务列表
+    SCHEDULED_EXECUTION_EVENT = "scheduled_execution_event"  # 定时任务执行事件（广播）
 
     # 心跳
     PING = "ping"

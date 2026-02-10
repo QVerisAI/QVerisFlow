@@ -43,6 +43,7 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
     workflowList,
     workflowListLoading,
     setWorkflowListLoading,
+    setPendingExecutionId,
   } = useAppStore();
 
   // 加载工作流列表
@@ -103,6 +104,37 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
     e.stopPropagation();
     setActiveMenuId(null);
     onSchedule?.(workflow);
+  };
+
+  const handleViewExecutionDetail = (workflow: WorkflowSummary) => {
+    // 设置待选中的执行ID，在工作流加载完成后自动选中该执行
+    if (workflow.lastExecutionId) {
+      setPendingExecutionId(workflow.lastExecutionId);
+    }
+    // 加载工作流
+    wsService.send(WSMessageType.LOAD_WORKFLOW, {
+      workflow_db_id: workflow.id,
+    });
+    onClose();
+  };
+
+  const formatNextExecutionTime = (nextExecutionAt?: string) => {
+    if (!nextExecutionAt) return null;
+    const date = new Date(nextExecutionAt);
+    const now = new Date();
+    const diffMs = date.getTime() - now.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+
+    if (diffMins < 0) return '即将执行';
+    if (diffMins < 60) return `${diffMins}分钟后`;
+    if (diffHours < 24) return `${diffHours}小时后`;
+    return date.toLocaleDateString('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
   };
 
   const formatDate = (dateStr: string) => {
@@ -340,6 +372,11 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
                             <span className="flex items-center gap-1 px-2 py-0.5 text-xs font-medium text-purple-600 bg-purple-50 rounded-full">
                               <Timer className="w-3 h-3" />
                               定时
+                              {workflow.scheduleConfig.nextExecutionAt && (
+                                <span className="text-purple-500 ml-0.5">
+                                  · {formatNextExecutionTime(workflow.scheduleConfig.nextExecutionAt)}
+                                </span>
+                              )}
                             </span>
                           )}
                         </div>
@@ -387,6 +424,10 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
                               <span className={`flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded-lg ${statusInfo.bgColor}`}>
                                 <statusInfo.icon className={`w-3.5 h-3.5 ${statusInfo.color} ${statusInfo.animate ? 'animate-spin' : ''}`} />
                                 <span className={statusInfo.color}>{statusInfo.label}</span>
+                                {/* 定时触发标识 */}
+                                {workflow.lastExecutionTriggeredBy === 'scheduler' && (
+                                  <span className="text-purple-500 ml-1">[定时]</span>
+                                )}
                               </span>
                             )}
                             {workflow.lastExecutionAt && (
@@ -398,6 +439,18 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
                               <span className="text-xs text-slate-400">
                                 共执行 {workflow.executionCount} 次
                               </span>
+                            )}
+                            {/* 查看详情按钮 - 运行中时显示 */}
+                            {workflow.lastExecutionStatus === 'running' && workflow.lastExecutionId && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleViewExecutionDetail(workflow);
+                                }}
+                                className="text-xs text-blue-500 hover:text-blue-700 hover:underline"
+                              >
+                                查看详情 →
+                              </button>
                             )}
                           </div>
                         )}

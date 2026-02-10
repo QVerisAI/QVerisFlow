@@ -1273,6 +1273,34 @@ def get_qveris_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     return loader.get_qveris_config()
 
 
+def get_scheduled_execution_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    便捷函数：获取定时任务执行配置
+
+    从 config/app_config.yaml 加载定时任务执行配置。
+
+    Args:
+        config_path: 配置文件路径（可选）
+
+    Returns:
+        定时任务执行配置字典，包含:
+        - workspace_path: 执行记录存储路径
+        - retention: 保留策略配置
+            - max_executions_per_workflow: 每个工作流保留的最大执行次数
+            - max_age_days: 保留最近 N 天的记录
+            - cleanup_interval_hours: 自动清理间隔（小时）
+    """
+    workflow_config = get_workflow_config(config_path)
+    return workflow_config.get("scheduled_execution", {
+        "workspace_path": "./data/scheduled_executions",
+        "retention": {
+            "max_executions_per_workflow": 10,
+            "max_age_days": 30,
+            "cleanup_interval_hours": 24,
+        }
+    })
+
+
 def create_qveris_adapter(
     tool_registry: Any,
     session_id: Optional[str] = None,
@@ -1341,6 +1369,8 @@ __all__ = [
     "get_storage_config",
     # 工作流配置
     "get_workflow_config",
+    # 定时任务执行配置
+    "get_scheduled_execution_config",
     # QVeris 配置
     "get_qveris_config",
     "create_qveris_adapter",

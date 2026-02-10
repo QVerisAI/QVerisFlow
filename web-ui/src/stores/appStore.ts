@@ -114,6 +114,9 @@ interface AppState {
   updateExecutionRecord: (executionId: string, updates: Partial<ExecutionRecord>) => void;
   setCurrentExecutionDetail: (detail: ExecutionRecord | null) => void;
   setExecutionDetailLoading: (loading: boolean) => void;
+  // 待选中的执行ID（用于"查看详情"功能：先加载工作流，加载完成后自动选中该执行）
+  pendingExecutionId: string | null;
+  setPendingExecutionId: (executionId: string | null) => void;
 
   // === 工作流库 ===
   workflowList: WorkflowSummary[];
@@ -399,6 +402,8 @@ export const useAppStore = create<AppState>((set) => ({
     executionDetailLoading: false,
   }),
   setExecutionDetailLoading: (loading) => set({ executionDetailLoading: loading }),
+  pendingExecutionId: null,
+  setPendingExecutionId: (executionId) => set({ pendingExecutionId: executionId }),
 
   // === 工作流库 ===
   workflowList: [],

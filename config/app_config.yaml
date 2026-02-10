@@ -199,7 +199,7 @@ workflow:
   # Agent 输出 data 字段的默认格式
   # - "json":     结构化 JSON 对象（适合下游程序消费）
   # - "markdown": Markdown 文本（面向人类阅读，报告更美观）
-  # 可被 WorkflowDefinition.default_data_format 或
+  # 可被 WorkflowDefinition.default_format 或
   # 单个 Agent 的 output_instruction.data_format 覆盖
   default_data_format: ${WORKFLOW_DATA_FORMAT:markdown}
 
@@ -211,6 +211,23 @@ workflow:
 
   # 节点失败时是否继续执行后续节点
   continue_on_error: false
+
+  # ----------------------------------------------------------
+  # 定时任务执行配置
+  # ----------------------------------------------------------
+  scheduled_execution:
+    # 定时任务执行记录存储路径
+    # 建议配置为持久化存储路径，避免使用 /tmp
+    workspace_path: ${SCHEDULED_EXECUTION_PATH:./data/scheduled_executions}
+    
+    # 执行记录保留策略
+    retention:
+      # 保留最近 N 次执行记录（每个工作流）
+      max_executions_per_workflow: ${SCHEDULED_MAX_EXECUTIONS:10}
+      # 保留最近 N 天的执行记录
+      max_age_days: ${SCHEDULED_MAX_AGE_DAYS:30}
+      # 自动清理间隔（小时），0 表示禁用自动清理
+      cleanup_interval_hours: ${SCHEDULED_CLEANUP_INTERVAL:24}
 
 
 # QVeris 远程工具配置

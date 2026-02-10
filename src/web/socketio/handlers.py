@@ -613,10 +613,22 @@ class SocketIOHandler:
                             for r in node_results.values()
                             if isinstance(r, dict) and r.get("status") == "completed"
                         )
+                        nodes_failed = sum(
+                            1
+                            for r in node_results.values()
+                            if isinstance(r, dict) and r.get("status") == "failed"
+                        )
+                        total_nodes = len(node_results)
+                        # 计算总耗时
+                        total_duration_ms = sum(
+                            r.get("duration_ms", 0)
+                            for r in node_results.values()
+                            if isinstance(r, dict)
+                        )
                         history_list.append(
                             {
                                 "id": h.id,
-                                "execution_id": h.execution_id,
+                                "execution_id": h.id,
                                 "status": _normalize_status(h.status),
                                 "started_at": (
                                     h.started_at.isoformat() if h.started_at else None
@@ -627,7 +639,10 @@ class SocketIOHandler:
                                     else None
                                 ),
                                 "nodes_completed": nodes_completed,
-                                "total_nodes": len(node_results),
+                                "nodes_failed": nodes_failed,
+                                "total_nodes": total_nodes,
+                                "total_duration_ms": total_duration_ms
+                                or h.total_duration_ms,
                             }
                         )
 
@@ -757,6 +772,8 @@ class SocketIOHandler:
                                 # P1: 执行历史字段
                                 "last_execution_at": w.last_execution_at,
                                 "last_execution_status": w.last_execution_status,
+                                "last_execution_triggered_by": w.last_execution_triggered_by,
+                                "last_execution_id": w.last_execution_id,
                                 "execution_count": w.execution_count,
                                 # P2: 定时任务配置
                                 "schedule_config": w.schedule_config,
@@ -844,7 +861,10 @@ class SocketIOHandler:
             from src.services import AgentService
             from src.services.agent_service import AgentFilters
             from src.storage.database import AsyncDatabaseManager
-            from src.storage.repositories import AgentRepository, WorkflowDefinitionRepository
+            from src.storage.repositories import (
+                AgentRepository,
+                WorkflowDefinitionRepository,
+            )
             from src.storage.config import PostgreSQLConfig
             import os
 
@@ -888,7 +908,9 @@ class SocketIOHandler:
                         wf_info = {"name": wf.name, "workflow_id": wf.workflow_id}
                         for node in nodes:
                             # agent_id 可能在节点顶层或 config 中
-                            agent_id = node.get("agent_id") or (node.get("config") or {}).get("agent_id")
+                            agent_id = node.get("agent_id") or (
+                                node.get("config") or {}
+                            ).get("agent_id")
                             if agent_id:
                                 if agent_id not in agent_workflow_map:
                                     agent_workflow_map[agent_id] = []
@@ -918,7 +940,9 @@ class SocketIOHandler:
                                 "is_template": a.is_template,
                                 "created_at": a.created_at,
                                 "updated_at": a.updated_at,
-                                "used_in_workflows": agent_workflow_map.get(a.agent_id, []),
+                                "used_in_workflows": agent_workflow_map.get(
+                                    a.agent_id, []
+                                ),
                             }
                             for a in agents
                         ],
@@ -1159,6 +1183,7 @@ class SocketIOHandler:
                 if result:
                     # 注册到调度器
                     from src.services.scheduler_service import scheduler_service
+
                     await scheduler_service.add_workflow_schedule(
                         workflow_db_id=target_id,
                         workflow_id=result.workflow_id,
@@ -1241,6 +1266,7 @@ class SocketIOHandler:
                 if result:
                     # 从调度器移除
                     from src.services.scheduler_service import scheduler_service
+
                     await scheduler_service.remove_workflow_schedule(target_id)
 
                     await self.emit(

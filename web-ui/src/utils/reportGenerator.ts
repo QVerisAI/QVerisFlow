@@ -1391,75 +1391,12 @@ function renderFinalOutputContent(summary: ExecutionSummary): string {
     html += `<div class="step-data">${detailHtml}</div>`;
   }
 
-  // ── 3. 结论 ──
-  // 如果有 narrative，在详细报告后添加结论区（与执行摘要呼应）
-  if (narrative && detailHtml) {
-    html += `<hr class="divider">`;
-    html += `<div class="section-label">结论</div>`;
-    html += `<div class="conclusion-text">${narrative}</div>`;
-    if (highlights.length > 0) {
-      html += `<ul class="findings">`;
-      for (const h of highlights) {
-        html += `<li>${escapeHtml(h)}</li>`;
-      }
-      html += `</ul>`;
-    }
-  }
+  // 注意：移除了此处的结论区渲染，因为与执行摘要内容完全重复。
+  // 如果需要在报告末尾添加结论，应使用独立的结论数据源，而非复用 narrative。
 
   // 如果什么内容都没有
   if (!html) {
     html = `<div class="summary-text" style="color:#94a3b8;">暂无详细数据</div>`;
-  }
-
-  return html;
-}
-
-/**
- * 渲染结论区
- *
- * 策略：
- * 1. 优先使用 finalNarrative + finalHighlights（来自后端提取）
- * 2. 如果为空，回退到最后一个业务节点的 narrative + highlights
- * 3. 不展示 finalOutput 的 JSON 数据
- */
-function renderConclusion(summary: ExecutionSummary): string {
-  let narrative = summary.finalNarrative || '';
-  let highlights = summary.finalHighlights || [];
-
-  // 如果 finalNarrative 为空，回退到最后一个有叙述的业务节点
-  if (!narrative && highlights.length === 0) {
-    const visibleNodes = getVisibleNodes(summary);
-    // 从后往前找最后一个有 narrative 的节点
-    for (let i = visibleNodes.length - 1; i >= 0; i--) {
-      const node = visibleNodes[i];
-      const nodeNarrative = getNodeNarrative(node);
-      const nodeHighlights = getNodeHighlights(node);
-      if (nodeNarrative || nodeHighlights.length > 0) {
-        narrative = nodeNarrative;
-        highlights = nodeHighlights;
-        break;
-      }
-    }
-  }
-
-  // 如果仍然没有内容，不展示结论区
-  if (!narrative && highlights.length === 0) return '';
-
-  let html = `<hr class="divider"><div class="section-label">结论</div>`;
-
-  if (narrative) {
-    // narrative 已经是 escapeHtml 过的（来自 getNodeNarrative），
-    // 但 finalNarrative 是原始的，需要 escape
-    const safeNarrative = narrative === summary.finalNarrative ? escapeHtml(narrative) : narrative;
-    html += `<div class="conclusion-text">${safeNarrative}</div>`;
-  }
-
-  if (highlights.length > 0) {
-    html += `<ul class="findings">`;
-    for (const h of highlights) {
-      html += `<li>${escapeHtml(h)}</li>`;
-    }
-    html += `</ul>`;
   }
 
   return html;
@@ -1741,6 +1678,8 @@ export function generateReportHtml(summary: ExecutionSummary, reportType: Report
   const pdfFileName = reportTitle + '-' + typeSuffix;
 
   // 根据报告类型生成不同的主体内容
+  // 注意：移除了过程报告中的 renderConclusion 调用，因为它与 renderSummary 使用相同的数据源，
+  // 会导致执行摘要和结论内容完全重复。
   const bodyContent = reportType === 'result'
     ? `
     ${renderFinalOutputContent(summary)}
@@ -1749,7 +1688,6 @@ export function generateReportHtml(summary: ExecutionSummary, reportType: Report
     ${renderSummary(summary)}
     <hr class="divider">
     ${renderSteps(summary)}
-    ${renderConclusion(summary)}
     `;
 
   return `<!DOCTYPE html>

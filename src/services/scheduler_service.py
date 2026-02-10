@@ -44,6 +44,17 @@ class WorkflowSchedulerService:
         self._jobs: Dict[str, ScheduledJob] = {}  # workflow_db_id -> ScheduledJob
         self._execution_callback: Optional[Callable[[str, str], Awaitable[None]]] = None
         self._initialized = False
+        self._sio = None  # Socket.IO 实例，用于广播事件
+        
+    def set_sio(self, sio) -> None:
+        """
+        设置 Socket.IO 实例
+        
+        Args:
+            sio: Socket.IO 服务器实例
+        """
+        self._sio = sio
+        logger.info("SchedulerService: Socket.IO 实例已设置")
         
     async def initialize(self) -> None:
         """初始化调度器"""
@@ -281,10 +292,11 @@ class WorkflowSchedulerService:
         """
         默认的工作流执行方式
         
-        直接通过服务层触发执行
+        使用 ScheduledWorkflowExecutor 在后台异步执行工作流。
         """
         try:
             from src.services import WorkflowService
+            from src.services.scheduled_executor import ScheduledWorkflowExecutor
             from src.storage.database import AsyncDatabaseManager
             from src.storage.repositories import (
                 WorkflowDefinitionRepository,
@@ -307,21 +319,53 @@ class WorkflowSchedulerService:
                 execution_repo = WorkflowExecutionRepository(db._session_factory)
                 service = WorkflowService(workflow_repo, execution_repo)
                 
+                # 获取工作流定义
+                workflow_detail = await service.get_workflow_by_id(workflow_db_id)
+                if not workflow_detail:
+                    logger.error(f"找不到工作流: {workflow_db_id}")
+                    return
+                
                 # 创建执行记录
                 execution = await service.create_execution(
                     workflow_id=workflow_id,
                     input_data={"triggered_by": "scheduler"},
                 )
                 
-                if execution:
-                    logger.info(
-                        f"定时任务已创建执行记录: workflow={workflow_id}, "
-                        f"execution_id={execution.get('id')}"
-                    )
-                    # TODO: 实际触发工作流执行
-                    # 这需要与 ConversationalWorkflowBuilder 集成
-                else:
+                if not execution:
                     logger.error(f"创建执行记录失败: workflow={workflow_id}")
+                    return
+                    
+                execution_id = execution.get('id')
+                logger.info(
+                    f"定时任务已创建执行记录: workflow={workflow_id}, "
+                    f"execution_id={execution_id}"
+                )
+                
+                # 使用 ScheduledWorkflowExecutor 在后台执行工作流
+                if self._sio:
+                    executor = ScheduledWorkflowExecutor(self._sio)
+                    success = await executor.execute_in_background(
+                        workflow_db_id=workflow_db_id,
+                        workflow_id=workflow_id,
+                        execution_id=execution_id,
+                        workflow_definition=workflow_detail.definition,
+                    )
+                    
+                    if success:
+                        logger.info(
+                            f"定时任务已启动后台执行: workflow={workflow_id}, "
+                            f"execution_id={execution_id}"
+                        )
+                    else:
+                        logger.warning(
+                            f"定时任务启动失败: workflow={workflow_id}, "
+                            f"execution_id={execution_id}"
+                        )
+                else:
+                    logger.warning(
+                        f"Socket.IO 未配置，无法执行定时任务: workflow={workflow_id}. "
+                        "请确保在初始化时调用 set_sio() 方法。"
+                    )
                     
             finally:
                 await db.close()
