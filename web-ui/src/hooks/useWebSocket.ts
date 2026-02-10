@@ -1177,6 +1177,13 @@ export function useWebSocket() {
     const unsubError = wsService.on(WSMessageType.ERROR, (msg) => {
       setIsLoading(false);
       const payload = msg.payload as { error: string };
+      
+      // 清除执行详情加载状态（防止加载状态卡住）
+      const store = useAppStore.getState();
+      if (store.executionDetailLoading) {
+        store.setExecutionDetailLoading(false);
+      }
+      
       addMessage({
         role: 'system',
         content: `❌ 错误: ${payload.error}`,
@@ -1254,8 +1261,13 @@ export function useWebSocket() {
       // 这避免了快速切换执行记录时，旧请求的响应覆盖新数据的问题
       if (state.selectedExecutionId === payload.executionId) {
         state.setCurrentExecutionDetail(payload.detail || null);
+        // setCurrentExecutionDetail 内部会自动设置 executionDetailLoading = false
       } else {
         console.log(`[ExecutionDetail] 忽略过期响应: 期望=${state.selectedExecutionId}, 收到=${payload.executionId}`);
+        // 如果当前没有选中任何执行记录，也清除加载状态
+        if (!state.selectedExecutionId && state.executionDetailLoading) {
+          state.setExecutionDetailLoading(false);
+        }
       }
     }, 'hook_execution_detail');
 

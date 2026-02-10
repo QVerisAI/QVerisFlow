@@ -2709,12 +2709,18 @@ class WorkflowOperationTools:
             # 首先尝试从数据库获取执行记录
             try:
                 from src.storage.database import AsyncDatabaseManager
+                from src.storage.repositories import (
+                    WorkflowDefinitionRepository,
+                    WorkflowExecutionRepository,
+                )
                 from src.services.workflow_service import WorkflowService
                 
                 db = AsyncDatabaseManager()
                 await db.connect()
                 try:
-                    service = WorkflowService(db.session)
+                    workflow_repo = WorkflowDefinitionRepository(db._session_factory)
+                    execution_repo = WorkflowExecutionRepository(db._session_factory)
+                    service = WorkflowService(workflow_repo, execution_repo)
                     db_detail = await service.get_execution_detail(execution_id)
                     
                     if db_detail:

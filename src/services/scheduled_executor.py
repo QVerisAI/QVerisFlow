@@ -297,11 +297,27 @@ class ScheduledWorkflowExecutor:
             # 处理执行结果
             status = result.status.value if hasattr(result.status, 'value') else str(result.status)
             
-            # 更新数据库执行记录
+            # 构建节点执行结果字典（用于保存到数据库）
+            node_results_dict = {}
+            for node_id, node_result in result.node_results.items():
+                node_results_dict[node_id] = {
+                    "status": node_result.status if isinstance(node_result.status, str) else (
+                        node_result.status.value if hasattr(node_result.status, 'value') else str(node_result.status)
+                    ),
+                    "started_at": node_result.started_at.isoformat() if hasattr(node_result, 'started_at') and node_result.started_at else None,
+                    "completed_at": node_result.completed_at.isoformat() if hasattr(node_result, 'completed_at') and node_result.completed_at else None,
+                    "duration_ms": getattr(node_result, 'duration_ms', None),
+                    "error": getattr(node_result, 'error', None),
+                    "node_name": getattr(node_result, 'node_name', node_id),
+                }
+            
+            # 更新数据库执行记录（包含完整的节点执行结果）
             await self._update_execution_status(
                 execution_id, 
                 "completed" if status == "completed" else "failed",
-                error=None if status == "completed" else "执行未成功完成"
+                error=None if status == "completed" else "执行未成功完成",
+                node_results=node_results_dict,
+                total_duration_ms=result.total_duration_ms,
             )
             
             # 构建返回结果
@@ -361,9 +377,20 @@ class ScheduledWorkflowExecutor:
         self, 
         execution_id: str, 
         status: str,
-        error: Optional[str] = None
+        error: Optional[str] = None,
+        node_results: Optional[Dict[str, Any]] = None,
+        total_duration_ms: Optional[float] = None,
     ) -> None:
-        """更新数据库中的执行记录状态"""
+        """
+        更新数据库中的执行记录状态
+        
+        Args:
+            execution_id: 执行记录 ID
+            status: 状态 (running, completed, failed)
+            error: 错误信息（可选）
+            node_results: 节点执行结果（可选）
+            total_duration_ms: 总执行时长（毫秒，可选）
+        """
         try:
             from src.storage.database import AsyncDatabaseManager
             from src.storage.repositories import WorkflowExecutionRepository
@@ -382,7 +409,13 @@ class ScheduledWorkflowExecutor:
                 if status in ("completed", "failed"):
                     updates["completed_at"] = datetime.now()
                 if error:
-                    updates["error"] = error  # 修复：字段名应为 error，不是 error_message
+                    updates["error"] = error
+                # 保存节点执行结果
+                if node_results is not None:
+                    updates["node_results"] = node_results
+                # 保存总执行时长
+                if total_duration_ms is not None:
+                    updates["total_duration_ms"] = total_duration_ms
                     
                 await execution_repo.update(execution_id, updates)
                 logger.debug(f"更新执行记录状态: {execution_id} -> {status}")

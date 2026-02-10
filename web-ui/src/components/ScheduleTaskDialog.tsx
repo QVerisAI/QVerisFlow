@@ -204,10 +204,10 @@ export const ScheduleTaskDialog: React.FC<ScheduleTaskDialogProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="bg-white rounded-2xl shadow-xl border border-slate-200/50 w-[520px] overflow-hidden">
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl border border-slate-200/50 w-[520px] max-h-[90vh] flex flex-col overflow-hidden">
         {/* 头部 */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100">
+        <div className="flex items-center justify-between px-6 py-5 border-b border-slate-100 flex-shrink-0">
           <div className="flex items-center gap-4">
             <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-purple-500 to-violet-600 flex items-center justify-center shadow-lg shadow-purple-500/20">
               <Timer className="w-5 h-5 text-white" />
@@ -226,7 +226,7 @@ export const ScheduleTaskDialog: React.FC<ScheduleTaskDialogProps> = ({
         </div>
 
         {/* 工作流信息 */}
-        <div className="px-6 py-4 bg-slate-50 border-b border-slate-100">
+        <div className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex-shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center">
               <Calendar className="w-4 h-4 text-blue-600" />
@@ -239,7 +239,7 @@ export const ScheduleTaskDialog: React.FC<ScheduleTaskDialogProps> = ({
         </div>
 
         {/* 配置表单 */}
-        <div className="p-6 space-y-6">
+        <div className="p-6 space-y-6 flex-1 overflow-y-auto">
           {/* 启用开关 */}
           <div className="flex items-center justify-between">
             <div>
@@ -407,7 +407,7 @@ export const ScheduleTaskDialog: React.FC<ScheduleTaskDialogProps> = ({
         </div>
 
         {/* 底部按钮 */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 bg-slate-50/50">
+        <div className="flex items-center justify-between px-6 py-4 border-t border-slate-100 bg-slate-50/50 flex-shrink-0">
           <div>
             {existingConfig?.enabled && (
               <button
