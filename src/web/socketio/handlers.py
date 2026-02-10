@@ -218,6 +218,8 @@ class SocketIOHandler:
                         WSMessageType.SUGGESTED_ACTIONS.value,
                         {"actions": response.suggested_actions},
                     )
+        except asyncio.CancelledError:
+            logger.info(f"操作被取消: {action}, session={self.session_id}")
         except Exception as e:
             logger.error(f"操作执行失败: {e}")
             await self.emit(WSMessageType.ERROR.value, {"error": str(e)})
@@ -462,6 +464,11 @@ class SocketIOHandler:
                         if agent_model and agent_model.definition_json:
                             # 从数据库记录构建 AgentDefinition
                             agent_def = AgentDefinition(**agent_model.definition_json)
+                            # 以数据库 status 为权威来源，同步 is_active 字段
+                            if agent_model.status:
+                                agent_def.is_active = (
+                                    agent_model.status.value == "active"
+                                )
                             loaded_agents.append(agent_def)
                             # 保存数据库 ID 用于后续更新
                             loaded_agent_db_ids[agent_id] = agent_model.id
@@ -1365,6 +1372,9 @@ class SocketIOHandler:
         try:
             payload = data.get("payload", {})
             execution_id = payload.get("execution_id", "")
+            # 从 WorkflowListPanel 点击"查看详情"时传入的额外参数
+            workflow_name = payload.get("workflow_name", "")
+            show_in_chat = payload.get("show_in_chat", False)
 
             if not execution_id:
                 await self.emit(
@@ -1375,13 +1385,20 @@ class SocketIOHandler:
             result = await self.builder.operations.get_execution_detail(execution_id)
 
             if result.success:
+                response_data = {
+                    "executionId": execution_id,
+                    "detail": result.data,
+                    "message": result.message,
+                }
+                # 原样返回额外参数，供前端判断显示方式
+                if workflow_name:
+                    response_data["workflow_name"] = workflow_name
+                if show_in_chat:
+                    response_data["show_in_chat"] = True
+                    
                 await self.emit(
                     WSMessageType.EXECUTION_DETAIL.value,
-                    {
-                        "executionId": execution_id,
-                        "detail": result.data,
-                        "message": result.message,
-                    },
+                    response_data,
                 )
             else:
                 await self.emit(WSMessageType.ERROR.value, {"error": result.message})

@@ -329,7 +329,7 @@ export interface ExecutionRecord {
 export interface NodeExecutionResult {
   nodeId: string;
   nodeName: string;
-  status: 'success' | 'failed' | 'skipped' | 'pending' | 'running';
+  status: 'success' | 'failed' | 'skipped' | 'pending' | 'running' | 'cancelled';
   startedAt?: string;
   completedAt?: string;
   durationMs?: number;
@@ -365,7 +365,7 @@ export interface WorkflowSummary {
   updatedAt: string;
   // 执行历史相关
   lastExecutionAt?: string;
-  lastExecutionStatus?: 'success' | 'failed' | 'running';
+  lastExecutionStatus?: 'success' | 'failed' | 'running' | 'cancelled';
   lastExecutionTriggeredBy?: 'scheduler' | 'manual';  // 执行触发来源
   lastExecutionId?: string;  // 最近执行的 ID
   executionCount?: number;

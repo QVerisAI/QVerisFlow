@@ -313,6 +313,7 @@ function ExecutionResultPanel({
     skipped: { label: '跳过', color: 'text-amber-600 bg-amber-50', icon: SkipForward },
     running: { label: '运行中', color: 'text-blue-600 bg-blue-50', icon: Loader2 },
     pending: { label: '等待', color: 'text-slate-500 bg-slate-50', icon: Clock },
+    cancelled: { label: '已取消', color: 'text-amber-600 bg-amber-50', icon: XCircle },
   };
 
   const statusInfo = statusConfig[status] || statusConfig.pending;
@@ -610,17 +611,37 @@ export function NodeDetailPanel({
     return (value as T) ?? defaultValue;
   };
 
-  // 状态映射
-  const statusConfig: Record<string, { label: string; color: string; icon: React.ComponentType<{ className?: string }> }> = {
+  // 状态映射 —— 执行相关状态
+  const executionStatusConfig: Record<string, { label: string; color: string; icon: React.ComponentType<{ className?: string }> }> = {
     completed: { label: '已完成', color: 'bg-emerald-50 text-emerald-600 border-emerald-100', icon: CheckCircle },
     failed: { label: '失败', color: 'bg-red-50 text-red-600 border-red-100', icon: XCircle },
     running: { label: '运行中', color: 'bg-blue-50 text-blue-600 border-blue-100', icon: Clock },
     skipped: { label: '已跳过', color: 'bg-amber-50 text-amber-600 border-amber-100', icon: SkipForward },
     pending: { label: '等待中', color: 'bg-slate-50 text-slate-500 border-slate-100', icon: Clock },
+    cancelled: { label: '已取消', color: 'bg-amber-50 text-amber-600 border-amber-100', icon: XCircle },
     preview: { label: '预览', color: 'bg-violet-50 text-violet-600 border-violet-100', icon: Clock },
   };
 
-  const currentStatus = statusConfig[status] || statusConfig.pending;
+  // 智能体活跃状态映射 —— idle/building 模式下显示
+  const agentActivityStatusConfig: Record<string, { label: string; color: string; icon: React.ComponentType<{ className?: string }> }> = {
+    active: { label: '活跃', color: 'bg-emerald-50 text-emerald-600 border-emerald-100', icon: CheckCircle },
+    inactive: { label: '停用', color: 'bg-slate-50 text-slate-500 border-slate-100', icon: Clock },
+    draft: { label: '草稿', color: 'bg-amber-50 text-amber-600 border-amber-100', icon: Clock },
+  };
+
+  // 确定当前要显示的状态：
+  // - 执行中或有执行数据时，显示执行状态（running/completed/failed/pending...）
+  // - idle/building 模式且无执行数据时，显示智能体活跃状态（active/inactive/draft）
+  const isInExecutionContext = mode === 'executing' || mode === 'completed' || isHistoryMode || hasExecutionData;
+
+  let currentStatus: { label: string; color: string; icon: React.ComponentType<{ className?: string }> };
+  if (isInExecutionContext) {
+    currentStatus = executionStatusConfig[status] || executionStatusConfig.pending;
+  } else {
+    // 从 agentDefinition 获取活跃状态
+    const agentActivityStatus = def?.is_active === false ? 'inactive' : 'active';
+    currentStatus = agentActivityStatusConfig[agentActivityStatus] || agentActivityStatusConfig.active;
+  }
   const StatusIcon = currentStatus.icon;
 
   return (
@@ -640,7 +661,7 @@ export function NodeDetailPanel({
             {/* 状态和版本 */}
             <div className="flex items-center gap-2 mt-2">
               <span className={`inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-full border ${currentStatus.color}`}>
-                <StatusIcon className="w-3 h-3" />
+                <StatusIcon className={`w-3 h-3 ${isInExecutionContext && status === 'running' ? 'animate-spin' : ''}`} />
                 {currentStatus.label}
               </span>
               {def?.version && (

@@ -269,6 +269,12 @@ class WorkflowEngine(IWorkflowEngine):
         # 事件回调: workflow_id -> callback
         self._event_callbacks: Dict[str, Callable] = {}
 
+        # === 执行任务管理 ===
+        # 执行任务引用: workflow_id -> asyncio.Task（用于取消）
+        self._execution_tasks: Dict[str, asyncio.Task] = {}
+        # 取消事件: workflow_id -> asyncio.Event（set() 表示已取消）
+        self._cancel_events: Dict[str, asyncio.Event] = {}
+
         # === 事件追踪支持 ===
         # 事件序列号生成器
         self._event_sequence = EventSequenceGenerator()
@@ -513,6 +519,10 @@ class WorkflowEngine(IWorkflowEngine):
         except WorkflowCycleError as e:
             result.status = WorkflowStatus.FAILED
             result.error = str(e)
+        except asyncio.CancelledError:
+            result.status = WorkflowStatus.CANCELLED
+            result.error = "工作流被取消（任务中断）"
+            logger.info(f"工作流 {workflow_id} 执行任务被取消")
         except Exception as e:
             result.status = WorkflowStatus.FAILED
             result.error = f"工作流执行异常: {str(e)}"
@@ -531,6 +541,9 @@ class WorkflowEngine(IWorkflowEngine):
                     except InvalidTransitionError:
                         pass  # 可能已经被外部取消
 
+            # 清理执行任务引用
+            self._execution_tasks.pop(workflow_id, None)
+
             # 清理
             completed_at = datetime.now()
             result.completed_at = completed_at.isoformat()
@@ -548,11 +561,28 @@ class WorkflowEngine(IWorkflowEngine):
         return result
 
     async def cancel(self, workflow_id: str) -> bool:
-        """取消工作流执行"""
+        """取消工作流执行
+
+        执行三层取消：
+        1. FSM 状态转移到 CANCELLED（协作式标志）
+        2. 设置 cancel_event（通知 Agent 内部工具循环停止）
+        3. 取消 asyncio.Task（中断正在进行的 LLM/工具调用）
+        """
         fsm = self._execution_fsms.get(workflow_id)
         if fsm and fsm.can_transition(ExecutionEvent.STOP):
             try:
                 await fsm.transition(ExecutionEvent.STOP)
+
+                # 设置取消事件（通知 Agent 内部协作式停止）
+                cancel_event = self._cancel_events.get(workflow_id)
+                if cancel_event:
+                    cancel_event.set()
+
+                # 取消执行任务（中断正在进行的 await）
+                task = self._execution_tasks.get(workflow_id)
+                if task and not task.done():
+                    task.cancel()
+
                 return True
             except InvalidTransitionError:
                 return False
@@ -592,6 +622,15 @@ class WorkflowEngine(IWorkflowEngine):
         # 注册事件回调
         if event_callback:
             self._event_callbacks[workflow_id] = event_callback
+
+        # 保存执行任务引用（用于取消）
+        current_task = asyncio.current_task()
+        if current_task:
+            self._execution_tasks[workflow_id] = current_task
+
+        # 创建取消事件（用于 Agent 内部协作式取消）
+        cancel_event = asyncio.Event()
+        self._cancel_events[workflow_id] = cancel_event
 
         # 初始化控制状态
         self._skip_nodes[workflow_id] = set()
@@ -644,6 +683,7 @@ class WorkflowEngine(IWorkflowEngine):
             # 按拓扑顺序执行节点
             nodes_executed = 0
             total_nodes = len(execution_order)
+            _cancelled_event_sent = False  # 防止 workflow_cancelled 事件重复发送
 
             for node_id in execution_order:
                 # 检查取消标志（通过 FSM）
@@ -705,6 +745,7 @@ class WorkflowEngine(IWorkflowEngine):
                             },
                         },
                     )
+                    _cancelled_event_sent = True
                     break
 
                 # 检查暂停标志（通过 FSM）
@@ -890,6 +931,10 @@ class WorkflowEngine(IWorkflowEngine):
         except WorkflowCycleError as e:
             result.status = WorkflowStatus.FAILED
             result.error = str(e)
+        except asyncio.CancelledError:
+            result.status = WorkflowStatus.CANCELLED
+            result.error = "工作流被取消（任务中断）"
+            logger.info(f"工作流 {workflow_id} 执行任务被取消")
         except Exception as e:
             result.status = WorkflowStatus.FAILED
             result.error = f"工作流执行异常: {str(e)}"
@@ -907,6 +952,10 @@ class WorkflowEngine(IWorkflowEngine):
                         fsm.transition_sync(ExecutionEvent.STOP)
                     except InvalidTransitionError:
                         pass  # 可能已经被外部取消
+
+            # 清理执行任务引用和取消事件
+            self._execution_tasks.pop(workflow_id, None)
+            self._cancel_events.pop(workflow_id, None)
 
             # 清理
             completed_at = datetime.now()
@@ -1026,6 +1075,32 @@ class WorkflowEngine(IWorkflowEngine):
                         },
                     },
                 )
+            elif result.status == WorkflowStatus.CANCELLED:
+                # 仅在循环内未发送过 workflow_cancelled 事件时才发送
+                # （循环内检测到取消时已发送过一次）
+                if not _cancelled_event_sent:
+                    await self._emit_event(
+                        workflow_id,
+                        {
+                            "event_type": "workflow_cancelled",
+                            "workflow_id": workflow_id,
+                            "status": "cancelled",
+                            "timestamp": completed_at.isoformat(),
+                            "data": {
+                                "status": "cancelled",
+                                "node_results": node_results_for_event,
+                                "total_duration_ms": result.total_duration_ms,
+                                "nodes_completed": len(
+                                    [
+                                        r
+                                        for r in result.node_results.values()
+                                        if r.status == "success"
+                                    ]
+                                ),
+                                "total_nodes": len(result.node_results),
+                            },
+                        },
+                    )
 
             # 清理控制状态
             self._cleanup_streaming_state(workflow_id)
@@ -1658,6 +1733,10 @@ class WorkflowEngine(IWorkflowEngine):
                     result.status = WorkflowStatus.COMPLETED
                     result.final_output = node_outputs
 
+        except asyncio.CancelledError:
+            result.status = WorkflowStatus.CANCELLED
+            result.error = "工作流被取消（任务中断）"
+            logger.info(f"工作流 {workflow_id} 恢复执行任务被取消")
         except Exception as e:
             result.status = WorkflowStatus.FAILED
             result.error = f"工作流恢复执行异常: {str(e)}"
@@ -1675,6 +1754,9 @@ class WorkflowEngine(IWorkflowEngine):
                         fsm.transition_sync(ExecutionEvent.STOP)
                     except InvalidTransitionError:
                         pass
+
+            # 清理执行任务引用
+            self._execution_tasks.pop(workflow_id, None)
 
             completed_at = datetime.now()
             result.completed_at = completed_at.isoformat()
@@ -2329,11 +2411,15 @@ class WorkflowEngine(IWorkflowEngine):
             if ctype in ("reasoning", "content") and content:
                 await batcher.add(ctype, content)
 
+        # 获取取消事件（如果存在）传递给 Agent
+        cancel_event = self._cancel_events.get(workflow_id)
+
         result = await agent.run(
             task_description=task_description,
             input_data=node_input.get("input_data", node_input),
             progress_callback=progress_callback,
             stream_callback=stream_callback,
+            cancel_event=cancel_event,
         )
         await batcher.flush_all()
 

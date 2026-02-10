@@ -300,12 +300,21 @@ class ScheduledWorkflowExecutor:
             # 构建节点执行结果字典（用于保存到数据库）
             node_results_dict = {}
             for node_id, node_result in result.node_results.items():
+                # 处理 started_at 和 completed_at（可能是 datetime 对象或已经是字符串）
+                started_at = getattr(node_result, 'started_at', None)
+                if started_at is not None:
+                    started_at = started_at.isoformat() if hasattr(started_at, 'isoformat') else str(started_at)
+                
+                completed_at = getattr(node_result, 'completed_at', None)
+                if completed_at is not None:
+                    completed_at = completed_at.isoformat() if hasattr(completed_at, 'isoformat') else str(completed_at)
+                
                 node_results_dict[node_id] = {
                     "status": node_result.status if isinstance(node_result.status, str) else (
                         node_result.status.value if hasattr(node_result.status, 'value') else str(node_result.status)
                     ),
-                    "started_at": node_result.started_at.isoformat() if hasattr(node_result, 'started_at') and node_result.started_at else None,
-                    "completed_at": node_result.completed_at.isoformat() if hasattr(node_result, 'completed_at') and node_result.completed_at else None,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
                     "duration_ms": getattr(node_result, 'duration_ms', None),
                     "error": getattr(node_result, 'error', None),
                     "node_name": getattr(node_result, 'node_name', node_id),

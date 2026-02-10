@@ -573,18 +573,36 @@ export function useWebSocket() {
         const totalNodes = (event.data?.total_nodes as number) || event.total_nodes || 0;
         const executionId = event.workflow_id || `exec_${Date.now()}`;
         const workflowName = (event.data?.workflow_name as string) || '';
+        const startedAt = new Date().toISOString();
 
         const newRecord: ExecutionRecord = {
           executionId,
           workflowId: event.workflow_id || '',
           status: 'running',
-          startedAt: new Date().toISOString(),
+          startedAt,
           nodesTotal: totalNodes,
           nodesCompleted: 0,
           nodesFailed: 0,
         };
         currentExecutionRef.current = newRecord;
         addExecutionRecord(newRecord);
+
+        // 同步更新工作流列表中的执行状态（手动执行时也要更新）
+        if (event.workflow_id) {
+          const store = useAppStore.getState();
+          const updatedList = store.workflowList.map(w =>
+            w.workflowId === event.workflow_id
+              ? {
+                  ...w,
+                  lastExecutionStatus: 'running' as const,
+                  lastExecutionTriggeredBy: 'manual' as const,
+                  lastExecutionId: executionId,
+                  lastExecutionAt: startedAt,
+                }
+              : w
+          );
+          store.setWorkflowList(updatedList);
+        }
 
         // 清除旧的实时节点输出
         clearRealtimeNodeOutputs();
@@ -675,6 +693,22 @@ export function useWebSocket() {
             nodesFailed,
           });
 
+          // 同步更新工作流列表中的执行状态（手动执行时也要更新）
+          const workflowId = currentExecutionRef.current?.workflowId || event.workflow_id;
+          if (workflowId) {
+            const store = useAppStore.getState();
+            const updatedList = store.workflowList.map(w =>
+              w.workflowId === workflowId
+                ? {
+                    ...w,
+                    lastExecutionStatus: (isSuccess ? 'success' : 'failed') as 'success' | 'failed',
+                    executionCount: (w.executionCount || 0) + 1,
+                  }
+                : w
+            );
+            store.setWorkflowList(updatedList);
+          }
+
           // 检查是否已存在该执行的摘要消息（可能从后端同步）
           const existingMessages = useAppStore.getState().messages;
           const existingSummary = existingMessages.find(
@@ -736,6 +770,22 @@ export function useWebSocket() {
             status: 'failed',
             completedAt,
           });
+
+          // 同步更新工作流列表中的执行状态（手动执行时也要更新）
+          const workflowId = currentExecutionRef.current?.workflowId || event.workflow_id;
+          if (workflowId) {
+            const store = useAppStore.getState();
+            const updatedList = store.workflowList.map(w =>
+              w.workflowId === workflowId
+                ? {
+                    ...w,
+                    lastExecutionStatus: 'failed' as const,
+                    executionCount: (w.executionCount || 0) + 1,
+                  }
+                : w
+            );
+            store.setWorkflowList(updatedList);
+          }
 
           // 检查是否已存在该执行的摘要消息（可能从后端同步）
           const existingMessages = useAppStore.getState().messages;
@@ -1254,8 +1304,67 @@ export function useWebSocket() {
 
     // 执行详情响应 - 【关键修复】检查 executionId 匹配，避免响应顺序不一致导致的状态错乱
     const unsubExecutionDetail = wsService.on(WSMessageType.EXECUTION_DETAIL, (msg) => {
-      const payload = msg.payload as { executionId: string; detail: ExecutionRecord };
+      const payload = msg.payload as { 
+        executionId: string; 
+        detail: ExecutionRecord;
+        workflow_name?: string;
+        show_in_chat?: boolean;
+      };
       const state = useAppStore.getState();
+
+      // 如果标记了 show_in_chat，将执行详情作为消息添加到 ChatPanel
+      if (payload.show_in_chat && payload.detail) {
+        const detail = payload.detail as unknown as Record<string, unknown>;
+        const rawNodeResults = (detail.nodeResults || detail.node_results || {}) as Record<string, Record<string, unknown>>;
+        
+        // 将后端 snake_case 的 node_results 转为前端 camelCase 格式
+        // 兼容数据库返回（snake_case）和内存中（camelCase）两种格式
+        const nodeResultsArray = Object.entries(rawNodeResults).map(([key, nr]) => ({
+          nodeId: (nr.node_id || nr.nodeId || key) as string,
+          nodeName: (nr.node_name || nr.nodeName || key) as string,
+          status: ((nr.status === 'success' ? 'completed' : nr.status) || 'pending') as 'completed' | 'failed' | 'running' | 'pending',
+          durationMs: (nr.duration_ms ?? nr.durationMs) as number | undefined,
+          fullOutput: nr.output as unknown,
+          error: nr.error as string | undefined,
+        }));
+
+        // 从 nodeResults 计算缺失的统计字段（后端可能未返回这些字段）
+        const totalNodes = ((detail.nodesTotal ?? detail.nodes_total) as number | undefined) 
+          ?? Object.keys(rawNodeResults).length;
+        const nodesCompleted = ((detail.nodesCompleted ?? detail.nodes_completed) as number | undefined) 
+          ?? nodeResultsArray.filter(n => n.status === 'completed').length;
+        const nodesFailed = ((detail.nodesFailed ?? detail.nodes_failed) as number | undefined) 
+          ?? nodeResultsArray.filter(n => n.status === 'failed').length;
+
+        const rawStatus = (detail.status as string) || 'failed';
+        const executionSummary = {
+          type: 'execution_summary' as const,
+          executionId: (detail.executionId || detail.execution_id) as string,
+          workflowId: (detail.workflowId || detail.workflow_id) as string,
+          workflowName: payload.workflow_name || '工作流',
+          status: rawStatus === 'success' || rawStatus === 'completed' ? 'completed' as const : 
+                  rawStatus === 'running' ? 'completed' as const :
+                  rawStatus as 'failed' | 'cancelled',
+          totalDurationMs: ((detail.totalDurationMs ?? detail.total_duration_ms) as number) || 0,
+          nodesCompleted,
+          nodesFailed,
+          totalNodes,
+          startedAt: (detail.startedAt || detail.started_at || new Date().toISOString()) as string,
+          completedAt: (detail.completedAt || detail.completed_at || detail.startedAt || detail.started_at || new Date().toISOString()) as string,
+          nodeResults: nodeResultsArray,
+          error: detail.error as string | undefined,
+        };
+
+        // 添加执行详情消息到 ChatPanel
+        state.addMessage({
+          role: 'assistant',
+          content: `工作流 "${payload.workflow_name || '工作流'}" 执行详情`,
+          timestamp: new Date().toISOString(),
+          messageType: 'execution_summary',
+          data: executionSummary,
+        });
+        return;
+      }
 
       // 只有当响应的 executionId 与当前选中的执行 ID 匹配时才更新状态
       // 这避免了快速切换执行记录时，旧请求的响应覆盖新数据的问题
@@ -1299,7 +1408,7 @@ export function useWebSocket() {
         updatedAt: w.updated_at as string || '',
         // P1: 执行历史字段
         lastExecutionAt: w.last_execution_at as string | undefined,
-        lastExecutionStatus: w.last_execution_status as 'success' | 'failed' | 'running' | undefined,
+        lastExecutionStatus: w.last_execution_status as 'success' | 'failed' | 'running' | 'cancelled' | undefined,
         lastExecutionTriggeredBy: w.last_execution_triggered_by as 'scheduler' | 'manual' | undefined,
         lastExecutionId: w.last_execution_id as string | undefined,
         executionCount: w.execution_count as number | undefined,
@@ -1620,6 +1729,32 @@ export function useWebSocket() {
         addMessage({
           role: 'system',
           content: `❌ 定时任务执行失败: ${event.workflow_name || workflow_id}${event.error ? ` - ${event.error}` : ''}`,
+          timestamp: new Date().toISOString(),
+          messageType: 'text',
+        });
+      } else if (event.event_type === 'workflow_cancelled') {
+        // 更新工作流状态为已取消
+        const updatedList = store.workflowList.map(w => 
+          w.workflowId === workflow_id 
+            ? { 
+                ...w, 
+                lastExecutionStatus: 'cancelled' as const,
+              }
+            : w
+        );
+        store.setWorkflowList(updatedList);
+        
+        // 如果当前画布正在显示这个工作流，更新执行记录状态
+        if (isCurrentWorkflow) {
+          store.updateExecutionRecord(payload.execution_id, {
+            status: 'cancelled',
+            completedAt: new Date().toISOString(),
+          });
+        }
+
+        addMessage({
+          role: 'system',
+          content: `⏹ 定时任务已取消: ${event.workflow_name || workflow_id}`,
           timestamp: new Date().toISOString(),
           messageType: 'text',
         });

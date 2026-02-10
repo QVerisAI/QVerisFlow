@@ -25,8 +25,8 @@ interface ExecutionProgressCardProps {
  * 判断是否为开始节点
  */
 function isStartNode(node: ExecutionNodeResult): boolean {
-  const nodeId = node.nodeId.toLowerCase();
-  const nodeName = node.nodeName.toLowerCase();
+  const nodeId = (node.nodeId ?? '').toLowerCase();
+  const nodeName = (node.nodeName ?? '').toLowerCase();
   return nodeId === 'start' || nodeName === '开始节点' || nodeName === 'start';
 }
 

@@ -19,6 +19,7 @@ import {
   History,
   Timer,
   Filter,
+  Ban,
 } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
 import { wsService } from '../services/websocket';
@@ -43,7 +44,6 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
     workflowList,
     workflowListLoading,
     setWorkflowListLoading,
-    setPendingExecutionId,
   } = useAppStore();
 
   // 加载工作流列表
@@ -107,15 +107,17 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
   };
 
   const handleViewExecutionDetail = (workflow: WorkflowSummary) => {
-    // 设置待选中的执行ID，在工作流加载完成后自动选中该执行
+    // 请求执行详情，详情会通过 EXECUTION_DETAIL 消息返回并显示在 ChatPanel 中
     if (workflow.lastExecutionId) {
-      setPendingExecutionId(workflow.lastExecutionId);
+      // 发送请求获取执行详情（带上工作流名称，方便在 ChatPanel 中显示）
+      wsService.send(WSMessageType.GET_EXECUTION_DETAIL, {
+        execution_id: workflow.lastExecutionId,
+        workflow_name: workflow.name,
+        show_in_chat: true,  // 标记需要在 ChatPanel 中显示
+      });
+      // 关闭面板
+      onClose();
     }
-    // 加载工作流
-    wsService.send(WSMessageType.LOAD_WORKFLOW, {
-      workflow_db_id: workflow.id,
-    });
-    onClose();
   };
 
   const formatNextExecutionTime = (nextExecutionAt?: string) => {
@@ -204,6 +206,8 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
         return { icon: XCircle, color: 'text-red-500', label: '失败', bgColor: 'bg-red-50' };
       case 'running':
         return { icon: Loader2, color: 'text-blue-500', label: '运行中', bgColor: 'bg-blue-50', animate: true };
+      case 'cancelled':
+        return { icon: Ban, color: 'text-amber-500', label: '已取消', bgColor: 'bg-amber-50' };
       default:
         return null;
     }
@@ -440,8 +444,8 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
                                 共执行 {workflow.executionCount} 次
                               </span>
                             )}
-                            {/* 查看详情按钮 - 运行中时显示 */}
-                            {workflow.lastExecutionStatus === 'running' && workflow.lastExecutionId && (
+                            {/* 查看详情按钮 - 有执行记录时显示 */}
+                            {workflow.lastExecutionId && (
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();

@@ -237,7 +237,7 @@ def _get_model_name_from_llm(llm_client: Any) -> str:
 # 默认的模型上下文限制（保守估计）
 DEFAULT_MAX_CONTEXT_TOKENS = 128000
 # 单个工具结果的最大 token 数
-MAX_TOOL_RESULT_TOKENS = 8000
+MAX_TOOL_RESULT_TOKENS = 16000
 # 预留给响应的 token 数
 RESERVED_OUTPUT_TOKENS = 16000
 
@@ -554,6 +554,8 @@ class AgentGraphBuilder:
         self.progress_callback: Optional[Any] = None  # Callable[[str], Awaitable[None]]
         # 流式回调（发送 LLM 思考/内容 token，dict: type "reasoning"|"content", content）
         self.stream_callback: Optional[Any] = None  # Callable[[Dict], Awaitable[None]]
+        # 取消事件（由 WorkflowEngine 传入，set() 表示应停止执行）
+        self.cancel_event: Optional[asyncio.Event] = None
 
         # 获取 LangChain 客户端
         # 当 Agent 有工具时，强制禁用 Kimi/Moonshot 的 thinking 模式。
@@ -726,6 +728,9 @@ class AgentGraphBuilder:
         3. 处理之前的验证反馈
         4. 管理上下文大小，自动压缩
         """
+        # 检查取消信号
+        self._check_cancelled()
+
         from ..workspace import AgentWorkspace
 
         workspace = AgentWorkspace.from_path(state["workspace_path"])
@@ -847,6 +852,9 @@ class AgentGraphBuilder:
         3. 调用必要的工具
         4. 管理上下文压缩
         """
+        # 检查取消信号
+        self._check_cancelled()
+
         from ..workspace import AgentWorkspace
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -1083,6 +1091,13 @@ class AgentGraphBuilder:
 
         return "continue"
 
+    # ========== 取消检查 ==========
+
+    def _check_cancelled(self) -> None:
+        """检查是否收到取消信号，如果已取消则抛出 CancelledError"""
+        if self.cancel_event and self.cancel_event.is_set():
+            raise asyncio.CancelledError("Agent execution cancelled")
+
     # ========== 辅助方法 ==========
 
     def _build_context_prompt(
@@ -1199,6 +1214,9 @@ class AgentGraphBuilder:
             and current_response.tool_calls
             and tool_round < max_tool_rounds
         ):
+            # 检查取消信号
+            self._check_cancelled()
+
             tool_round += 1
             tool_messages = []
 

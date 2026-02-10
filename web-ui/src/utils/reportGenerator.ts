@@ -367,15 +367,15 @@ function renderOutputData(output: unknown, formatHint?: 'json' | 'markdown'): st
 
 /** 判断是否为开始节点 */
 function isStartNode(node: ExecutionNodeResult): boolean {
-  const id = node.nodeId.toLowerCase();
-  const name = node.nodeName.toLowerCase();
+  const id = (node.nodeId ?? '').toLowerCase();
+  const name = (node.nodeName ?? '').toLowerCase();
   return id === 'start' || name === '开始节点' || name === 'start';
 }
 
 /** 判断是否为结束节点 */
 function isEndNode(node: ExecutionNodeResult): boolean {
-  const id = node.nodeId.toLowerCase();
-  const name = node.nodeName.toLowerCase();
+  const id = (node.nodeId ?? '').toLowerCase();
+  const name = (node.nodeName ?? '').toLowerCase();
   return id === 'end' || name === '结束节点' || name === 'end'
     || id.startsWith('end_') || name.includes('结束');
 }
