@@ -1520,27 +1520,31 @@ export function useWebSocket() {
             return null;
           };
 
-          const nodeResultList = Array.isArray(payload.detail.nodeResults)
-            ? payload.detail.nodeResults
-            : Object.values(payload.detail.nodeResults);
+          // 兼容 Record 与 Array，以及后端 snake_case 格式
+          const rawResults = payload.detail.nodeResults as unknown;
+          const entries: Array<[string, Record<string, unknown>]> = Array.isArray(rawResults)
+            ? (rawResults as Record<string, unknown>[]).map((nr, i) => [
+                (nr.nodeId ?? nr.node_id ?? `node_${i}`) as string,
+                nr as Record<string, unknown>,
+              ])
+            : Object.entries((rawResults as Record<string, Record<string, unknown>>) || {});
 
-          for (const nr of nodeResultList) {
-            const frontendId = resolveNodeId(nr.nodeId, nr.nodeName);
+          for (const [workflowNodeId, nr] of entries) {
+            const nrObj = nr as Record<string, unknown>;
+            const nodeId = (nrObj.nodeId ?? nrObj.node_id ?? workflowNodeId) as string;
+            const nodeName = (nrObj.nodeName ?? nrObj.node_name) as string | undefined;
+            const frontendId = resolveNodeId(nodeId, nodeName) ?? resolveNodeId(workflowNodeId as string, undefined);
             if (frontendId) {
+              const rawStatus = (nrObj.status ?? 'pending') as string;
               updateRealtimeNodeOutput(frontendId, {
-                status: nr.status === 'completed'
-                  ? 'completed'
-                  : nr.status === 'failed'
-                    ? 'failed'
-                    : nr.status === 'running'
-                      ? 'running'
-                      : 'pending',
-                fullOutput: nr.fullOutput,
-                error: nr.error,
-                nodeId: nr.nodeId,
-                durationMs: nr.durationMs,
-                startedAt: nr.startedAt,
-                completedAt: nr.completedAt,
+                status: rawStatus === 'success' || rawStatus === 'completed' ? 'completed' :
+                  rawStatus === 'failed' ? 'failed' : rawStatus === 'running' ? 'running' : 'pending',
+                fullOutput: nrObj.fullOutput ?? nrObj.output,
+                error: nrObj.error as string | undefined,
+                nodeId,
+                durationMs: (nrObj.durationMs ?? nrObj.duration_ms) as number | undefined,
+                startedAt: (nrObj.startedAt ?? nrObj.started_at) as string | undefined,
+                completedAt: (nrObj.completedAt ?? nrObj.completed_at) as string | undefined,
               });
             }
           }

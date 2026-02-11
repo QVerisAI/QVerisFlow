@@ -395,13 +395,13 @@ export const useAppStore = create<AppState>((set) => ({
   currentExecutionDetail: null,
   executionDetailLoading: false,
   setExecutionHistory: (history) => set({ executionHistory: history }),
-  selectExecution: (executionId) => set({
+  selectExecution: (executionId) => set((state) => ({
     selectedExecutionId: executionId,
-    // 切换时清空旧的详情，等待新的详情加载
     currentExecutionDetail: executionId === null ? null : undefined,
-    // 如果选择了执行记录，设置为加载中状态
+    // 切换执行记录时清空 realtimeNodeOutputs，避免旧执行的数据覆盖新选中执行的展示
+    realtimeNodeOutputs: executionId !== null ? {} : state.realtimeNodeOutputs,
     executionDetailLoading: executionId !== null,
-  }),
+  })),
   addExecutionRecord: (record) => set((state) => ({
     executionHistory: [record, ...state.executionHistory].slice(0, 20),  // 保留最近 20 条
   })),

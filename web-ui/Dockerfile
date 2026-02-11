@@ -17,8 +17,8 @@ RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsing
 # 先复制依赖声明文件，利用 Docker 缓存层
 COPY package.json package-lock.json ./
 
-# 使用清华 npm 镜像源
-RUN npm config set registry https://mirrors.tuna.tsinghua.edu.cn/npm
+# 使用官方 npm 源（清华镜像可能缺失部分包如 zwitch，导致 404）
+RUN npm config set registry https://registry.npmjs.org/
 
 # 安装依赖
 RUN npm ci
