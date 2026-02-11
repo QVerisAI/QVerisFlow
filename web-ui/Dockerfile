@@ -11,8 +11,14 @@ FROM node:20-alpine AS builder
 
 WORKDIR /build
 
+# 使用清华 Alpine apk 镜像源
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories
+
 # 先复制依赖声明文件，利用 Docker 缓存层
 COPY package.json package-lock.json ./
+
+# 使用清华 npm 镜像源
+RUN npm config set registry https://mirrors.tuna.tsinghua.edu.cn/npm
 
 # 安装依赖
 RUN npm ci
@@ -29,6 +35,9 @@ RUN npm run build
 
 # ---- 运行阶段 ----
 FROM nginx:alpine AS runtime
+
+# 使用清华 Alpine apk 镜像源
+RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories
 
 # 从构建阶段复制产物
 COPY --from=builder /build/dist /usr/share/nginx/html

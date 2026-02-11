@@ -7,9 +7,15 @@
 # 运行：docker run -p 8000:8000 --env-file .env qveris-api
 
 # ---- 构建阶段 ----
-FROM python:3.11-slim AS builder
+FROM qveris-ai-registry.cn-beijing.cr.aliyuncs.com/qveris_ai/python:3.11-slim AS builder
 
 WORKDIR /build
+
+# 使用清华 apt 镜像源（兼容 sources.list 和 debian.sources 格式）
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+    ([ -f "$$f" ] && sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' "$$f" && \
+    sed -i 's|https://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' "$$f") || true; \
+    done
 
 # 安装系统构建依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -29,7 +35,9 @@ COPY scripts/ ./scripts/
 COPY alembic.ini ./
 
 # 使用 uv pip install 直接安装到系统 Python（无需 venv）
+# 使用清华 PyPI 镜像源加速
 # 注意：uv sync 默认创建 .venv，在 Docker 中我们直接安装到系统更简洁
+ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 RUN uv pip install --system -e ".[web,oss]"
 
 # 验证关键依赖已安装
@@ -38,7 +46,7 @@ RUN python -m uvicorn --version && \
     python -c "import fastapi; print('FastAPI OK')"
 
 # ---- 运行阶段 ----
-FROM python:3.11-slim AS runtime
+FROM qveris-ai-registry.cn-beijing.cr.aliyuncs.com/qveris_ai/python:3.11-slim AS runtime
 
 WORKDIR /app
 
@@ -46,14 +54,20 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 ENV DEBIAN_FRONTEND=noninteractive
 
+# 使用清华 apt 镜像源（兼容 sources.list 和 debian.sources 格式）
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+    ([ -f "$$f" ] && sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' "$$f" && \
+    sed -i 's|https://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' "$$f") || true; \
+    done
+
 # 安装运行时系统依赖（包含时区数据）
 # 使用重试机制处理网络不稳定问题
 RUN for i in 1 2 3; do \
-        apt-get update && apt-get install -y --no-install-recommends \
-            libpq5 \
-            curl \
-            tzdata \
-        && break || sleep 5; \
+    apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    tzdata \
+    && break || sleep 5; \
     done \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
     && echo $TZ > /etc/timezone \

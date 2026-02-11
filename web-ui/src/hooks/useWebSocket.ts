@@ -1508,22 +1508,44 @@ export function useWebSocket() {
 
         // 修复: Record<string, NodeExecutionResult> 不是可迭代对象，所以需要 Object.values 或类似转换
         if (payload.detail && payload.detail.nodeResults) {
+
+          const nodeIdMap = useAppStore.getState().workflowNodeIdMap;
+          const resolveNodeId = (nodeId: string | undefined, nodeName?: string): string | null => {
+            if (!nodeId && !nodeName) return null;
+            if (nodeId && nodeIdMap[nodeId]) return nodeIdMap[nodeId];
+            if (nodeName && nodeIdMap[nodeName]) return nodeIdMap[nodeName];
+            if (nodeName && nodeIdMap[nodeName.replace(/ /g, '_')]) return nodeIdMap[nodeName.replace(/ /g, '_')];
+            if (nodeId && nodeId.startsWith('agent_')) return nodeId;
+            if (nodeId) return `agent_${nodeId}`;
+            return null;
+          };
+
           const nodeResultList = Array.isArray(payload.detail.nodeResults)
             ? payload.detail.nodeResults
             : Object.values(payload.detail.nodeResults);
 
           for (const nr of nodeResultList) {
-            updateRealtimeNodeOutput(nr.nodeId, {
-              status: nr.status === 'completed' ? 'completed' :
-                nr.status === 'failed' ? 'failed' : 'pending',
-              fullOutput: nr.fullOutput,
-              error: nr.error,
-              nodeId: nr.nodeId,
-              durationMs: nr.durationMs,
-              startedAt: nr.startedAt,
-              completedAt: nr.completedAt,
-            });
+            const frontendId = resolveNodeId(nr.nodeId, nr.nodeName);
+            if (frontendId) {
+              updateRealtimeNodeOutput(frontendId, {
+                status: nr.status === 'completed'
+                  ? 'completed'
+                  : nr.status === 'failed'
+                    ? 'failed'
+                    : nr.status === 'running'
+                      ? 'running'
+                      : 'pending',
+                fullOutput: nr.fullOutput,
+                error: nr.error,
+                nodeId: nr.nodeId,
+                durationMs: nr.durationMs,
+                startedAt: nr.startedAt,
+                completedAt: nr.completedAt,
+              });
+            }
           }
+        } else {
+          console.error('ExecutionDetail 响应中没有 nodeResults 字段');
         }
 
       } else {
