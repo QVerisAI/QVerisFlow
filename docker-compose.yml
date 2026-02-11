@@ -164,6 +164,7 @@ services:
       LOG_FILE: "true"
       LOG_MAX_SIZE: ${LOG_MAX_SIZE:-10485760}
       LOG_BACKUP_COUNT: ${LOG_BACKUP_COUNT:-5}
+      AUTH_SECRET_KEY: ${AUTH_SECRET_KEY:-}
     ports:
       - "${WEB_PORT:-8000}:8000"
     volumes:
