@@ -43,10 +43,10 @@ LICENSE
 # 前端（有独立的 Dockerfile）
 web-ui/
 
-# 运行时数据
+# 运行时数据（根目录，不含 src/storage 源码）
 data/
-storage/
-workspaces/
+/storage/
+/workspaces/
 traces/
 logs/
 

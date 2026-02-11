@@ -7,7 +7,7 @@
 # 运行：docker run -p 8000:8000 --env-file .env qveris-api
 
 # ---- 构建阶段 ----
-FROM qveris-ai-registry.cn-beijing.cr.aliyuncs.com/qveris_ai/python:3.11-slim AS builder
+FROM qveris-ai-registry.cn-beijing.cr.aliyuncs.com/qveris_ai/python:3.11-slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -47,7 +47,7 @@ RUN python -m uvicorn --version && \
     python -c "import fastapi; print('FastAPI OK')"
 
 # ---- 运行阶段 ----
-FROM qveris-ai-registry.cn-beijing.cr.aliyuncs.com/qveris_ai/python:3.11-slim AS runtime
+FROM qveris-ai-registry.cn-beijing.cr.aliyuncs.com/qveris_ai/python:3.11-slim-bookworm AS runtime
 
 WORKDIR /app
 
