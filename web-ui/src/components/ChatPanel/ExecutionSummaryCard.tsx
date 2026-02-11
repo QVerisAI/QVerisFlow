@@ -21,7 +21,7 @@ import { openReport } from '../../utils/reportGenerator';
 
 interface ExecutionSummaryCardProps {
   summary: ExecutionSummary;
-  onReExecute?: () => void;
+  onReExecute?: (workflowDbId?: string) => void;
 }
 
 /**
@@ -301,7 +301,7 @@ export default function ExecutionSummaryCard({ summary, onReExecute }: Execution
         <button
           type="button"
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-blue-600 hover:bg-blue-50 transition-colors"
-          onClick={() => onReExecute?.()}
+          onClick={() => onReExecute?.(summary.workflowDbId)}
         >
           <Play className="w-3.5 h-3.5" />
           重新执行

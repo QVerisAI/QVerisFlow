@@ -428,22 +428,22 @@ function ExecutionResultPanel({
         <div className="grid grid-cols-2 gap-4">
           <div>
             <p className="text-xs text-slate-400 mb-1">开始时间</p>
-            <p className="text-sm text-slate-700">{formatTime(result?.startedAt)}</p>
+            <p className="text-sm text-slate-700">{formatTime(realtimeOutput?.startedAt ?? result?.startedAt)}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 mb-1">完成时间</p>
-            <p className="text-sm text-slate-700">{formatTime(result?.completedAt)}</p>
+            <p className="text-sm text-slate-700">{formatTime(realtimeOutput?.completedAt ?? result?.completedAt)}</p>
           </div>
           <div>
             <p className="text-xs text-slate-400 mb-1">耗时</p>
             <p className="text-sm text-slate-700">
-              {result?.durationMs ? `${(result.durationMs / 1000).toFixed(2)}s` : '-'}
+              {(realtimeOutput?.durationMs ?? result?.durationMs) ? `${((realtimeOutput?.durationMs ?? result?.durationMs ?? 0) / 1000).toFixed(2)}s` : '-'}
             </p>
           </div>
           <div>
             <p className="text-xs text-slate-400 mb-1">节点 ID</p>
-            <p className="text-sm text-slate-700 font-mono truncate" title={result?.nodeId}>
-              {result?.nodeId || '-'}
+            <p className="text-sm text-slate-700 font-mono truncate" title={realtimeOutput?.nodeId ?? result?.nodeId}>
+              {realtimeOutput?.nodeId ?? result?.nodeId ?? '-'}
             </p>
           </div>
         </div>

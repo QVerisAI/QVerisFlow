@@ -995,12 +995,26 @@ class DialogueAgent:
                     suggested_actions=["暂停", "停止"] if result.success else [],
                 )
 
+        # 停止定时任务命令（子串匹配，必须在停止命令之前检查）
+        schedule_stop_keywords = [
+            "停止定时",
+            "取消定时",
+            "删除定时",
+            "关闭定时",
+            "stop schedule",
+            "cancel schedule",
+            "remove schedule",
+        ]
+        if any(kw in msg for kw in schedule_stop_keywords):
+            logger.info(f"直接处理停止定时任务命令: {user_message}")
+            return await self._handle_stop_schedule(user_message)
+
         # 停止命令
         stop_keywords = ["停止", "终止", "取消", "stop", "cancel", "abort", "算了"]
         if msg in stop_keywords:
-            # 检查是否正在执行中
+            # 检查是否正在执行中或暂停中（暂停状态也允许停止，FSM: PAUSED -> STOP -> CANCELLED）
             status = self.ops.get_execution_status()
-            if status.get("is_executing"):
+            if status.get("is_executing") or status.get("is_paused"):
                 logger.info(f"直接处理停止命令: {user_message}")
                 result = await self.ops.stop_execution()
 
@@ -1825,6 +1839,48 @@ class DialogueAgent:
 
     async def _handle_execute_workflow(self, args: Dict[str, Any]) -> OperationResult:
         return await self.ops.execute_workflow(params=args.get("params"))
+
+    async def _handle_stop_schedule(self, user_message: str) -> "DialogueResponse":
+        """停止当前工作流的定时任务"""
+        try:
+            from src.services.scheduler_service import scheduler_service
+
+            # 获取当前工作流的数据库 ID
+            if not self.ops._builder or not self.ops._builder.draft_workflow:
+                msg = "当前没有加载工作流，无法确定要停止哪个定时任务。请先加载工作流。"
+                self.conversation_history.append(
+                    {"role": "user", "content": user_message}
+                )
+                self.conversation_history.append({"role": "assistant", "content": msg})
+                return DialogueResponse(message=msg, workflow_changed=False)
+
+            workflow = self.ops._builder.draft_workflow
+            workflow_name = getattr(workflow, "name", "未知工作流")
+            workflow_db_id = getattr(self.ops._builder, "loaded_workflow_db_id", None)
+
+            if not workflow_db_id:
+                msg = f"工作流「{workflow_name}」尚未保存到数据库，无法操作定时任务。"
+                self.conversation_history.append(
+                    {"role": "user", "content": user_message}
+                )
+                self.conversation_history.append({"role": "assistant", "content": msg})
+                return DialogueResponse(message=msg, workflow_changed=False)
+
+            result = await scheduler_service.remove_workflow_schedule(workflow_db_id)
+            if result:
+                msg = f"已停止工作流「{workflow_name}」的定时任务。"
+            else:
+                msg = f"工作流「{workflow_name}」当前没有定时任务，或停止操作失败。"
+
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append({"role": "assistant", "content": msg})
+            return DialogueResponse(message=msg, workflow_changed=False)
+        except Exception as e:
+            logger.error(f"停止定时任务失败: {e}", exc_info=True)
+            msg = f"停止定时任务时发生错误: {str(e)}"
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append({"role": "assistant", "content": msg})
+            return DialogueResponse(message=msg, workflow_changed=False)
 
     async def _handle_get_workflow_status(
         self, args: Dict[str, Any]

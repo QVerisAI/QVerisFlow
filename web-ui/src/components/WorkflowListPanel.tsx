@@ -113,6 +113,7 @@ export const WorkflowListPanel: React.FC<WorkflowListPanelProps> = ({ onClose, o
       wsService.send(WSMessageType.GET_EXECUTION_DETAIL, {
         execution_id: workflow.lastExecutionId,
         workflow_name: workflow.name,
+        workflow_db_id: workflow.id,  // 数据库主键 ID，用于"重新执行"时加载工作流
         show_in_chat: true,  // 标记需要在 ChatPanel 中显示
       });
       // 关闭面板

@@ -1374,6 +1374,7 @@ class SocketIOHandler:
             execution_id = payload.get("execution_id", "")
             # 从 WorkflowListPanel 点击"查看详情"时传入的额外参数
             workflow_name = payload.get("workflow_name", "")
+            workflow_db_id = payload.get("workflow_db_id", "")
             show_in_chat = payload.get("show_in_chat", False)
 
             if not execution_id:
@@ -1393,6 +1394,8 @@ class SocketIOHandler:
                 # 原样返回额外参数，供前端判断显示方式
                 if workflow_name:
                     response_data["workflow_name"] = workflow_name
+                if workflow_db_id:
+                    response_data["workflow_db_id"] = workflow_db_id
                 if show_in_chat:
                     response_data["show_in_chat"] = True
                     

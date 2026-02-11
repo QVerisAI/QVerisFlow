@@ -10,6 +10,7 @@ import ExecutionProgressCard from './ExecutionProgressCard';
 import ExecutionSummaryCard from './ExecutionSummaryCard';
 import ExecutionNarrativeMessage from './ExecutionNarrativeMessage';
 import { wsService } from '../../services/websocket';
+import { WSMessageType } from '../../types';
 
 interface MessageBubbleProps {
   message: Message;
@@ -427,7 +428,21 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           {executionSummaryData && (
             <ExecutionSummaryCard
               summary={executionSummaryData}
-              onReExecute={() => wsService.sendUserAction('execute')}
+              onReExecute={(workflowDbId) => {
+                if (workflowDbId) {
+                  // 从"查看详情"打开的卡片：需要先加载工作流，再执行
+                  wsService.send(WSMessageType.LOAD_WORKFLOW, {
+                    workflow_db_id: workflowDbId,
+                  });
+                  // 延迟发送执行命令，等待工作流加载完成
+                  setTimeout(() => {
+                    wsService.sendUserAction('execute');
+                  }, 500);
+                } else {
+                  // 当前会话已加载工作流（手动执行后的卡片）：直接执行
+                  wsService.sendUserAction('execute');
+                }
+              }}
             />
           )}
 

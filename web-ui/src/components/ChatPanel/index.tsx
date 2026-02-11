@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
-import { Send, Loader2, FolderOpen, Bot, Plus, Pause, Square, Trash2 } from 'lucide-react';
+import { Send, Loader2, FolderOpen, Bot, Plus, Pause, Play, Square, Trash2 } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { VirtualizedMessageList } from './VirtualizedMessageList';
@@ -12,6 +12,7 @@ export function ChatPanel() {
     suggestedActions,
     checkpoints,
     mode,
+    executionProgress,
     setShowWorkflowListPanel,
     setShowAgentLibraryPanel,
     hasMoreHistory,
@@ -85,6 +86,11 @@ export function ChatPanel() {
       '我想调整一下': null,
       '我想调整': null,
       '查看详情': null,
+      // 执行干预命令 - 直接走 action 路径，不经过 LLM
+      '暂停': 'pause',
+      '停止': 'stop',
+      '继续': 'resume',
+      '跳过': 'skip_node',
     };
 
     const directAction = actionMap[suggestion];
@@ -259,20 +265,29 @@ export function ChatPanel() {
 
           {mode === 'executing' && (
             <div className="flex items-center gap-1 mr-1">
+              {executionProgress.status === 'paused' ? (
+                <button
+                  type="button"
+                  onClick={() => sendAction('resume')}
+                  className="p-2 rounded-lg text-green-600 hover:bg-green-50 transition-colors"
+                  title="继续执行"
+                >
+                  <Play className="w-4 h-4" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => sendAction('pause')}
+                  className="p-2 rounded-lg text-amber-600 hover:bg-amber-50 transition-colors"
+                  title="暂停执行"
+                >
+                  <Pause className="w-4 h-4" />
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => sendMessage('暂停')}
-                disabled={isLoading}
-                className="p-2 rounded-lg text-amber-600 hover:bg-amber-50 disabled:opacity-50 transition-colors"
-                title="暂停执行"
-              >
-                <Pause className="w-4 h-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => sendMessage('停止')}
-                disabled={isLoading}
-                className="p-2 rounded-lg text-red-600 hover:bg-red-50 disabled:opacity-50 transition-colors"
+                onClick={() => sendAction('stop')}
+                className="p-2 rounded-lg text-red-600 hover:bg-red-50 transition-colors"
                 title="停止执行"
               >
                 <Square className="w-4 h-4" />

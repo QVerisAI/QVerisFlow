@@ -232,6 +232,9 @@ class ScheduledWorkflowExecutor:
         """实际执行工作流"""
         logger.info(f"开始执行定时任务: workflow={workflow_id}, execution_id={execution_id}")
         
+        node_results_dict: Dict[str, Any] = {}
+        result = None
+        
         try:
             # 加载工作流定义
             if workflow_definition_dict:
@@ -244,6 +247,11 @@ class ScheduledWorkflowExecutor:
             
             # 转换为 WorkflowDefinition 对象
             workflow_def = WorkflowDefinition(**definition_dict)
+            
+            # ========== 加载并注册工作流引用的 Agents ==========
+            # 手动执行时，load_saved_workflow 会注册 Agents；
+            # 定时任务需要在此处自行完成，否则 WorkflowEngine 找不到 Agent
+            await self._ensure_agents_registered(workflow_def)
             
             # 广播开始事件
             await self._broadcast_event(workflow_id, workflow_db_id, execution_id, {
@@ -273,11 +281,53 @@ class ScheduledWorkflowExecutor:
                 app_workflow_config=app_wf_config,
             )
             
-            # 定义事件回调 - 广播给所有客户端
+            # 增量跟踪节点执行结果（用于中间持久化到数据库）
+            partial_node_results: Dict[str, Any] = {}
+            
+            # 定义事件回调 - 广播给所有客户端 + 增量保存节点结果
             async def event_callback(event: Dict[str, Any]) -> None:
                 # 添加定时任务标识
                 event["triggered_by"] = "scheduler"
                 event["execution_id"] = execution_id
+                
+                # 增量更新 node_results 到数据库（确保中途查看详情时能获取已完成节点）
+                evt_type = event.get("event_type", "")
+                node_id = event.get("node_id", "")
+                if evt_type == "node_started" and node_id:
+                    partial_node_results[node_id] = {
+                        "status": "running",
+                        "node_name": event.get("node_name", node_id),
+                    }
+                elif evt_type == "node_completed" and node_id:
+                    data = event.get("data", {})
+                    partial_node_results[node_id] = {
+                        "status": "success",
+                        "node_name": event.get("node_name", node_id),
+                        "duration_ms": data.get("duration_ms"),
+                        "output": data.get("output"),
+                    }
+                    # 节点完成时持久化到数据库，保证查看详情时能看到已完成的节点
+                    try:
+                        await self._update_execution_status(
+                            execution_id, "running",
+                            node_results=dict(partial_node_results),
+                        )
+                    except Exception as e:
+                        logger.warning(f"增量保存 node_results 失败: {e}")
+                elif evt_type == "node_failed" and node_id:
+                    data = event.get("data", {})
+                    partial_node_results[node_id] = {
+                        "status": "failed",
+                        "node_name": event.get("node_name", node_id),
+                        "error": data.get("error"),
+                    }
+                    try:
+                        await self._update_execution_status(
+                            execution_id, "running",
+                            node_results=dict(partial_node_results),
+                        )
+                    except Exception as e:
+                        logger.warning(f"增量保存 node_results 失败: {e}")
                 
                 # 广播事件
                 await self._broadcast_event(
@@ -298,6 +348,9 @@ class ScheduledWorkflowExecutor:
             status = result.status.value if hasattr(result.status, 'value') else str(result.status)
             
             # 构建节点执行结果字典（用于保存到数据库）
+            # 从工作流定义构建 node_id -> 中文名称 的映射
+            node_name_map = {n.node_id: n.name for n in workflow_def.nodes}
+            
             node_results_dict = {}
             for node_id, node_result in result.node_results.items():
                 # 处理 started_at 和 completed_at（可能是 datetime 对象或已经是字符串）
@@ -309,6 +362,17 @@ class ScheduledWorkflowExecutor:
                 if completed_at is not None:
                     completed_at = completed_at.isoformat() if hasattr(completed_at, 'isoformat') else str(completed_at)
                 
+                # 处理 output（可能是大对象，序列化为 JSON 兼容格式）
+                raw_output = getattr(node_result, 'output', None)
+                serialized_output = None
+                if raw_output is not None:
+                    try:
+                        import json
+                        json.dumps(raw_output)  # 测试是否可序列化
+                        serialized_output = raw_output
+                    except (TypeError, ValueError):
+                        serialized_output = str(raw_output)  # 不可序列化时转字符串
+                
                 node_results_dict[node_id] = {
                     "status": node_result.status if isinstance(node_result.status, str) else (
                         node_result.status.value if hasattr(node_result.status, 'value') else str(node_result.status)
@@ -317,7 +381,8 @@ class ScheduledWorkflowExecutor:
                     "completed_at": completed_at,
                     "duration_ms": getattr(node_result, 'duration_ms', None),
                     "error": getattr(node_result, 'error', None),
-                    "node_name": getattr(node_result, 'node_name', node_id),
+                    "node_name": node_name_map.get(node_id, node_id),
+                    "output": serialized_output,
                 }
             
             # 更新数据库执行记录（包含完整的节点执行结果）
@@ -345,8 +410,80 @@ class ScheduledWorkflowExecutor:
             
         except Exception as e:
             logger.error(f"执行定时任务失败: {workflow_id}, error={e}", exc_info=True)
+            # 执行失败时也尝试保存已有的 node_results 到数据库
+            try:
+                await self._update_execution_status(
+                    execution_id,
+                    "failed",
+                    error=str(e),
+                    node_results=node_results_dict if node_results_dict else None,
+                    total_duration_ms=getattr(result, 'total_duration_ms', None) if result else None,
+                )
+            except Exception as save_err:
+                logger.warning(f"保存失败状态时出错: {save_err}")
             raise
         
+    async def _ensure_agents_registered(self, workflow_def: WorkflowDefinition) -> None:
+        """
+        确保工作流引用的所有 Agent 都已注册到 AgentRegistry。
+        
+        手动执行时，load_saved_workflow 会注册 Agents；
+        定时任务需要在执行前自行从数据库加载并注册。
+        """
+        # 1. 收集工作流中所有引用的 agent_id
+        agent_ids: Set[str] = set()
+        for node in workflow_def.nodes:
+            if node.agent_id:
+                agent_ids.add(node.agent_id)
+            if node.config and node.config.get("agent_id"):
+                agent_ids.add(node.config["agent_id"])
+        
+        if not agent_ids:
+            return
+        
+        # 2. 过滤出尚未注册的 agent_id
+        registry = AgentRegistry.get_default()
+        missing_ids = [aid for aid in agent_ids if not registry.get_definition(aid)]
+        
+        if not missing_ids:
+            logger.debug(f"所有 {len(agent_ids)} 个 Agent 已注册")
+            return
+        
+        logger.info(f"定时任务需要加载 {len(missing_ids)} 个未注册的 Agent: {missing_ids}")
+        
+        # 3. 从数据库加载并注册缺失的 Agent
+        try:
+            from src.definitions import AgentDefinition
+            from src.storage.database import AsyncDatabaseManager
+            from src.storage.repositories import AgentRepository
+            
+            db = AsyncDatabaseManager()
+            await db.connect()
+            
+            try:
+                agent_repo = AgentRepository(db._session_factory)
+                loaded_count = 0
+                
+                for agent_id in missing_ids:
+                    try:
+                        agent_model = await agent_repo.get_by_agent_id(agent_id)
+                        if agent_model and agent_model.definition_json:
+                            agent_def = AgentDefinition(**agent_model.definition_json)
+                            registry.register_definition(agent_def)
+                            loaded_count += 1
+                            logger.debug(f"已注册 Agent: {agent_id}")
+                        else:
+                            logger.warning(f"Agent 不存在于数据库: {agent_id}")
+                    except Exception as agent_err:
+                        logger.warning(f"加载 Agent {agent_id} 失败: {agent_err}")
+                
+                logger.info(f"定时任务 Agent 注册完成: {loaded_count}/{len(missing_ids)}")
+            finally:
+                await db.close()
+                
+        except Exception as e:
+            logger.error(f"加载 Agents 失败: {e}", exc_info=True)
+    
     async def _load_workflow_definition(self, workflow_db_id: str) -> Optional[Dict[str, Any]]:
         """从数据库加载工作流定义"""
         try:
@@ -412,8 +549,9 @@ class ScheduledWorkflowExecutor:
                 execution_repo = WorkflowExecutionRepository(db._session_factory)
                 
                 updates = {"status": status}
-                # 当状态变为 running 时，确保设置 started_at（如果之前未设置）
-                if status == "running":
+                # 当状态变为 running 且非增量更新时，设置 started_at
+                # node_results 非空说明是增量保存节点结果，不应覆盖 started_at
+                if status == "running" and node_results is None:
                     updates["started_at"] = datetime.now()
                 if status in ("completed", "failed"):
                     updates["completed_at"] = datetime.now()
@@ -442,16 +580,22 @@ class ScheduledWorkflowExecutor:
         execution_id: str, 
         event: Dict[str, Any]
     ) -> None:
-        """广播事件给所有在线客户端"""
+        """广播事件给所有在线客户端（使用标准 WSMessage 格式）"""
         try:
+            # 必须使用 {type, payload, timestamp} 格式，与 SocketIOHandler.emit 保持一致
+            # 前端 dispatch 依赖 message.type 路由到对应的 handler
             await self.sio.emit(
                 "scheduled_execution_event",
                 {
-                    "workflow_id": workflow_id,
-                    "workflow_db_id": workflow_db_id,
-                    "execution_id": execution_id,
-                    "triggered_by": "scheduler",
-                    "event": event,
+                    "type": "scheduled_execution_event",
+                    "payload": {
+                        "workflow_id": workflow_id,
+                        "workflow_db_id": workflow_db_id,
+                        "execution_id": execution_id,
+                        "triggered_by": "scheduler",
+                        "event": event,
+                        "timestamp": utc_now_iso_z(),
+                    },
                     "timestamp": utc_now_iso_z(),
                 }
             )

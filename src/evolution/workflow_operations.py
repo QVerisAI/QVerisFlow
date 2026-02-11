@@ -2734,16 +2734,55 @@ class WorkflowOperationTools:
                         initial_context = db_detail.get("initial_context", {}) or {}
                         triggered_by = initial_context.get("triggered_by", "manual")
                         
+                        # 提取 node_results 并计算统计数据
+                        # 注意：dict.get() 在 key 存在但值为 None 时返回 None 而非默认值
+                        node_results = db_detail.get("node_results") or {}
+                        total_duration_ms = db_detail.get("total_duration_ms") or 0
+                        
+                        # 从 node_results 计算已完成/失败的节点数
+                        nodes_completed = len([
+                            r for r in node_results.values() 
+                            if isinstance(r, dict) and r.get("status") in ("success", "completed")
+                        ])
+                        nodes_failed = len([
+                            r for r in node_results.values() 
+                            if isinstance(r, dict) and r.get("status") == "failed"
+                        ])
+                        
+                        # nodes_total：running 状态时从工作流定义获取真实总数
+                        # 因为 running 中间态的 node_results 只包含已执行的节点，不代表总数
+                        nodes_total = len(node_results)
+                        workflow_def_id = db_detail.get("workflow_definition_id")
+                        if status == "running" and workflow_def_id:
+                            try:
+                                wf_model = await workflow_repo.get_by_id(workflow_def_id)
+                                if wf_model:
+                                    # 优先用 node_count 字段，回退到 definition_json 中的节点数
+                                    wf_total = 0
+                                    if wf_model.node_count and wf_model.node_count > 0:
+                                        wf_total = wf_model.node_count
+                                    elif wf_model.definition_json:
+                                        def_json = wf_model.definition_json
+                                        if isinstance(def_json, dict):
+                                            wf_total = len(def_json.get("nodes", []))
+                                    if wf_total > nodes_total:
+                                        nodes_total = wf_total
+                            except Exception as wf_err:
+                                logger.debug(f"获取工作流定义节点数失败: {wf_err}")
+                        
                         result_data = {
                             "executionId": db_detail.get("id"),
                             "workflowId": db_detail.get("workflow_definition_id"),
                             "status": status,
                             "startedAt": db_detail.get("started_at"),
                             "completedAt": db_detail.get("completed_at"),
-                            "totalDurationMs": db_detail.get("total_duration_ms", 0),
+                            "totalDurationMs": total_duration_ms,
+                            "nodesTotal": nodes_total,
+                            "nodesCompleted": nodes_completed,
+                            "nodesFailed": nodes_failed,
                             "error": db_detail.get("error"),
                             "triggeredBy": triggered_by,
-                            "nodeResults": db_detail.get("node_results", {}),
+                            "nodeResults": node_results,
                             "source": "database",  # 标记数据来源
                         }
                         

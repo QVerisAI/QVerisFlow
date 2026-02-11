@@ -523,9 +523,10 @@ export interface ExecutionProgress {
   executionId: string;
   workflowId: string;
   workflowName?: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'paused';
   progress: number;         // 0-100
   nodesCompleted: number;
+  nodesFailed?: number;     // 失败节点数
   totalNodes: number;
   currentNode: string | null;
   startedAt: string;
@@ -537,6 +538,7 @@ export interface ExecutionSummary {
   type: 'execution_summary';
   executionId: string;
   workflowId: string;
+  workflowDbId?: string;        // 工作流数据库主键 ID（用于 LOAD_WORKFLOW 重新执行）
   workflowName?: string;
   status: 'completed' | 'failed' | 'cancelled';
   totalDurationMs: number;
@@ -561,4 +563,9 @@ export interface RealtimeNodeOutput {
   fullOutput?: unknown;
   error?: string;
   runningStatus?: string;   // 运行中的状态描述（如"正在调用工具 xxx"）
+  // 执行元数据（用于节点详情卡片的状态面板展示）
+  nodeId?: string;
+  durationMs?: number;
+  startedAt?: string;
+  completedAt?: string;
 }
