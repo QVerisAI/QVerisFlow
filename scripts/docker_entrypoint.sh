@@ -162,13 +162,16 @@ sys.exit(0 if success else 1)
 init_directories() {
     echo "📁 初始化目录..."
 
-    # 确保数据目录存在
+    # 宿主机 root 创建的 volume 挂载 (./data:/app/data) 默认为 root 所有，
+    # 需以 root 创建子目录并 chown，以便 qveris 用户写入
     mkdir -p /app/data/workspaces \
              /app/data/storage \
              /app/data/logs \
              /app/data/temp \
              /app/data/checkpoints \
-             /app/data/traces
+             /app/data/traces \
+             /app/data/scheduled_executions
+    chown -R qveris:qveris /app/data
 
     echo "✅ 目录初始化完成"
 }
@@ -194,5 +197,5 @@ echo "=========================================="
 echo "🎉 初始化完成，启动应用..."
 echo "=========================================="
 
-# 4. 启动应用
-exec "$@"
+# 4. 以 qveris 用户启动应用（entrypoint 以 root 运行以便初始化挂载目录权限）
+exec gosu qveris "$@"

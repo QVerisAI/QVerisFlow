@@ -68,6 +68,7 @@ RUN for i in 1 2 3; do \
     libpq5 \
     curl \
     tzdata \
+    gosu \
     && break || sleep 5; \
     done \
     && ln -snf /usr/share/zoneinfo/$TZ /etc/localtime \
@@ -100,13 +101,11 @@ ENV PYTHONPATH="/app:$PYTHONPATH" \
     LOG_FILE=true \
     LOG_DIR=/app/data/logs
 
-# 创建数据目录并设置入口脚本权限
-RUN mkdir -p /app/data/workspaces /app/data/storage /app/data/logs /app/data/temp /app/data/checkpoints /app/data/traces \
-    && chmod +x /app/scripts/docker_entrypoint.sh \
+# 设置入口脚本权限（数据目录由 entrypoint 在挂载后创建并 chown，避免宿主机 root 创建的 ./data 导致权限不足）
+RUN chmod +x /app/scripts/docker_entrypoint.sh \
     && chown -R qveris:qveris /app
 
-# 切换到非 root 用户
-USER qveris
+# 不在此处切换 USER：entrypoint 以 root 启动，创建挂载目录并 chown 后通过 gosu 切换到 qveris 运行应用
 
 # 暴露端口
 EXPOSE 8000
