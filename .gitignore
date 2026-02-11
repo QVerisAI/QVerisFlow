@@ -1,7 +1,6 @@
 .cursor/
 .pytest_cache/
 .venv/
-storage/
 agent_versions/
 versions_example/
 workspaces/
