@@ -11,8 +11,11 @@ FROM node:20-alpine AS builder
 
 WORKDIR /build
 
-# 使用清华 Alpine apk 镜像源
-RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories
+# 使用清华 Alpine apk 镜像源（直接覆盖，确保不走 dl-cdn.alpinelinux.org）
+# 从基础镜像自动检测 Alpine 版本（v3.19/v3.20 等），fallback 到 v3.20
+RUN ALPINE_VER=$(grep -oE 'v[0-9]+\.[0-9]+' /etc/apk/repositories | head -1) || ALPINE_VER="v3.20" && \
+    echo "https://mirrors.tuna.tsinghua.edu.cn/alpine/${ALPINE_VER}/main" > /etc/apk/repositories && \
+    echo "https://mirrors.tuna.tsinghua.edu.cn/alpine/${ALPINE_VER}/community" >> /etc/apk/repositories
 
 # 先复制依赖声明文件，利用 Docker 缓存层
 COPY package.json package-lock.json ./
@@ -36,8 +39,10 @@ RUN npm run build
 # ---- 运行阶段 ----
 FROM nginx:alpine AS runtime
 
-# 使用清华 Alpine apk 镜像源
-RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories
+# 使用清华 Alpine apk 镜像源（直接覆盖，确保不走 dl-cdn.alpinelinux.org）
+RUN ALPINE_VER=$(grep -oE 'v[0-9]+\.[0-9]+' /etc/apk/repositories | head -1) || ALPINE_VER="v3.20" && \
+    echo "https://mirrors.tuna.tsinghua.edu.cn/alpine/${ALPINE_VER}/main" > /etc/apk/repositories && \
+    echo "https://mirrors.tuna.tsinghua.edu.cn/alpine/${ALPINE_VER}/community" >> /etc/apk/repositories
 
 # 从构建阶段复制产物
 COPY --from=builder /build/dist /usr/share/nginx/html

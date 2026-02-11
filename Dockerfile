@@ -11,11 +11,12 @@ FROM qveris-ai-registry.cn-beijing.cr.aliyuncs.com/qveris_ai/python:3.11-slim AS
 
 WORKDIR /build
 
-# 使用清华 apt 镜像源（兼容 sources.list 和 debian.sources 格式）
-RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
-    ([ -f "$$f" ] && sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' "$$f" && \
-    sed -i 's|https://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' "$$f") || true; \
-    done
+# 使用清华 apt 镜像源（直接覆盖，确保不走 deb.debian.org）
+# 原 sed 仅匹配 http://，Debian 12 默认用 https://，导致未生效
+RUN rm -f /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian-security/ bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
 
 # 安装系统构建依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,11 +55,11 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 使用清华 apt 镜像源（兼容 sources.list 和 debian.sources 格式）
-RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
-    ([ -f "$$f" ] && sed -i 's|http://deb.debian.org|https://mirrors.tuna.tsinghua.edu.cn|g' "$$f" && \
-    sed -i 's|https://security.debian.org/debian-security|https://mirrors.tuna.tsinghua.edu.cn/debian-security|g' "$$f") || true; \
-    done
+# 使用清华 apt 镜像源（直接覆盖，确保不走 deb.debian.org）
+RUN rm -f /etc/apt/sources.list.d/debian.sources 2>/dev/null || true && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian-security/ bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
 
 # 安装运行时系统依赖（包含时区数据）
 # 使用重试机制处理网络不稳定问题
