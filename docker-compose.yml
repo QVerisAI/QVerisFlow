@@ -216,3 +216,6 @@ volumes:
 networks:
   qveris_network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.15.116.0/24
