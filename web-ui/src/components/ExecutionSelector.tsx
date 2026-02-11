@@ -1,8 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { ChevronDown, CheckCircle, XCircle, Loader2, Clock, Settings } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
-import { wsService } from '../services/websocket';
-import { WSMessageType } from '../types';
 
 interface ExecutionSelectorProps {
   className?: string;
@@ -31,13 +29,8 @@ export function ExecutionSelector({ className = '' }: ExecutionSelectorProps) {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  // 组件挂载时请求执行历史
-  useEffect(() => {
-    // 检查 WebSocket 是否已连接
-    if (wsService.isConnected) {
-      wsService.send(WSMessageType.GET_EXECUTION_HISTORY, { limit: 10 });
-    }
-  }, []);
+  // 执行历史由 WORKFLOW_LOADED 事件填充（包含手动+定时任务记录），
+  // 不再在此处主动请求 GET_EXECUTION_HISTORY，避免覆盖完整数据。
 
   // 获取当前模式的显示信息
   const getCurrentModeDisplay = () => {
@@ -206,6 +199,11 @@ export function ExecutionSelector({ className = '' }: ExecutionSelectorProps) {
                         <span className="text-sm font-medium text-slate-700">
                           #{executionHistory.length - index}
                         </span>
+                        {execution.triggeredBy === 'scheduler' && (
+                          <span className="text-[10px] leading-none px-1 py-0.5 rounded bg-amber-100 text-amber-700 flex-shrink-0">
+                            定时
+                          </span>
+                        )}
                         <span className="text-xs text-slate-400">
                           {formatTime(execution.startedAt)}
                         </span>

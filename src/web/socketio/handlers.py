@@ -632,6 +632,13 @@ class SocketIOHandler:
                             for r in node_results.values()
                             if isinstance(r, dict)
                         )
+                        # 从 initial_context 提取触发来源
+                        initial_ctx = h.initial_context or {}
+                        triggered_by = (
+                            initial_ctx.get("triggered_by", "manual")
+                            if isinstance(initial_ctx, dict)
+                            else "manual"
+                        )
                         history_list.append(
                             {
                                 "id": h.id,
@@ -650,6 +657,7 @@ class SocketIOHandler:
                                 "total_nodes": total_nodes,
                                 "total_duration_ms": total_duration_ms
                                 or h.total_duration_ms,
+                                "triggered_by": triggered_by,
                             }
                         )
 
@@ -1346,12 +1354,20 @@ class SocketIOHandler:
             await self.emit(WSMessageType.ERROR.value, {"error": str(e)})
 
     async def handle_get_execution_history(self, data: Dict[str, Any]) -> None:
-        """获取执行历史"""
+        """获取执行历史（优先从数据库查询，包含手动+定时任务记录）"""
         try:
             payload = data.get("payload", {})
             limit = payload.get("limit", 10)
 
-            result = await self.builder.operations.get_execution_history(limit=limit)
+            # 获取已加载工作流的数据库 ID，用于从数据库查询完整执行历史
+            workflow_db_id = getattr(
+                self.builder.operations.builder, "loaded_workflow_db_id", None
+            )
+
+            result = await self.builder.operations.get_execution_history(
+                limit=limit,
+                workflow_db_id=workflow_db_id,
+            )
 
             if result.success:
                 await self.emit(

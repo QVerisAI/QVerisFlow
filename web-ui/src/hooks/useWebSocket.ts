@@ -347,6 +347,7 @@ export function useWebSocket() {
             nodes_completed?: number;
             nodes_failed?: number;
             total_nodes?: number;
+            triggered_by?: string;
           }>;
         };
 
@@ -376,6 +377,7 @@ export function useWebSocket() {
             nodesTotal: h.total_nodes || (h.nodes_completed || 0) + (h.nodes_failed || 0),
             nodesCompleted: h.nodes_completed || 0,
             nodesFailed: h.nodes_failed || 0,
+            triggeredBy: (h.triggered_by as 'manual' | 'scheduler') || 'manual',
           }));
           setExecutionHistory(records);
         }
@@ -598,6 +600,7 @@ export function useWebSocket() {
           nodesTotal: totalNodes,
           nodesCompleted: 0,
           nodesFailed: 0,
+          triggeredBy: 'manual',
         };
         currentExecutionRef.current = newRecord;
         addExecutionRecord(newRecord);
@@ -1502,6 +1505,27 @@ export function useWebSocket() {
       if (state.selectedExecutionId === payload.executionId) {
         state.setCurrentExecutionDetail(payload.detail || null);
         // setCurrentExecutionDetail 内部会自动设置 executionDetailLoading = false
+
+        // 修复: Record<string, NodeExecutionResult> 不是可迭代对象，所以需要 Object.values 或类似转换
+        if (payload.detail && payload.detail.nodeResults) {
+          const nodeResultList = Array.isArray(payload.detail.nodeResults)
+            ? payload.detail.nodeResults
+            : Object.values(payload.detail.nodeResults);
+
+          for (const nr of nodeResultList) {
+            updateRealtimeNodeOutput(nr.nodeId, {
+              status: nr.status === 'completed' ? 'completed' :
+                nr.status === 'failed' ? 'failed' : 'pending',
+              fullOutput: nr.fullOutput,
+              error: nr.error,
+              nodeId: nr.nodeId,
+              durationMs: nr.durationMs,
+              startedAt: nr.startedAt,
+              completedAt: nr.completedAt,
+            });
+          }
+        }
+
       } else {
         console.log(`[ExecutionDetail] 忽略过期响应: 期望=${state.selectedExecutionId}, 收到=${payload.executionId}`);
         // 如果当前没有选中任何执行记录，也清除加载状态
@@ -1565,6 +1589,7 @@ export function useWebSocket() {
           nodes_completed?: number;
           nodes_failed?: number;
           total_nodes?: number;
+          triggered_by?: string;
         }>;
       };
       const store = useAppStore.getState();
@@ -1579,7 +1604,7 @@ export function useWebSocket() {
         name: payload.name,
         description: payload.description,
       });
-      if (payload.execution_history) {
+      if (payload.execution_history && payload.execution_history.length > 0) {
         const normalizeStatus = (raw?: string) => {
           if (raw === 'completed') return 'success';
           return raw as 'running' | 'success' | 'failed' | 'cancelled';
@@ -1594,6 +1619,7 @@ export function useWebSocket() {
           nodesTotal: h.total_nodes || (h.nodes_completed || 0) + (h.nodes_failed || 0),
           nodesCompleted: h.nodes_completed || 0,
           nodesFailed: h.nodes_failed || 0,
+          triggeredBy: (h.triggered_by as 'manual' | 'scheduler') || 'manual',
         }));
         store.setExecutionHistory(records);
 
@@ -1607,6 +1633,12 @@ export function useWebSocket() {
           }
           // 无论是否找到，都清除待选中的ID
           store.setPendingExecutionId(null);
+        }
+      } else {
+        // WORKFLOW_LOADED 未携带执行历史时（如新建工作流），降级请求
+        store.setExecutionHistory([]);
+        if (wsService.isConnected) {
+          wsService.send(WSMessageType.GET_EXECUTION_HISTORY, { limit: 10 });
         }
       }
       addMessage({
@@ -1924,6 +1956,7 @@ export function useWebSocket() {
             nodesTotal: totalNodes,
             nodesCompleted: 0,
             nodesFailed: 0,
+            triggeredBy: 'scheduler',
           };
           store.addExecutionRecord(newRecord);
         }

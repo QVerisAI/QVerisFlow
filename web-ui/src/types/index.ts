@@ -323,6 +323,7 @@ export interface ExecutionRecord {
   nodesCompleted: number;
   nodesFailed: number;
   nodeResults?: Record<string, NodeExecutionResult>;
+  triggeredBy?: 'manual' | 'scheduler';
 }
 
 // 节点执行结果

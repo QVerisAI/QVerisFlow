@@ -2552,57 +2552,179 @@ class WorkflowOperationTools:
 
     # ========== 执行历史操作 ==========
 
-    async def get_execution_history(self, limit: int = 10) -> OperationResult:
+    async def get_execution_history(
+        self, limit: int = 10, workflow_db_id: Optional[str] = None
+    ) -> OperationResult:
         """
         获取工作流执行历史列表
 
+        优先从数据库查询（包含手动执行和定时任务记录），
+        保留文件系统扫描作为降级，合并去重后返回。
+
         Args:
             limit: 最多返回的记录数
+            workflow_db_id: 已加载工作流的数据库主键 ID（可选）
 
         Returns:
             操作结果，包含执行历史列表
         """
         try:
-            # 使用统一的路径获取方法
-            executions_dir = self._get_executions_path()
+            db_records: List[Dict[str, Any]] = []
+            fs_records: List[Dict[str, Any]] = []
 
-            if not executions_dir.exists():
-                return OperationResult(
-                    success=True, message="暂无执行记录", data={"history": []}
-                )
+            # ========== 1. 优先从数据库查询 ==========
+            if workflow_db_id:
+                try:
+                    from src.storage.database import AsyncDatabaseManager
+                    from src.storage.repositories import WorkflowExecutionRepository
 
-            records = []
-            # 扫描执行目录
-            workflow_dirs = sorted(
-                [d for d in executions_dir.iterdir() if d.is_dir()],
-                key=lambda x: x.stat().st_mtime,
-                reverse=True,
-            )
+                    db = AsyncDatabaseManager()
+                    await db.connect()
+                    try:
+                        execution_repo = WorkflowExecutionRepository(
+                            db._session_factory
+                        )
+                        executions = await execution_repo.get_by_workflow(
+                            workflow_definition_id=workflow_db_id,
+                            limit=limit,
+                        )
+                        for h in executions:
+                            record = self._db_execution_to_record(h)
+                            if record:
+                                db_records.append(record)
+                    finally:
+                        await db.close()
+                except Exception as db_err:
+                    logger.debug(
+                        f"从数据库获取执行历史失败，将使用文件系统降级: {db_err}"
+                    )
 
-            for workflow_dir in workflow_dirs[
-                : limit * 2
-            ]:  # 多扫描一些，因为有些可能是节点目录
-                # 检查是否有检查点目录（工作流执行目录的标志）
-                checkpoint_dir = workflow_dir / "checkpoints"
-                if not checkpoint_dir.exists():
-                    continue
+            # ========== 2. 文件系统扫描（降级或补充） ==========
+            try:
+                executions_dir = self._get_executions_path()
+                if executions_dir.exists():
+                    workflow_dirs = sorted(
+                        [d for d in executions_dir.iterdir() if d.is_dir()],
+                        key=lambda x: x.stat().st_mtime,
+                        reverse=True,
+                    )
 
-                # 尝试加载最新的检查点
-                record = self._load_execution_record(workflow_dir)
-                if record:
-                    records.append(record)
-                    if len(records) >= limit:
-                        break
+                    for workflow_dir in workflow_dirs[
+                        : limit * 2
+                    ]:  # 多扫描一些，因为有些可能是节点目录
+                        checkpoint_dir = workflow_dir / "checkpoints"
+                        if not checkpoint_dir.exists():
+                            continue
+
+                        record = self._load_execution_record(workflow_dir)
+                        if record:
+                            fs_records.append(record)
+                            if len(fs_records) >= limit:
+                                break
+            except Exception as fs_err:
+                logger.debug(f"从文件系统获取执行历史失败: {fs_err}")
+
+            # ========== 3. 合并去重（数据库优先） ==========
+            seen_ids: set = set()
+            merged: List[Dict[str, Any]] = []
+
+            # 先加入数据库记录（优先）
+            for r in db_records:
+                eid = r.get("executionId", "")
+                if eid and eid not in seen_ids:
+                    seen_ids.add(eid)
+                    merged.append(r)
+
+            # 再加入文件系统记录（去重）
+            for r in fs_records:
+                eid = r.get("executionId", "")
+                if eid and eid not in seen_ids:
+                    seen_ids.add(eid)
+                    merged.append(r)
+
+            # 按 startedAt 降序排序
+            def _sort_key(rec: Dict[str, Any]) -> str:
+                return rec.get("startedAt") or rec.get("completedAt") or ""
+
+            merged.sort(key=_sort_key, reverse=True)
+
+            # 截断到 limit
+            merged = merged[:limit]
 
             return OperationResult(
                 success=True,
-                message=f"找到 {len(records)} 条执行记录",
-                data={"history": records},
+                message=f"找到 {len(merged)} 条执行记录",
+                data={"history": merged},
             )
 
         except Exception as e:
             logger.error(f"获取执行历史失败: {e}")
             return OperationResult(success=False, message=str(e))
+
+    @staticmethod
+    def _db_execution_to_record(h) -> Optional[Dict[str, Any]]:
+        """
+        将数据库 WorkflowExecutionModel 转换为前端 ExecutionRecord 格式
+
+        Args:
+            h: WorkflowExecutionModel 实例
+
+        Returns:
+            ExecutionRecord 字典，或 None
+        """
+        try:
+            node_results = h.node_results or {}
+            nodes_completed = sum(
+                1
+                for r in node_results.values()
+                if isinstance(r, dict) and r.get("status") in ("completed", "success")
+            )
+            nodes_failed = sum(
+                1
+                for r in node_results.values()
+                if isinstance(r, dict) and r.get("status") == "failed"
+            )
+            total_nodes = len(node_results)
+            total_duration_ms = sum(
+                r.get("duration_ms", 0)
+                for r in node_results.values()
+                if isinstance(r, dict)
+            )
+
+            # 规范化状态
+            raw_status = h.status.value if h.status else "pending"
+            if raw_status in ("completed", "success"):
+                status = "success"
+            else:
+                status = raw_status
+
+            # 从 initial_context 提取触发来源
+            initial_ctx = h.initial_context or {}
+            triggered_by = (
+                initial_ctx.get("triggered_by", "manual")
+                if isinstance(initial_ctx, dict)
+                else "manual"
+            )
+
+            return {
+                "executionId": h.id,
+                "workflowId": h.workflow_definition_id,
+                "status": status,
+                "startedAt": (
+                    h.started_at.isoformat() if h.started_at else None
+                ),
+                "completedAt": (
+                    h.completed_at.isoformat() if h.completed_at else None
+                ),
+                "totalDurationMs": total_duration_ms or h.total_duration_ms,
+                "nodesTotal": total_nodes,
+                "nodesCompleted": nodes_completed,
+                "nodesFailed": nodes_failed,
+                "triggeredBy": triggered_by,
+            }
+        except Exception as e:
+            logger.warning(f"转换数据库执行记录失败: {e}")
+            return None
 
     def _load_execution_record(self, workflow_dir: Path) -> Optional[Dict[str, Any]]:
         """从工作流目录加载执行记录"""
@@ -2689,6 +2811,7 @@ class WorkflowOperationTools:
                 "nodesTotal": nodes_total,
                 "nodesCompleted": nodes_completed,
                 "nodesFailed": nodes_failed,
+                "triggeredBy": "manual",  # 文件系统 checkpoint 记录均为手动执行
             }
 
         except Exception as e:
@@ -2749,29 +2872,51 @@ class WorkflowOperationTools:
                             if isinstance(r, dict) and r.get("status") == "failed"
                         ])
                         
-                        # nodes_total：running 状态时从工作流定义获取真实总数
-                        # 因为 running 中间态的 node_results 只包含已执行的节点，不代表总数
+                        # 从工作流定义中获取节点名称映射和真实总数
                         nodes_total = len(node_results)
                         workflow_def_id = db_detail.get("workflow_definition_id")
-                        if status == "running" and workflow_def_id:
+                        node_name_map: Dict[str, str] = {}  # node_id -> 人类可读名称
+                        if workflow_def_id:
                             try:
                                 wf_model = await workflow_repo.get_by_id(workflow_def_id)
                                 if wf_model:
-                                    # 优先用 node_count 字段，回退到 definition_json 中的节点数
-                                    wf_total = 0
-                                    if wf_model.node_count and wf_model.node_count > 0:
-                                        wf_total = wf_model.node_count
-                                    elif wf_model.definition_json:
-                                        def_json = wf_model.definition_json
-                                        if isinstance(def_json, dict):
-                                            wf_total = len(def_json.get("nodes", []))
-                                    if wf_total > nodes_total:
-                                        nodes_total = wf_total
+                                    # 从 definition_json 构建 node_id -> name 映射
+                                    if wf_model.definition_json and isinstance(wf_model.definition_json, dict):
+                                        def_nodes = wf_model.definition_json.get("nodes", [])
+                                        for dn in def_nodes:
+                                            if isinstance(dn, dict) and dn.get("node_id"):
+                                                node_name_map[dn["node_id"]] = dn.get("name", dn["node_id"])
+                                    
+                                    # running 状态时从工作流定义获取真实总数
+                                    if status == "running":
+                                        wf_total = 0
+                                        if wf_model.node_count and wf_model.node_count > 0:
+                                            wf_total = wf_model.node_count
+                                        elif node_name_map:
+                                            wf_total = len(node_name_map)
+                                        if wf_total > nodes_total:
+                                            nodes_total = wf_total
                             except Exception as wf_err:
-                                logger.debug(f"获取工作流定义节点数失败: {wf_err}")
+                                logger.debug(f"获取工作流定义失败: {wf_err}")
+                        
+                        # 补全 node_results 中缺失或不正确的 node_name
+                        if node_name_map:
+                            for nid, nr in node_results.items():
+                                if isinstance(nr, dict):
+                                    existing_name = nr.get("node_name", "")
+                                    # 如果 node_name 缺失、等于 node_id、或以 _agent 结尾（像是 agent_id），
+                                    # 则从工作流定义中解析人类可读的名称
+                                    if (
+                                        not existing_name
+                                        or existing_name == nid
+                                        or existing_name.endswith("_agent")
+                                    ):
+                                        resolved = node_name_map.get(nid, "")
+                                        if resolved:
+                                            nr["node_name"] = resolved
                         
                         result_data = {
-                            "executionId": db_detail.get("id"),
+                            "executionId": execution_id, #db_detail.get("id"),
                             "workflowId": db_detail.get("workflow_definition_id"),
                             "status": status,
                             "startedAt": db_detail.get("started_at"),

@@ -31,6 +31,8 @@ function App() {
   } = useAppStore();
   const { connect, isConnected, isReconnecting, reconnectAttempt, smartSave } = useWebSocket();
 
+  // ==================== 所有 Hooks 必须在最顶部无条件调用 ====================
+
   // 初始化认证状态（从 localStorage 恢复）
   const authInitRef = useRef(false);
   useEffect(() => {
@@ -50,16 +52,12 @@ function App() {
     setAuth(user);
   }, [setAuth]);
 
-  // 如果未认证，显示登录页面
-  if (!isAuthed) {
-    return <LoginPage onLoginSuccess={handleLoginSuccess} />;
-  }
-
   // 定时任务弹窗状态
   const [scheduleWorkflow, setScheduleWorkflow] = useState<WorkflowSummary | null>(null);
 
   // 全局快捷键：Cmd/Ctrl + S 保存工作流
   useEffect(() => {
+    if (!isAuthed) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
@@ -68,7 +66,7 @@ function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [smartSave]);
+  }, [smartSave, isAuthed]);
 
   // 可调节宽度状态（默认 675px，约为原来的 1.5 倍）
   const [panelWidth, setPanelWidth] = useState(675);
@@ -77,6 +75,7 @@ function App() {
 
   // 初始化会话（优先从 localStorage 恢复，支持断点续传）
   useEffect(() => {
+    if (!isAuthed) return;
     if (!sessionId) {
       // 尝试从 localStorage 恢复 session ID
       const savedSessionId = localStorage.getItem('workflow_session_id');
@@ -94,19 +93,20 @@ function App() {
       // 确保当前 session ID 保存到 localStorage
       localStorage.setItem('workflow_session_id', sessionId);
     }
-  }, [sessionId, setSessionId]);
+  }, [sessionId, setSessionId, isAuthed]);
 
   // 连接 WebSocket（只在初始化时连接一次，重连由 wsService 自动处理）
   const hasConnectedRef = useRef(false);
   useEffect(() => {
-    if (sessionId && !hasConnectedRef.current) {
+    if (isAuthed && sessionId && !hasConnectedRef.current) {
       hasConnectedRef.current = true;
       connect(sessionId);
     }
-  }, [sessionId, connect]);
+  }, [sessionId, connect, isAuthed]);
 
   // 监听页面可见性变化，在页面重新可见时检查连接
   useEffect(() => {
+    if (!isAuthed) return;
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible' && sessionId && !isConnected) {
         console.log('页面可见，检查连接状态');
@@ -118,7 +118,7 @@ function App() {
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [sessionId, isConnected, connect]);
+  }, [sessionId, isConnected, connect, isAuthed]);
 
   // 处理拖拽调整宽度
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -153,13 +153,20 @@ function App() {
     };
   }, [isResizing, handleMouseMove, handleMouseUp]);
 
+  // ==================== 条件渲染（Hooks 之后）====================
+
+  // 如果未认证，显示登录页面
+  if (!isAuthed) {
+    return <LoginPage onLoginSuccess={handleLoginSuccess} />;
+  }
+
   return (
     <ReactFlowProvider>
       <div className="h-screen flex flex-col bg-gray-50">
         {/* 重连状态提示 */}
         {isReconnecting && (
           <div className="bg-yellow-500 text-white text-center py-2 text-sm animate-pulse">
-            🔄 正在重连... (尝试 {reconnectAttempt})
+            正在重连... (尝试 {reconnectAttempt})
           </div>
         )}
 
