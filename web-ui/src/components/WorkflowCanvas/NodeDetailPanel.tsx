@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import type { NodeInfo, AgentInfo, AgentDefinition, ToolInfo, ModelInfo, NodeExecutionResult, RealtimeNodeOutput } from '../../types';
-import { formatOutputToMarkdown } from '../../utils/outputFormatter';
+import { formatOutputToReadableMarkdown } from '../../utils/outputFormatter';
 import { useAppStore } from '../../stores/appStore';
 
 interface NodeDetailPanelProps {
@@ -351,8 +351,8 @@ function ExecutionResultPanel({
       );
     }
 
-    // Markdown 渲染
-    const markdownContent = formatOutputToMarkdown(output);
+    // Markdown 渲染：解包 agent 输出结构，展示 summary/narrative/data 等真实内容
+    const markdownContent = formatOutputToReadableMarkdown(output);
     return (
       <div className="p-4 bg-gradient-to-br from-slate-50 to-slate-100 rounded-xl max-h-96 overflow-y-auto">
         <div className="prose prose-sm max-w-none prose-slate">

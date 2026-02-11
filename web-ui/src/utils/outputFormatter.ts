@@ -348,13 +348,9 @@ export function formatNodeOutput(output: unknown): FormatNodeOutputResult {
     let summary: string | null = null;
     if (typeof obj.summary === 'string') {
       summary = obj.summary;
-      // 清洗 markdown 代码块标记
-      if (summary.trim().startsWith('```')) {
-        summary = null;
-      }
+      if (summary.trim().startsWith('```')) summary = null;
     }
     if (!summary) {
-      // 从 data 或过滤后的对象生成摘要
       const dataForSummary = obj.data ?? filteredObj;
       summary = generateOutputSummary(dataForSummary);
     }
@@ -382,6 +378,29 @@ export function formatNodeOutput(output: unknown): FormatNodeOutputResult {
     highlights: null,
     markdown: formatOutputToMarkdown(output),
   };
+}
+
+/**
+ * 将节点输出转换为人类可读的 Markdown（用于渲染模式）
+ * 解包 agent 输出的 { agent_id, result: { summary, narrative, data, highlights } } 结构，
+ * 优先展示 summary、narrative、highlights、真实报告内容，而非技术元数据。
+ */
+export function formatOutputToReadableMarkdown(output: unknown): string {
+  const { summary, narrative, highlights, markdown } = formatNodeOutput(output);
+  const parts: string[] = [];
+  if (summary && summary !== '执行完成') {
+    parts.push(`**摘要**: ${summary}`);
+  }
+  if (narrative?.trim()) {
+    parts.push(narrative.trim());
+  }
+  if (Array.isArray(highlights) && highlights.length > 0) {
+    parts.push('**关键发现**:\n' + highlights.map(h => `- ${h}`).join('\n'));
+  }
+  if (markdown && markdown !== '*无输出*') {
+    parts.push(markdown);
+  }
+  return parts.join('\n\n') || '*无输出*';
 }
 
 /**
