@@ -9,6 +9,7 @@ import type {
   AgentLibraryItem,
   RealtimeNodeOutput,
 } from '../types';
+import type { AuthUser } from '../services/auth';
 
 interface GenerationProgress {
   current: number;
@@ -20,6 +21,12 @@ interface GenerationProgress {
 }
 
 interface AppState {
+  // 认证
+  isAuthenticated: boolean;
+  currentUser: AuthUser | null;
+  setAuth: (user: AuthUser) => void;
+  clearAuth: () => void;
+
   // 会话
   sessionId: string | null;
   setSessionId: (id: string) => void;
@@ -78,8 +85,9 @@ interface AppState {
     nodesCompleted: number;
     totalNodes: number;
     currentNode: string | null;
+    status?: 'running' | 'paused';
   };
-  setExecutionProgress: (progress: { nodesCompleted: number; totalNodes: number; currentNode: string | null }) => void;
+  setExecutionProgress: (progress: { nodesCompleted: number; totalNodes: number; currentNode: string | null; status?: 'running' | 'paused' }) => void;
 
   // 加载状态
   isLoading: boolean;
@@ -149,6 +157,12 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set) => ({
+  // 认证
+  isAuthenticated: false,
+  currentUser: null,
+  setAuth: (user) => set({ isAuthenticated: true, currentUser: user }),
+  clearAuth: () => set({ isAuthenticated: false, currentUser: null, sessionId: null }),
+
   // 会话
   sessionId: null,
   setSessionId: (id) => set({ sessionId: id }),

@@ -9,8 +9,11 @@ import { WorkflowListPanel } from './components/WorkflowListPanel';
 import { AgentLibraryPanel } from './components/AgentLibraryPanel';
 import { SaveWorkflowDialog } from './components/SaveWorkflowDialog';
 import { ScheduleTaskDialog } from './components/ScheduleTaskDialog';
+import { LoginPage } from './components/LoginPage';
 import { useAppStore } from './stores/appStore';
 import { useWebSocket } from './hooks/useWebSocket';
+import { getCurrentUser, isAuthenticated as checkAuth } from './services/auth';
+import type { AuthUser } from './services/auth';
 import type { WorkflowSummary } from './types';
 
 function App() {
@@ -23,8 +26,34 @@ function App() {
     setShowWorkflowListPanel,
     setShowAgentLibraryPanel,
     setShowSaveWorkflowDialog,
+    isAuthenticated: isAuthed,
+    setAuth,
   } = useAppStore();
   const { connect, isConnected, isReconnecting, reconnectAttempt, smartSave } = useWebSocket();
+
+  // 初始化认证状态（从 localStorage 恢复）
+  const authInitRef = useRef(false);
+  useEffect(() => {
+    if (!authInitRef.current) {
+      authInitRef.current = true;
+      if (checkAuth()) {
+        const user = getCurrentUser();
+        if (user) {
+          setAuth(user);
+        }
+      }
+    }
+  }, [setAuth]);
+
+  // 登录成功回调
+  const handleLoginSuccess = useCallback((user: AuthUser) => {
+    setAuth(user);
+  }, [setAuth]);
+
+  // 如果未认证，显示登录页面
+  if (!isAuthed) {
+    return <LoginPage onLoginSuccess={handleLoginSuccess} />;
+  }
 
   // 定时任务弹窗状态
   const [scheduleWorkflow, setScheduleWorkflow] = useState<WorkflowSummary | null>(null);

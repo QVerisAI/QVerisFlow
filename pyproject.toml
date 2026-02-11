@@ -84,6 +84,8 @@ web = [
     "python-multipart>=0.0.6",
     "python-socketio>=5.16.0",
     "apscheduler>=3.10.0",
+    "PyJWT>=2.8.0",
+    "bcrypt>=4.0.0",
 ]
 
 [build-system]

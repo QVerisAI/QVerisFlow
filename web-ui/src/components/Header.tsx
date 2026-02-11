@@ -1,10 +1,17 @@
-import { FolderOpen, Save, Play } from 'lucide-react';
+import { FolderOpen, Save, Play, LogOut, User } from 'lucide-react';
 import { useAppStore } from '../stores/appStore';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { logout as authLogout } from '../services/auth';
 
 export function Header() {
-  const { mode, workflowState, setShowWorkflowListPanel } = useAppStore();
+  const { mode, workflowState, setShowWorkflowListPanel, currentUser, clearAuth } = useAppStore();
   const { sendAction, smartSave } = useWebSocket();
+
+  const handleLogout = () => {
+    authLogout();
+    clearAuth();
+    window.location.reload();
+  };
 
   const hasWorkflow = workflowState?.nodes?.length ?? 0 > 0;
   const canExecute = hasWorkflow && mode !== 'executing';
@@ -62,6 +69,26 @@ export function Header() {
           <Play className="w-4 h-4" />
           <span>执行</span>
         </button>
+
+        {/* 分隔线 */}
+        <div className="w-px h-6 bg-gray-200 mx-1" />
+
+        {/* 用户信息 & 登出 */}
+        {currentUser && (
+          <div className="flex items-center gap-2">
+            <span className="flex items-center gap-1.5 text-sm text-gray-600">
+              <User className="w-4 h-4" />
+              <span className="hidden sm:inline">{currentUser.display_name}</span>
+            </span>
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-1 px-2 py-1.5 text-sm text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
+              title="退出登录"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

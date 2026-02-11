@@ -85,6 +85,8 @@ export function useWebSocket() {
     progress: ExecutionProgress;
     nodeResults: Map<string, ExecutionNodeResult>;
   } | null>(null);
+  // 追踪当前正在通过 show_in_chat 跟踪的定时任务执行 ID
+  const scheduledExecutionTrackingRef = useRef<string | null>(null);
   // 事件序列号追踪（用于检测事件丢失）
   const eventSequenceRef = useRef<EventSequenceTracker | null>(null);
   const {
@@ -113,6 +115,8 @@ export function useWebSocket() {
     addMessagesBatch,
     setHasMoreHistory,
     setIsLoadingHistory,
+    // 认证相关
+    clearAuth,
   } = useAppStore();
 
   // 注册 Socket.IO 连接状态回调
@@ -128,12 +132,22 @@ export function useWebSocket() {
       setReconnectAttempt(attempt);
     });
 
+    // 认证错误回调（token 过期等 -> 跳转登录页）
+    wsService.setAuthErrorCallback(() => {
+      import('../services/auth').then(({ logout }) => {
+        logout();
+        clearAuth();
+        window.location.reload();
+      });
+    });
+
     return () => {
       // 清理回调
       wsService.setConnectionChangeCallback(() => { });
       wsService.setReconnectingCallback(() => { });
+      wsService.setAuthErrorCallback(() => { });
     };
-  }, []);
+  }, [clearAuth]);
 
   // 连接
   const connect = useCallback(async (sessionId: string) => {
@@ -487,6 +501,7 @@ export function useWebSocket() {
         error?: string;
         status?: string;
         data?: Record<string, unknown>;
+        timestamp?: string;
         // 事件追踪字段（新增）
         event_id?: string;
         sequence?: number;
@@ -593,12 +608,12 @@ export function useWebSocket() {
           const updatedList = store.workflowList.map(w =>
             w.workflowId === event.workflow_id
               ? {
-                  ...w,
-                  lastExecutionStatus: 'running' as const,
-                  lastExecutionTriggeredBy: 'manual' as const,
-                  lastExecutionId: executionId,
-                  lastExecutionAt: startedAt,
-                }
+                ...w,
+                lastExecutionStatus: 'running' as const,
+                lastExecutionTriggeredBy: 'manual' as const,
+                lastExecutionId: executionId,
+                lastExecutionAt: startedAt,
+              }
               : w
           );
           store.setWorkflowList(updatedList);
@@ -700,10 +715,10 @@ export function useWebSocket() {
             const updatedList = store.workflowList.map(w =>
               w.workflowId === workflowId
                 ? {
-                    ...w,
-                    lastExecutionStatus: (isSuccess ? 'success' : 'failed') as 'success' | 'failed',
-                    executionCount: (w.executionCount || 0) + 1,
-                  }
+                  ...w,
+                  lastExecutionStatus: (isSuccess ? 'success' : 'failed') as 'success' | 'failed',
+                  executionCount: (w.executionCount || 0) + 1,
+                }
                 : w
             );
             store.setWorkflowList(updatedList);
@@ -778,10 +793,10 @@ export function useWebSocket() {
             const updatedList = store.workflowList.map(w =>
               w.workflowId === workflowId
                 ? {
-                    ...w,
-                    lastExecutionStatus: 'failed' as const,
-                    executionCount: (w.executionCount || 0) + 1,
-                  }
+                  ...w,
+                  lastExecutionStatus: 'failed' as const,
+                  executionCount: (w.executionCount || 0) + 1,
+                }
                 : w
             );
             store.setWorkflowList(updatedList);
@@ -883,6 +898,40 @@ export function useWebSocket() {
         currentExecutionRef.current = null;
       }
 
+      // 执行暂停：更新进度状态为 paused
+      if (event.event_type === 'workflow_paused') {
+        if (executionProgressRef.current) {
+          const { messageId, progress, nodeResults } = executionProgressRef.current;
+          const updatedProgress: ExecutionProgress = { ...progress, status: 'paused', nodeResults: Array.from(nodeResults.values()) };
+          executionProgressRef.current.progress = updatedProgress;
+          updateMessageById(messageId, {
+            content: '工作流已暂停',
+            messageType: 'execution_progress',
+            data: updatedProgress as unknown as Record<string, unknown>,
+          });
+        }
+        // 同步 store 中的执行进度状态
+        const currentProgress = useAppStore.getState().executionProgress;
+        setExecutionProgress({ ...currentProgress, status: 'paused' });
+      }
+
+      // 执行恢复：更新进度状态回 running
+      if (event.event_type === 'workflow_resumed') {
+        if (executionProgressRef.current) {
+          const { messageId, progress, nodeResults } = executionProgressRef.current;
+          const updatedProgress: ExecutionProgress = { ...progress, status: 'running', nodeResults: Array.from(nodeResults.values()) };
+          executionProgressRef.current.progress = updatedProgress;
+          updateMessageById(messageId, {
+            content: '工作流已恢复执行...',
+            messageType: 'execution_progress',
+            data: updatedProgress as unknown as Record<string, unknown>,
+          });
+        }
+        // 同步 store 中的执行进度状态
+        const currentProgress = useAppStore.getState().executionProgress;
+        setExecutionProgress({ ...currentProgress, status: 'running' });
+      }
+
       // === 处理节点级别的执行事件 ===
 
       // 校验事件是否属于当前执行，忽略来自旧执行的延迟事件
@@ -921,6 +970,8 @@ export function useWebSocket() {
           // 更新实时节点输出状态
           updateRealtimeNodeOutput(frontendNodeId, {
             status: 'running',
+            nodeId: event.node_id || frontendNodeId,
+            startedAt: (event.timestamp as string) || new Date().toISOString(),
           });
 
           // 更新进度消息中的节点状态
@@ -976,6 +1027,9 @@ export function useWebSocket() {
             outputPreview: outputSummary || outputPreview || (output ? generateOutputSummary(output) : undefined),
             outputSummary: outputSummary || (output ? generateOutputSummary(output) : undefined),
             fullOutput: output,
+            nodeId: event.node_id || frontendNodeId,
+            durationMs,
+            completedAt: (event.timestamp as string) || new Date().toISOString(),
           });
 
           // 更新进度消息
@@ -1035,6 +1089,8 @@ export function useWebSocket() {
           updateRealtimeNodeOutput(frontendNodeId, {
             status: 'failed',
             error: errorMsg,
+            nodeId: event.node_id || frontendNodeId,
+            completedAt: (event.timestamp as string) || new Date().toISOString(),
           });
 
           // 更新进度消息
@@ -1227,13 +1283,13 @@ export function useWebSocket() {
     const unsubError = wsService.on(WSMessageType.ERROR, (msg) => {
       setIsLoading(false);
       const payload = msg.payload as { error: string };
-      
+
       // 清除执行详情加载状态（防止加载状态卡住）
       const store = useAppStore.getState();
       if (store.executionDetailLoading) {
         store.setExecutionDetailLoading(false);
       }
-      
+
       addMessage({
         role: 'system',
         content: `❌ 错误: ${payload.error}`,
@@ -1304,10 +1360,11 @@ export function useWebSocket() {
 
     // 执行详情响应 - 【关键修复】检查 executionId 匹配，避免响应顺序不一致导致的状态错乱
     const unsubExecutionDetail = wsService.on(WSMessageType.EXECUTION_DETAIL, (msg) => {
-      const payload = msg.payload as { 
-        executionId: string; 
+      const payload = msg.payload as {
+        executionId: string;
         detail: ExecutionRecord;
         workflow_name?: string;
+        workflow_db_id?: string;
         show_in_chat?: boolean;
       };
       const state = useAppStore.getState();
@@ -1316,7 +1373,7 @@ export function useWebSocket() {
       if (payload.show_in_chat && payload.detail) {
         const detail = payload.detail as unknown as Record<string, unknown>;
         const rawNodeResults = (detail.nodeResults || detail.node_results || {}) as Record<string, Record<string, unknown>>;
-        
+
         // 将后端 snake_case 的 node_results 转为前端 camelCase 格式
         // 兼容数据库返回（snake_case）和内存中（camelCase）两种格式
         const nodeResultsArray = Object.entries(rawNodeResults).map(([key, nr]) => ({
@@ -1326,39 +1383,113 @@ export function useWebSocket() {
           durationMs: (nr.duration_ms ?? nr.durationMs) as number | undefined,
           fullOutput: nr.output as unknown,
           error: nr.error as string | undefined,
+          startedAt: (nr.started_at ?? nr.startedAt) as string | undefined,
+          completedAt: (nr.completed_at ?? nr.completedAt) as string | undefined,
         }));
 
         // 从 nodeResults 计算缺失的统计字段（后端可能未返回这些字段）
-        const totalNodes = ((detail.nodesTotal ?? detail.nodes_total) as number | undefined) 
+        const totalNodes = ((detail.nodesTotal ?? detail.nodes_total) as number | undefined)
           ?? Object.keys(rawNodeResults).length;
-        const nodesCompleted = ((detail.nodesCompleted ?? detail.nodes_completed) as number | undefined) 
+        const nodesCompleted = ((detail.nodesCompleted ?? detail.nodes_completed) as number | undefined)
           ?? nodeResultsArray.filter(n => n.status === 'completed').length;
-        const nodesFailed = ((detail.nodesFailed ?? detail.nodes_failed) as number | undefined) 
+        const nodesFailed = ((detail.nodesFailed ?? detail.nodes_failed) as number | undefined)
           ?? nodeResultsArray.filter(n => n.status === 'failed').length;
 
         const rawStatus = (detail.status as string) || 'failed';
+        const executionId = (detail.executionId || detail.execution_id) as string;
+        const workflowId = (detail.workflowId || detail.workflow_id) as string;
+        const workflowName = payload.workflow_name || '工作流';
+        const startedAt = (detail.startedAt || detail.started_at || new Date().toISOString()) as string;
+
+        // 将执行详情中的节点结果同步到 realtimeNodeOutputs（用于画布节点详情卡片展示）
+        if (nodeResultsArray.length > 0) {
+          const nodeIdMap = useAppStore.getState().workflowNodeIdMap;
+          const toFrontendId = (nid: string, nname?: string): string | null => {
+            if (nodeIdMap[nid]) return nodeIdMap[nid];
+            if (nname && nodeIdMap[nname]) return nodeIdMap[nname];
+            if (nname && nodeIdMap[nname.replace(/ /g, '_')]) return nodeIdMap[nname.replace(/ /g, '_')];
+            return nid.startsWith('agent_') ? nid : `agent_${nid}`;
+          };
+          for (const nr of nodeResultsArray) {
+            const frontendId = toFrontendId(nr.nodeId, nr.nodeName);
+            if (frontendId) {
+              updateRealtimeNodeOutput(frontendId, {
+                status: nr.status === 'completed' ? 'completed' :
+                  nr.status === 'failed' ? 'failed' : 'pending',
+                fullOutput: nr.fullOutput,
+                error: nr.error,
+                nodeId: nr.nodeId,
+                durationMs: nr.durationMs,
+                startedAt: nr.startedAt,
+                completedAt: nr.completedAt,
+              });
+            }
+          }
+        }
+
+        // === 运行中的任务：走 ExecutionProgressCard 路径（复用手动执行的流程） ===
+        if (rawStatus === 'running') {
+          const progressMessageId = `exec_progress_${executionId}`;
+          const nodeResultsMap = new Map<string, ExecutionNodeResult>();
+          nodeResultsArray.forEach(nr => nodeResultsMap.set(nr.nodeId, nr));
+
+          const initialProgress: ExecutionProgress = {
+            type: 'execution_progress',
+            executionId,
+            workflowId,
+            workflowName,
+            status: 'running',
+            progress: totalNodes > 0 ? Math.round((nodesCompleted / totalNodes) * 100) : 0,
+            nodesCompleted,
+            totalNodes,
+            currentNode: null,
+            startedAt,
+            nodeResults: nodeResultsArray,
+          };
+
+          // 复用手动执行的 executionProgressRef，确保后续事件更新同一条消息
+          executionProgressRef.current = {
+            messageId: progressMessageId,
+            progress: initialProgress,
+            nodeResults: nodeResultsMap,
+          };
+
+          // 记录正在追踪的定时任务执行 ID
+          scheduledExecutionTrackingRef.current = executionId;
+
+          state.addMessage({
+            id: progressMessageId,
+            role: 'assistant',
+            content: `工作流 "${workflowName}" 正在执行中...`,
+            timestamp: new Date().toISOString(),
+            messageType: 'execution_progress',
+            data: initialProgress as unknown as Record<string, unknown>,
+          });
+          return;
+        }
+
+        // === 已完成/失败的任务：走 ExecutionSummaryCard 路径 ===
         const executionSummary = {
           type: 'execution_summary' as const,
-          executionId: (detail.executionId || detail.execution_id) as string,
-          workflowId: (detail.workflowId || detail.workflow_id) as string,
-          workflowName: payload.workflow_name || '工作流',
-          status: rawStatus === 'success' || rawStatus === 'completed' ? 'completed' as const : 
-                  rawStatus === 'running' ? 'completed' as const :
-                  rawStatus as 'failed' | 'cancelled',
+          executionId,
+          workflowId,
+          workflowDbId: payload.workflow_db_id || undefined,
+          workflowName,
+          status: rawStatus === 'success' || rawStatus === 'completed' ? 'completed' as const :
+            rawStatus as 'failed' | 'cancelled',
           totalDurationMs: ((detail.totalDurationMs ?? detail.total_duration_ms) as number) || 0,
           nodesCompleted,
           nodesFailed,
           totalNodes,
-          startedAt: (detail.startedAt || detail.started_at || new Date().toISOString()) as string,
+          startedAt,
           completedAt: (detail.completedAt || detail.completed_at || detail.startedAt || detail.started_at || new Date().toISOString()) as string,
           nodeResults: nodeResultsArray,
           error: detail.error as string | undefined,
         };
 
-        // 添加执行详情消息到 ChatPanel
         state.addMessage({
           role: 'assistant',
-          content: `工作流 "${payload.workflow_name || '工作流'}" 执行详情`,
+          content: `工作流 "${workflowName}" 执行详情`,
           timestamp: new Date().toISOString(),
           messageType: 'execution_summary',
           data: executionSummary,
@@ -1465,7 +1596,7 @@ export function useWebSocket() {
           nodesFailed: h.nodes_failed || 0,
         }));
         store.setExecutionHistory(records);
-        
+
         // 检查是否有待选中的执行ID（从"查看详情"按钮设置）
         const { pendingExecutionId } = store;
         if (pendingExecutionId) {
@@ -1630,26 +1761,158 @@ export function useWebSocket() {
 
       const { event, workflow_id } = payload;
       const store = useAppStore.getState();
-      
+
       // 检查当前画布是否正在显示这个工作流
       const isCurrentWorkflow = store.currentWorkflowMeta?.workflowId === workflow_id;
 
-      // 根据事件类型更新工作流列表中的状态
+      // === 是否正在通过 show_in_chat 追踪此执行的进度 ===
+      const isTracking = scheduledExecutionTrackingRef.current === payload.execution_id
+        && executionProgressRef.current !== null;
+
+      // 将后端 node_id 映射到前端 nodeId（复用 EXECUTION_EVENT 中的映射逻辑）
+      const nodeIdMap = store.workflowNodeIdMap;
+      const resolveNodeId = (nodeId: string | undefined, nodeName?: string): string | null => {
+        if (!nodeId && !nodeName) return null;
+        if (nodeId && nodeIdMap[nodeId]) return nodeIdMap[nodeId];
+        if (nodeName && nodeIdMap[nodeName]) return nodeIdMap[nodeName];
+        if (nodeName && nodeIdMap[nodeName.replace(/ /g, '_')]) return nodeIdMap[nodeName.replace(/ /g, '_')];
+        if (nodeId && nodeId.startsWith('agent_')) return nodeId;
+        if (nodeId) return `agent_${nodeId}`;
+        return null;
+      };
+
+      // === 节点级别事件处理（复用手动执行的 executionProgressRef 模式） ===
+      if (isTracking && executionProgressRef.current) {
+        const { messageId, progress, nodeResults } = executionProgressRef.current;
+
+        if (event.event_type === 'node_started') {
+          const nodeId = (event.node_id as string) || '';
+          const nodeName = (event.node_name as string) || nodeId;
+          if (nodeId) {
+            nodeResults.set(nodeId, { nodeId, nodeName, status: 'running' });
+            // 同步更新画布节点详情卡片的实时输出状态
+            const frontendId = resolveNodeId(nodeId, nodeName);
+            if (frontendId) {
+              updateRealtimeNodeOutput(frontendId, {
+                status: 'running',
+                nodeId,
+                startedAt: (event.timestamp as string) || new Date().toISOString(),
+              });
+            }
+            const newProgress: ExecutionProgress = {
+              ...progress,
+              currentNode: nodeName,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+            executionProgressRef.current.progress = newProgress;
+            updateMessageById(messageId, {
+              data: newProgress as unknown as Record<string, unknown>,
+            });
+          }
+        }
+
+        if (event.event_type === 'node_completed') {
+          const nodeId = (event.node_id as string) || '';
+          const nodeName = (event.node_name as string) || nodeId;
+          const output = event.output || (event.data as Record<string, unknown> | undefined)?.output || (event.data as Record<string, unknown> | undefined)?.result;
+          const durationMs = (event.duration_ms as number) || ((event.data as Record<string, unknown> | undefined)?.duration_ms as number);
+          const outputSummary = (event.data as Record<string, unknown> | undefined)?.output_summary as string | undefined;
+          const completed = (event.nodes_completed as number) || ((event.data as Record<string, unknown> | undefined)?.nodes_completed as number) || (progress.nodesCompleted + 1);
+          const totalNodes = (event.total_nodes as number) || ((event.data as Record<string, unknown> | undefined)?.total_nodes as number) || progress.totalNodes;
+
+          if (nodeId) {
+            nodeResults.set(nodeId, {
+              nodeId,
+              nodeName,
+              status: 'completed',
+              durationMs,
+              fullOutput: output,
+              outputSummary: outputSummary || (output ? generateOutputSummary(output) : undefined),
+              outputMarkdown: output ? formatOutputToMarkdown(output) : undefined,
+            });
+
+            // 同步更新画布节点详情卡片的实时输出状态（与手动执行逻辑一致）
+            const frontendId = resolveNodeId(nodeId, nodeName);
+            if (frontendId) {
+              updateRealtimeNodeOutput(frontendId, {
+                status: 'completed',
+                outputPreview: outputSummary || (output ? generateOutputSummary(output) : undefined),
+                outputSummary: outputSummary || (output ? generateOutputSummary(output) : undefined),
+                fullOutput: output,
+                nodeId,
+                durationMs,
+                completedAt: (event.timestamp as string) || new Date().toISOString(),
+              });
+            }
+
+            const progressPercent = totalNodes > 0 ? Math.round((completed / totalNodes) * 100) : 0;
+            const newProgress: ExecutionProgress = {
+              ...progress,
+              progress: progressPercent,
+              nodesCompleted: completed,
+              totalNodes,
+              currentNode: null,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+            executionProgressRef.current.progress = newProgress;
+            updateMessageById(messageId, {
+              content: `工作流执行中... (${completed}/${totalNodes})`,
+              data: newProgress as unknown as Record<string, unknown>,
+            });
+          }
+        }
+
+        if (event.event_type === 'node_failed') {
+          const nodeId = (event.node_id as string) || '';
+          const nodeName = (event.node_name as string) || nodeId;
+          const errorMsg = (event.error as string) || ((event.data as Record<string, unknown> | undefined)?.error as string) || '执行失败';
+          if (nodeId) {
+            nodeResults.set(nodeId, {
+              nodeId,
+              nodeName,
+              status: 'failed',
+              error: errorMsg,
+            });
+            // 同步更新画布节点详情卡片的实时输出状态
+            const frontendId = resolveNodeId(nodeId, nodeName);
+            if (frontendId) {
+              updateRealtimeNodeOutput(frontendId, {
+                status: 'failed',
+                error: errorMsg,
+                nodeId,
+                completedAt: (event.timestamp as string) || new Date().toISOString(),
+              });
+            }
+            const newProgress: ExecutionProgress = {
+              ...progress,
+              nodesFailed: (progress.nodesFailed || 0) + 1,
+              currentNode: null,
+              nodeResults: Array.from(nodeResults.values()),
+            };
+            executionProgressRef.current.progress = newProgress;
+            updateMessageById(messageId, {
+              data: newProgress as unknown as Record<string, unknown>,
+            });
+          }
+        }
+      }
+
+      // === 工作流级别事件处理 ===
       if (event.event_type === 'workflow_started') {
         // 更新工作流状态为运行中
-        const updatedList = store.workflowList.map(w => 
-          w.workflowId === workflow_id 
-            ? { 
-                ...w, 
-                lastExecutionStatus: 'running' as const,
-                lastExecutionTriggeredBy: 'scheduler' as const,
-                lastExecutionId: payload.execution_id,
-                lastExecutionAt: payload.timestamp,
-              }
+        const updatedList = store.workflowList.map(w =>
+          w.workflowId === workflow_id
+            ? {
+              ...w,
+              lastExecutionStatus: 'running' as const,
+              lastExecutionTriggeredBy: 'scheduler' as const,
+              lastExecutionId: payload.execution_id,
+              lastExecutionAt: payload.timestamp,
+            }
             : w
         );
         store.setWorkflowList(updatedList);
-        
+
         // 如果当前画布正在显示这个工作流，添加新的执行记录到 executionHistory
         if (isCurrentWorkflow) {
           const totalNodes = (event.total_nodes as number) || 0;
@@ -1665,26 +1928,28 @@ export function useWebSocket() {
           store.addExecutionRecord(newRecord);
         }
 
-        // 添加系统消息通知
-        addMessage({
-          role: 'system',
-          content: `⏰ 定时任务开始执行: ${event.workflow_name || workflow_id}`,
-          timestamp: new Date().toISOString(),
-          messageType: 'text',
-        });
+        // 只在没有追踪该执行时添加系统消息（避免追踪模式下重复通知）
+        if (!isTracking) {
+          addMessage({
+            role: 'system',
+            content: `⏰ 定时任务开始执行: ${event.workflow_name || workflow_id}`,
+            timestamp: new Date().toISOString(),
+            messageType: 'text',
+          });
+        }
       } else if (event.event_type === 'workflow_completed') {
         // 更新工作流状态为成功
-        const updatedList = store.workflowList.map(w => 
-          w.workflowId === workflow_id 
-            ? { 
-                ...w, 
-                lastExecutionStatus: 'success' as const,
-                executionCount: (w.executionCount || 0) + 1,
-              }
+        const updatedList = store.workflowList.map(w =>
+          w.workflowId === workflow_id
+            ? {
+              ...w,
+              lastExecutionStatus: 'success' as const,
+              executionCount: (w.executionCount || 0) + 1,
+            }
             : w
         );
         store.setWorkflowList(updatedList);
-        
+
         // 如果当前画布正在显示这个工作流，更新执行记录状态
         if (isCurrentWorkflow) {
           const nodesCompleted = (event.nodes_completed as number) || 0;
@@ -1699,25 +1964,64 @@ export function useWebSocket() {
           });
         }
 
-        addMessage({
-          role: 'system',
-          content: `✅ 定时任务执行成功: ${event.workflow_name || workflow_id}`,
-          timestamp: new Date().toISOString(),
-          messageType: 'text',
-        });
+        // 如果正在追踪此执行：将进度消息转换为摘要消息（复用手动执行的完成逻辑）
+        if (isTracking && executionProgressRef.current) {
+          const { messageId, progress, nodeResults } = executionProgressRef.current;
+          const nodesCompleted = (event.nodes_completed as number) || progress.nodesCompleted;
+          const nodesFailed = (event.nodes_failed as number) || progress.nodesFailed || 0;
+          const totalDurationMs = (event.total_duration_ms as number) || 0;
+          const finalOutput = (event.data as Record<string, unknown> | undefined)?.final_output || (event.data as Record<string, unknown> | undefined)?.result;
+          const finalNarrative = (event.data as Record<string, unknown> | undefined)?.final_narrative as string | undefined;
+          const finalHighlights = (event.data as Record<string, unknown> | undefined)?.final_highlights as string[] | undefined;
+
+          const summary: ExecutionSummary = {
+            type: 'execution_summary',
+            executionId: payload.execution_id,
+            workflowId: progress.workflowId,
+            workflowName: progress.workflowName,
+            status: 'completed',
+            totalDurationMs,
+            nodesCompleted,
+            nodesFailed,
+            totalNodes: progress.totalNodes,
+            startedAt: progress.startedAt,
+            completedAt: new Date().toISOString(),
+            nodeResults: Array.from(nodeResults.values()),
+            finalOutput,
+            finalOutputMarkdown: finalOutput ? formatOutputToMarkdown(finalOutput) : undefined,
+            finalNarrative: finalNarrative ?? undefined,
+            finalHighlights: finalHighlights ?? undefined,
+          };
+
+          updateMessageById(messageId, {
+            content: '工作流执行完成',
+            messageType: 'execution_summary',
+            data: summary as unknown as Record<string, unknown>,
+          });
+
+          executionProgressRef.current = null;
+          scheduledExecutionTrackingRef.current = null;
+        } else {
+          addMessage({
+            role: 'system',
+            content: `✅ 定时任务执行成功: ${event.workflow_name ?? workflow_id}`,
+            timestamp: new Date().toISOString(),
+            messageType: 'text',
+          });
+        }
       } else if (event.event_type === 'workflow_failed') {
         // 更新工作流状态为失败
-        const updatedList = store.workflowList.map(w => 
-          w.workflowId === workflow_id 
-            ? { 
-                ...w, 
-                lastExecutionStatus: 'failed' as const,
-                executionCount: (w.executionCount || 0) + 1,
-              }
+        const updatedList = store.workflowList.map(w =>
+          w.workflowId === workflow_id
+            ? {
+              ...w,
+              lastExecutionStatus: 'failed' as const,
+              executionCount: (w.executionCount || 0) + 1,
+            }
             : w
         );
         store.setWorkflowList(updatedList);
-        
+
         // 如果当前画布正在显示这个工作流，更新执行记录状态
         if (isCurrentWorkflow) {
           store.updateExecutionRecord(payload.execution_id, {
@@ -1726,30 +2030,67 @@ export function useWebSocket() {
           });
         }
 
-        addMessage({
-          role: 'system',
-          content: `❌ 定时任务执行失败: ${event.workflow_name || workflow_id}${event.error ? ` - ${event.error}` : ''}`,
-          timestamp: new Date().toISOString(),
-          messageType: 'text',
-        });
+        // 如果正在追踪此执行：将进度消息转换为失败的摘要消息
+        if (isTracking && executionProgressRef.current) {
+          const { messageId, progress, nodeResults } = executionProgressRef.current;
+          const errorMsg = (event.error as string) || '执行失败';
+
+          const summary: ExecutionSummary = {
+            type: 'execution_summary',
+            executionId: payload.execution_id,
+            workflowId: progress.workflowId,
+            workflowName: progress.workflowName,
+            status: 'failed',
+            totalDurationMs: (event.total_duration_ms as number) || 0,
+            nodesCompleted: progress.nodesCompleted,
+            nodesFailed: (progress.nodesFailed || 0),
+            totalNodes: progress.totalNodes,
+            startedAt: progress.startedAt,
+            completedAt: new Date().toISOString(),
+            nodeResults: Array.from(nodeResults.values()),
+            error: errorMsg,
+          };
+
+          updateMessageById(messageId, {
+            content: '工作流执行失败',
+            messageType: 'execution_summary',
+            data: summary as unknown as Record<string, unknown>,
+          });
+
+          executionProgressRef.current = null;
+          scheduledExecutionTrackingRef.current = null;
+        } else {
+          addMessage({
+            role: 'system',
+            content: `❌ 定时任务执行失败: ${event.workflow_name || workflow_id}${event.error ? ` - ${event.error}` : ''}`,
+            timestamp: new Date().toISOString(),
+            messageType: 'text',
+          });
+        }
       } else if (event.event_type === 'workflow_cancelled') {
         // 更新工作流状态为已取消
-        const updatedList = store.workflowList.map(w => 
-          w.workflowId === workflow_id 
-            ? { 
-                ...w, 
-                lastExecutionStatus: 'cancelled' as const,
-              }
+        const updatedList = store.workflowList.map(w =>
+          w.workflowId === workflow_id
+            ? {
+              ...w,
+              lastExecutionStatus: 'cancelled' as const,
+            }
             : w
         );
         store.setWorkflowList(updatedList);
-        
+
         // 如果当前画布正在显示这个工作流，更新执行记录状态
         if (isCurrentWorkflow) {
           store.updateExecutionRecord(payload.execution_id, {
             status: 'cancelled',
             completedAt: new Date().toISOString(),
           });
+        }
+
+        // 清理追踪状态
+        if (isTracking) {
+          executionProgressRef.current = null;
+          scheduledExecutionTrackingRef.current = null;
         }
 
         addMessage({

@@ -11,6 +11,7 @@
 
 import { io, Socket } from 'socket.io-client';
 import { WSMessageType, type WSMessage } from '../types';
+import { getToken } from './auth';
 
 type MessageHandler = (message: WSMessage) => void;
 
@@ -25,6 +26,7 @@ class SocketIOService {
   // 连接状态回调（保持与原接口兼容）
   private onConnectionChange: ((connected: boolean) => void) | null = null;
   private onReconnectingChange: ((reconnecting: boolean, attempt: number) => void) | null = null;
+  private onAuthError: (() => void) | null = null;
 
   get isConnected(): boolean {
     return this.socket?.connected ?? false;
@@ -36,6 +38,10 @@ class SocketIOService {
 
   setReconnectingCallback(callback: (reconnecting: boolean, attempt: number) => void): void {
     this.onReconnectingChange = callback;
+  }
+
+  setAuthErrorCallback(callback: () => void): void {
+    this.onAuthError = callback;
   }
 
   connect(sessionId: string): Promise<void> {
@@ -65,9 +71,10 @@ class SocketIOService {
 
       // 创建 Socket.IO 连接
       this.socket = io(url, {
-        // 认证信息
+        // 认证信息（含 JWT token）
         auth: {
           session_id: sessionId,
+          token: getToken(),
         },
         // Socket.IO 内置重连配置
         reconnection: true,
@@ -127,7 +134,14 @@ class SocketIOService {
       // 错误处理
       this.socket.on('connect_error', (error) => {
         console.error('Socket.IO: 连接错误:', error.message);
-        // 不在这里 reject，让 Socket.IO 自动重连
+        // 如果是认证错误，通知上层处理（不自动重连）
+        if (error.message?.includes('认证失败') || error.message?.includes('token')) {
+          console.error('Socket.IO: 认证失败，停止重连');
+          this.socket?.disconnect();
+          this.onAuthError?.();
+          return;
+        }
+        // 其他错误让 Socket.IO 自动重连
       });
 
       // 注册所有消息类型的监听器

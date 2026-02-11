@@ -19,7 +19,7 @@ import traceback
 import time
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Depends
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.staticfiles import StaticFiles
     from fastapi.responses import HTMLResponse
@@ -249,7 +249,22 @@ def create_app():
 
     @sio.event
     async def connect(sid, environ, auth):
-        """Socket.IO 连接事件"""
+        """Socket.IO 连接事件（需要 JWT 认证）"""
+        from src.web.auth import verify_token
+
+        # ===== JWT 认证 =====
+        token = auth.get("token") if auth else None
+        if not token:
+            logger.warning(f"Socket.IO 连接被拒绝: 未提供 token, sid={sid}")
+            raise ConnectionRefusedError("认证失败：未提供 token")
+
+        user_info = verify_token(token)
+        if not user_info:
+            logger.warning(f"Socket.IO 连接被拒绝: token 无效, sid={sid}")
+            raise ConnectionRefusedError("认证失败：token 无效或已过期")
+
+        logger.info(f"Socket.IO 认证通过: user={user_info.username}, sid={sid}")
+
         # 获取 session_id
         session_id = None
         if auth:
@@ -269,7 +284,7 @@ def create_app():
 
             session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
 
-        user_id = auth.get("user_id") if auth else None
+        user_id = user_info.username
 
         # 注册连接
         await sio_manager.connect(sid, session_id, user_id)
@@ -463,7 +478,41 @@ def create_app():
         allow_headers=["*"],
     )
 
-    # 注册路由
+    # =============== 认证路由（无需认证）===============
+    from src.web.auth import (
+        LoginRequest,
+        LoginResponse,
+        UserInfo,
+        authenticate_user,
+        create_access_token,
+        get_current_user,
+        verify_token as auth_verify_token,
+    )
+
+    @app.post("/api/auth/login", response_model=LoginResponse)
+    async def login(request: LoginRequest):
+        """用户登录"""
+        user = authenticate_user(request.username, request.password)
+        if not user:
+            from fastapi import HTTPException, status
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="用户名或密码错误",
+            )
+        token = create_access_token(user["username"])
+        return LoginResponse(
+            access_token=token,
+            username=user["username"],
+            display_name=user["display_name"],
+            role=user["role"],
+        )
+
+    @app.get("/api/auth/me", response_model=UserInfo)
+    async def get_me(current_user: UserInfo = Depends(get_current_user)):
+        """获取当前用户信息"""
+        return current_user
+
+    # 注册路由（所有业务路由需要认证）
     from src.web.routers import (
         sessions_router,
         workflows_router,
@@ -472,11 +521,12 @@ def create_app():
         executions_router,
     )
 
-    app.include_router(sessions_router, prefix="/api")
-    app.include_router(workflows_router, prefix="/api")
-    app.include_router(execution_router, prefix="/api")
-    app.include_router(agents_router, prefix="/api")
-    app.include_router(executions_router, prefix="/api")
+    auth_dependency = [Depends(get_current_user)]
+    app.include_router(sessions_router, prefix="/api", dependencies=auth_dependency)
+    app.include_router(workflows_router, prefix="/api", dependencies=auth_dependency)
+    app.include_router(execution_router, prefix="/api", dependencies=auth_dependency)
+    app.include_router(agents_router, prefix="/api", dependencies=auth_dependency)
+    app.include_router(executions_router, prefix="/api", dependencies=auth_dependency)
 
     # =============== 保留传统 WebSocket 端点（向后兼容）===============
 
@@ -485,8 +535,9 @@ def create_app():
         websocket: WebSocket,
         session_id: str,
         user_id: Optional[str] = Query(None),
+        token: Optional[str] = Query(None),
     ):
-        """传统 WebSocket 连接端点（向后兼容）"""
+        """传统 WebSocket 连接端点（向后兼容，需要 token 查询参数）"""
         from src.web.websocket.manager import manager
         from src.web.websocket.handlers import (
             WebSocketHandler,
@@ -494,8 +545,17 @@ def create_app():
         )
         from src.evolution.conversational_builder import ConversationalWorkflowBuilder
 
+        # JWT 认证
+        if not token:
+            await websocket.close(code=4001, reason="认证失败：未提供 token")
+            return
+        ws_user = auth_verify_token(token)
+        if not ws_user:
+            await websocket.close(code=4001, reason="认证失败：token 无效或已过期")
+            return
+
         # 连接
-        await manager.connect(websocket, session_id, user_id)
+        await manager.connect(websocket, session_id, ws_user.username)
 
         try:
             # 获取或创建会话
@@ -544,6 +604,7 @@ def create_app():
     async def websocket_new_session(
         websocket: WebSocket,
         user_id: Optional[str] = Query(None),
+        token: Optional[str] = Query(None),
     ):
         """创建新会话的 WebSocket 端点"""
         from datetime import datetime
@@ -552,7 +613,7 @@ def create_app():
             f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         )
 
-        await websocket_endpoint(websocket, session_id, user_id)
+        await websocket_endpoint(websocket, session_id, user_id, token)
 
     # 健康检查
     @app.get("/health")
