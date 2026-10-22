@@ -20,13 +20,12 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: >-
-    review-approval-${{ github.repository }}-${{ github.event.workflow_run.display_title || format('Review approval for PR #{0}', github.event.issue.number || github.event.pull_request.number || inputs.pull_number) }}
-  cancel-in-progress: false
-
 jobs:
   approve:
+    concurrency:
+      group: >-
+        review-approval-${{ github.repository }}-${{ github.event.workflow_run.display_title || format('Review approval for PR #{0}', github.event.issue.number || github.event.pull_request.number || inputs.pull_number) }}
+      cancel-in-progress: false
     if: >-
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request &&
@@ -87,13 +86,42 @@ jobs:
               .addRaw(`PR #${result.number}: ${result.result}\n\nCommit: ${result.sha}\n\n${result.reason || result.url || ''}`)
               .write();
 
-  sweep:
+  discover-sweep:
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && !inputs.pull_number &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      numbers: ${{ steps.pulls.outputs.numbers }}
+    steps:
+      - name: List open pull requests
+        id: pulls
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              ...context.repo, state: 'open', per_page: 100,
+            });
+            core.setOutput('numbers', JSON.stringify(pulls.map(pr => pr.number)));
+
+  sweep:
+    needs: discover-sweep
+    if: needs.discover-sweep.outputs.numbers != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        pull_number: ${{ fromJSON(needs.discover-sweep.outputs.numbers) }}
+    concurrency:
+      group: >-
+        review-approval-${{ github.repository }}-${{ format('Review approval for PR #{0}', matrix.pull_number) }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
       issues: read
@@ -111,20 +139,19 @@ jobs:
           app-id: ${{ vars.REVIEW_APP_ID }}
           private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
           permission-pull-requests: write
-      - name: Reconcile all open pull requests
+      - name: Reconcile current-head approval
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
         env:
           REVIEW_APP_TOKEN: ${{ steps.review-token.outputs.token }}
           REVIEW_APP_SLUG: ${{ steps.review-token.outputs.app-slug }}
+          PULL_NUMBER: ${{ matrix.pull_number }}
         with:
           script: |
-            const { reconcileRepository } = require(`${process.env.GITHUB_WORKSPACE}/scripts/auto-approve-review.cjs`);
+            const { reconcileApproval, contextForPullRequest } = require(`${process.env.GITHUB_WORKSPACE}/scripts/auto-approve-review.cjs`);
             const appGithub = new github.constructor({ auth: process.env.REVIEW_APP_TOKEN });
-            const results = await reconcileRepository({ github, appGithub, context,
+            const result = await reconcileApproval({ github, appGithub,
+              context: contextForPullRequest(context, process.env.PULL_NUMBER),
               appSlug: process.env.REVIEW_APP_SLUG });
-            for (const result of results) core.info(JSON.stringify(result));
-            await core.summary.addHeading('Repository approval reconciliation')
-              .addCodeBlock(JSON.stringify(results, null, 2), 'json').write();
-            if (results.some(result => result.result === 'failed')) {
-              core.setFailed('Some pull requests could not be verified; see reconciliation results.');
-            }
+            core.info(JSON.stringify(result));
+            await core.summary.addHeading('Review approval result')
+              .addCodeBlock(JSON.stringify(result, null, 2), 'json').write();

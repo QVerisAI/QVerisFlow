@@ -196,25 +196,12 @@ async function reconcileApproval({ github, appGithub, context, appSlug }) {
 }
 
 
-async function reconcileRepository(options) {
-  const { github, context } = options;
-  const pulls = await github.paginate(github.rest.pulls.list, {
-    ...context.repo, state: 'open', per_page: 100,
-  });
-  const results = [];
-  for (const pr of pulls) {
-    try {
-      results.push(await reconcileApproval({ ...options, context: {
-        ...context, repo: context.repo, eventName: 'workflow_dispatch', payload: {
-          repository: context.payload.repository,
-          inputs: { pull_number: String(pr.number) },
-        },
-      } }));
-    } catch (error) {
-      results.push({ number: pr.number, result: 'failed', reason: error.message });
-    }
-  }
-  return results;
+
+function contextForPullRequest(context, number) {
+  return { repo: context.repo, eventName: 'workflow_dispatch', payload: {
+    repository: context.payload.repository,
+    inputs: { pull_number: String(number) },
+  } };
 }
 
-module.exports = { reconcileRepository, isTrustedReceipt, receiptForHead, pullNumberFromContext, reconcileApproval };
+module.exports = { contextForPullRequest, isTrustedReceipt, receiptForHead, pullNumberFromContext, reconcileApproval };

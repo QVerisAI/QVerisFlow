@@ -365,37 +365,24 @@ test('all human review transitions notify a secret-capable receiver without chec
   assert.match(receiver, /pull_request_target:\s*\n\s*types: \[[^\]]*\bedited\b/);
 });
 
-test('repository sweeps paginate open PRs and continue after one verification failure', async () => {
-  const list = () => {};
-  const seen = [];
-  const github = {
-    rest: { pulls: { list,
-      get: async ({pull_number, owner, repo}) => {
-        assert.equal(owner, 'QVerisAI');
-        assert.equal(repo, 'qveris-agent-toolkit');
-        seen.push(pull_number);
-        if (pull_number === 1) throw new Error('Temporary read failure');
-        return {data: {state: 'open', draft: true, base: {ref: 'main'}, head: {sha}, user: {login: 'author'}}};
-      }, listReviews: () => {} } },
-    paginate: async (method, params) => {
-      if (method === list) {
-        assert.equal(params.state, 'open');
-        assert.equal(params.per_page, 100);
-        return [{number: 1}, {number: 2}];
-      }
-      return [];
-    },
-  };
+
+test('sweep contexts retain prototype-backed repository identity and share event concurrency', () => {
   const context = Object.assign(Object.create({
     get repo() { return {owner: 'QVerisAI', repo: 'qveris-agent-toolkit'}; },
   }), {payload: fixture().context.payload});
-  const results = await policy.reconcileRepository({github, appGithub: {},
-    appSlug: 'qverisai-review-bot', context});
-  assert.deepEqual(seen, [1, 2]);
-  assert.deepEqual(results.map(x => x.result), ['failed', 'withheld']);
+  const target = policy.contextForPullRequest(context, 7);
+  assert.deepEqual(target.repo, {owner: 'QVerisAI', repo: 'qveris-agent-toolkit'});
+  assert.equal(target.payload.inputs.pull_number, '7');
+  assert.equal(target.payload.repository.default_branch, 'main');
   const workflow = readFileSync(new URL('../.github/workflows/review-auto-approve.yml', import.meta.url), 'utf8');
+  const groups = workflow.split('\n').filter(line => line.includes('review-approval-${{ github.repository }}'));
+  assert.equal(groups.length, 2);
+  for (const group of groups) assert.ok(group.includes("format('Review approval for PR #{0}',"));
+  assert.match(groups[0], /workflow_run.display_title/);
+  assert.match(groups[1], /matrix.pull_number/);
+  assert.match(workflow, /fail-fast: false/);
+  assert.match(workflow, /contextForPullRequest\(context, process.env.PULL_NUMBER\)/);
   assert.match(workflow, /schedule:\s*\n\s*- cron:/);
-  assert.match(workflow, /reconcileRepository/);
 });
 
 // Captured GraphQL identity shape differs from the REST review identity.
