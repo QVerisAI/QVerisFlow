@@ -1,6 +1,8 @@
 name: Review auto approval
 
 on:
+  schedule:
+    - cron: '23 * * * *'
   issue_comment:
     types: [created, edited, deleted]
   workflow_run:
@@ -12,7 +14,7 @@ on:
     inputs:
       pull_number:
         description: Pull request number to reconcile against its current head
-        required: true
+        required: false
         type: number
 
 permissions:
@@ -35,6 +37,7 @@ jobs:
        github.event.workflow_run.conclusion == 'success') ||
       github.event_name == 'pull_request_target' ||
       (github.event_name == 'workflow_dispatch' &&
+       inputs.pull_number &&
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -83,3 +86,45 @@ jobs:
             await core.summary.addHeading('Review approval result')
               .addRaw(`PR #${result.number}: ${result.result}\n\nCommit: ${result.sha}\n\n${result.reason || result.url || ''}`)
               .write();
+
+  sweep:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && !inputs.pull_number &&
+       github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Check out trusted approval logic
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Create repository-scoped review token
+        id: review-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ vars.REVIEW_APP_ID }}
+          private-key: ${{ secrets.REVIEW_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+      - name: Reconcile all open pull requests
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          REVIEW_APP_TOKEN: ${{ steps.review-token.outputs.token }}
+          REVIEW_APP_SLUG: ${{ steps.review-token.outputs.app-slug }}
+        with:
+          script: |
+            const { reconcileRepository } = require(`${process.env.GITHUB_WORKSPACE}/scripts/auto-approve-review.cjs`);
+            const appGithub = new github.constructor({ auth: process.env.REVIEW_APP_TOKEN });
+            const results = await reconcileRepository({ github, appGithub, context,
+              appSlug: process.env.REVIEW_APP_SLUG });
+            for (const result of results) core.info(JSON.stringify(result));
+            await core.summary.addHeading('Repository approval reconciliation')
+              .addCodeBlock(JSON.stringify(results, null, 2), 'json').write();
+            if (results.some(result => result.result === 'failed')) {
+              core.setFailed('Some pull requests could not be verified; see reconciliation results.');
+            }

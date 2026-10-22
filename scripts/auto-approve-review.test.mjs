@@ -364,3 +364,31 @@ test('all human review transitions notify a secret-capable receiver without chec
   assert.match(receiver, /ref: \$\{\{ github.event.repository.default_branch \}\}/);
   assert.match(receiver, /pull_request_target:\s*\n\s*types: \[[^\]]*\bedited\b/);
 });
+
+test('repository sweeps paginate open PRs and continue after one verification failure', async () => {
+  const list = () => {};
+  const seen = [];
+  const github = {
+    rest: { pulls: { list,
+      get: async ({pull_number}) => {
+        seen.push(pull_number);
+        if (pull_number === 1) throw new Error('Temporary read failure');
+        return {data: {state: 'open', draft: true, base: {ref: 'main'}, head: {sha}, user: {login: 'author'}}};
+      }, listReviews: () => {} } },
+    paginate: async (method, params) => {
+      if (method === list) {
+        assert.equal(params.state, 'open');
+        assert.equal(params.per_page, 100);
+        return [{number: 1}, {number: 2}];
+      }
+      return [];
+    },
+  };
+  const results = await policy.reconcileRepository({github, appGithub: {},
+    appSlug: 'qverisai-review-bot', context: fixture().context});
+  assert.deepEqual(seen, [1, 2]);
+  assert.deepEqual(results.map(x => x.result), ['failed', 'withheld']);
+  const workflow = readFileSync(new URL('../.github/workflows/review-auto-approve.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /schedule:\s*\n\s*- cron:/);
+  assert.match(workflow, /reconcileRepository/);
+});
