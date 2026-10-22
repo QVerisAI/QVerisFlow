@@ -370,7 +370,9 @@ test('repository sweeps paginate open PRs and continue after one verification fa
   const seen = [];
   const github = {
     rest: { pulls: { list,
-      get: async ({pull_number}) => {
+      get: async ({pull_number, owner, repo}) => {
+        assert.equal(owner, 'QVerisAI');
+        assert.equal(repo, 'qveris-agent-toolkit');
         seen.push(pull_number);
         if (pull_number === 1) throw new Error('Temporary read failure');
         return {data: {state: 'open', draft: true, base: {ref: 'main'}, head: {sha}, user: {login: 'author'}}};
@@ -384,8 +386,11 @@ test('repository sweeps paginate open PRs and continue after one verification fa
       return [];
     },
   };
+  const context = Object.assign(Object.create({
+    get repo() { return {owner: 'QVerisAI', repo: 'qveris-agent-toolkit'}; },
+  }), {payload: fixture().context.payload});
   const results = await policy.reconcileRepository({github, appGithub: {},
-    appSlug: 'qverisai-review-bot', context: fixture().context});
+    appSlug: 'qverisai-review-bot', context});
   assert.deepEqual(seen, [1, 2]);
   assert.deepEqual(results.map(x => x.result), ['failed', 'withheld']);
   const workflow = readFileSync(new URL('../.github/workflows/review-auto-approve.yml', import.meta.url), 'utf8');

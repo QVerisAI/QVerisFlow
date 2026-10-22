@@ -203,7 +203,7 @@ async function reconcileRepository(options) {
   for (const pr of pulls) {
     try {
       results.push(await reconcileApproval({ ...options, context: {
-        ...context, eventName: 'workflow_dispatch', payload: {
+        ...context, repo: context.repo, eventName: 'workflow_dispatch', payload: {
           repository: context.payload.repository,
           inputs: { pull_number: String(pr.number) },
         },
