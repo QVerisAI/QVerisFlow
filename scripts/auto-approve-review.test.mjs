@@ -395,3 +395,14 @@ test('unresolved GraphQL bot findings withdraw approval by stable numeric identi
     assert.deepEqual(f.writes.map(x => x.type), ['dismiss']);
   }
 });
+
+test('shared-head workflow metadata can contain additional related PRs', () => {
+  for (const numbers of [[440, 437], [437, 440]]) {
+    const context = {eventName: 'workflow_run', payload: {workflow_run:
+      notification({pull_requests: numbers.map(number => ({number}))})}};
+    assert.equal(policy.pullNumberFromContext(context), 440);
+  }
+  assert.throws(() => policy.pullNumberFromContext({eventName: 'workflow_run',
+    payload: {workflow_run: notification({pull_requests: [{number: 437}, {number: 441}]})}}),
+    /metadata does not match/);
+});

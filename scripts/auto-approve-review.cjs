@@ -72,7 +72,8 @@ function pullNumberFromContext(context) {
     const match = run.display_title?.match(/^Review approval for PR #([1-9][0-9]*)$/);
     if (!match) throw new Error('Review notification has no valid PR number.');
     value = match[1];
-    if ((run.pull_requests || []).some((pr) => pr.number !== Number(value))) {
+    const relatedPulls = run.pull_requests || [];
+    if (relatedPulls.length && !relatedPulls.some((pr) => pr.number === Number(value))) {
       throw new Error('Review notification PR metadata does not match.');
     }
   } else {
