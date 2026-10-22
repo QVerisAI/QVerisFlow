@@ -1,0 +1,17 @@
+name: Review approval receipt
+run-name: 'Review approval for PR #${{ github.event.pull_request.number }}'
+
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+# Fork reviews cannot access secrets. This workflow only forwards a notification;
+# the default-branch workflow re-reads the PR's facts before using App credentials.
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo 'Review changed; the trusted approval workflow will reconcile current facts.'
