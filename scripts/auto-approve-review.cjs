@@ -1,6 +1,5 @@
 const REVIEWER_ID = 199175422;
 const REVIEW_APP_ID = 1144995;
-const REVIEWER_LOGIN = 'chatgpt-codex-connector[bot]';
 
 function isTrustedReceipt(item) {
   return (
@@ -34,7 +33,7 @@ async function hasUnresolvedFindings(github, repo, number) {
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $number) {
           reviewThreads(first: 100, after: $cursor) {
-            nodes { isResolved comments(first: 1) { nodes { author { login } } } }
+            nodes { isResolved comments(first: 1) { nodes { author { __typename login ... on Bot { databaseId } } } } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -45,7 +44,10 @@ async function hasUnresolvedFindings(github, repo, number) {
     const threads = data.repository?.pullRequest?.reviewThreads;
     if (!threads) throw new Error('Unable to read review threads; approval withheld.');
     if (
-      threads.nodes.some((thread) => !thread.isResolved && thread.comments.nodes[0]?.author?.login === REVIEWER_LOGIN)
+      threads.nodes.some((thread) => {
+        const author = thread.comments.nodes[0]?.author;
+        return !thread.isResolved && author?.__typename === 'Bot' && author.databaseId === REVIEWER_ID;
+      })
     )
       return true;
     cursor = threads.pageInfo.hasNextPage ? threads.pageInfo.endCursor : null;

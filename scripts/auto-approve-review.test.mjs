@@ -174,7 +174,7 @@ test('unresolved findings on later thread pages prevent approval', async () => {
     pages: [
       { nodes: [], pageInfo: { hasNextPage: true, endCursor: 'next' } },
       {
-        nodes: [{ isResolved: false, comments: { nodes: [{ author: { login: reviewer.login } }] } }],
+        nodes: [{ isResolved: false, comments: { nodes: [{ author: { __typename: 'Bot', databaseId: reviewer.id, login: 'chatgpt-codex-connector' } }] } }],
         pageInfo: { hasNextPage: false },
       },
     ],
@@ -396,4 +396,15 @@ test('repository sweeps paginate open PRs and continue after one verification fa
   const workflow = readFileSync(new URL('../.github/workflows/review-auto-approve.yml', import.meta.url), 'utf8');
   assert.match(workflow, /schedule:\s*\n\s*- cron:/);
   assert.match(workflow, /reconcileRepository/);
+});
+
+// Captured GraphQL identity shape differs from the REST review identity.
+test('unresolved GraphQL bot findings withdraw approval by stable numeric identity', async () => {
+  for (const login of ['chatgpt-codex-connector', reviewer.login]) {
+    const f = fixture({ reviews: [appApproval()], threads: [{isResolved: false,
+      comments: {nodes: [{author: {__typename: 'Bot', databaseId: reviewer.id, login}}]},
+    }] });
+    assert.equal((await f.run()).result, 'withheld');
+    assert.deepEqual(f.writes.map(x => x.type), ['dismiss']);
+  }
 });
