@@ -70,3 +70,20 @@ Run policy regression tests without network calls or credentials:
 ```bash
 node --test scripts/auto-approve-review.test.mjs
 ```
+
+## Thread state changes and full reconciliation
+
+GitHub Actions does not directly support the review-thread resolution webhook.
+An hourly default-branch sweep re-reads all open PRs, including thread state, and
+withdraws or restores this App's approvals using the same policy. Scheduled runs
+can be delayed by GitHub. For immediate verification after resolving or reopening
+a thread, dispatch the workflow without a PR number:
+
+```bash
+gh workflow run review-auto-approve.yml --repo QVerisAI/QVerisFlow --ref main
+```
+
+Each sweep PR shares its concurrency group with normal event reconciliation.
+The paginated sweep uses independent matrix jobs with fail-fast disabled, so one
+PR verification failure does not skip the remaining PRs.
+Normal review receipts still reconcile immediately through their event handlers.
