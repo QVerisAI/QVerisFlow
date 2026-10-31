@@ -22,6 +22,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     # ===== HTTP 客户端 =====
     "httpx>=0.25.0",
+    "mcp>=1.30.0,<2",
     "requests>=2.31.0",
     # ===== 数据库 =====
     "sqlalchemy[asyncio]>=2.0.0",

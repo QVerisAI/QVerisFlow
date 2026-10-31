@@ -142,6 +142,38 @@ tool_references:
   - tool_id: qveris_execute_tool
 ```
 
+### 免费网页搜索和页面读取
+
+内置的 `parallel_web_search` 和 `parallel_web_fetch` 通过
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+提供无需账号或 API Key 的网页搜索和内容提取。匿名搜索使用 Fast 模式，服务有速率限制。
+导入 `src.tools` 会将工具注册到默认注册表；自定义注册表使用
+`register_builtin_tools(registry)`。没有指定 `tool_references` 的 Agent 会自动加载这些工具。
+
+已有的显式工具列表保持不变。需要启用网页工具时，在 Agent 定义中添加：
+
+```yaml
+tool_references:
+  - tool_id: parallel_web_search
+    alias: 网页搜索
+    tool_type: builtin
+  - tool_id: parallel_web_fetch
+    alias: 读取网页
+    tool_type: builtin
+```
+
+`parallel_web_search` 接收 `objective` 和 `search_queries`（至少一个查询），返回来源 URL 和相关摘录。
+`parallel_web_fetch` 接收 `urls`（1–20 个 HTTP/HTTPS URL），可选
+`objective`、`search_queries` 和 `full_content`；默认只读取相关摘录。
+每次尝试最长等待 60 秒，现有注册表的重试策略继续生效（默认最多重试 3 次）。
+重试耗尽后，失败会返回到 Agent 工具循环，不会切换其他提供商。
+禁用相应的工具引用（`enabled: false`）或使用不包含网页工具的显式工具列表即可禁止该 Agent 使用它们。
+QVeris 工具和 Claude MCP 配置继续按原配置运行。
+
+同一任务工作空间的搜索和读取使用一个随机会话 UUID，恢复任务时保持不变；
+新任务工作空间使用新 UUID。会话只包含随机标识，不包含任务名称、路径或凭据。
+直接调用注册表时，可传入同一个 `context={"workspace": workspace}` 来关联多次调用。
+
 ## 核心模块
 
 ### 演化层 (Evolution)

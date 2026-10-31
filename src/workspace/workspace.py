@@ -11,6 +11,7 @@ Agent 工作空间管理
 """
 
 from pathlib import Path
+from uuid import UUID, uuid4
 from typing import Dict, Any, Optional, Tuple, List, Union, TYPE_CHECKING
 from datetime import datetime
 import json
@@ -76,6 +77,33 @@ class AgentWorkspace:
 
         if config.auto_create:
             self._ensure_directories()
+
+    @property
+    def web_search_session_id(self) -> str:
+        """Persist an opaque Parallel session for this task, including resumed turns.
+
+        A new task workspace gets a new UUID. No task name, path, user text or
+        credential is used as the identifier. Removing task state starts a new
+        session; retries and reopening the same workspace reuse the saved UUID.
+        """
+        path = self.state_dir / "parallel_search_session"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            return str(UUID(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            pass
+        # Publish a fully written UUID atomically. Concurrent processes reopening
+        # the same task must neither read a partial file nor replace its identity.
+        temporary = self.state_dir / f".parallel_search_session.{uuid4()}"
+        temporary.write_text(str(uuid4()), encoding="utf-8")
+        try:
+            try:
+                path.hardlink_to(temporary)
+            except FileExistsError:
+                pass
+        finally:
+            temporary.unlink()
+        return str(UUID(path.read_text(encoding="utf-8")))
 
     def _ensure_directories(self):
         """确保所有目录存在"""
