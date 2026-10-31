@@ -34,6 +34,8 @@ from .builtin import (
     bash_execute,
     bash_execute_safe,
     register_builtin_tools,
+    parallel_web_search,
+    parallel_web_fetch,
 )
 
 # QVeris 远程工具集成
@@ -81,6 +83,8 @@ __all__ = [
     "bash_execute",
     "bash_execute_safe",
     "register_builtin_tools",
+    "parallel_web_search",
+    "parallel_web_fetch",
     # QVeris 远程工具
     "QVerisClient",
     "QVerisSearchResult",

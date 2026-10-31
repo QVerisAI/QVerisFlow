@@ -16,6 +16,7 @@ from .file_tools import (
     file_append,
 )
 from .bash_tools import bash_execute, bash_execute_safe
+from .web_tools import parallel_web_search, parallel_web_fetch
 
 if TYPE_CHECKING:
     from ..registry import ToolRegistry
@@ -55,6 +56,8 @@ def register_builtin_tools(registry: "ToolRegistry") -> None:
         file_append,
         bash_execute,
         bash_execute_safe,
+        parallel_web_search,
+        parallel_web_fetch,
     ]
 
     for tool_func in builtin_tools:
@@ -74,6 +77,9 @@ __all__ = [
     # Bash 工具
     "bash_execute",
     "bash_execute_safe",
+    # 网页工具
+    "parallel_web_search",
+    "parallel_web_fetch",
     # 注册辅助函数
     "register_builtin_tools",
 ]

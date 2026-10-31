@@ -1557,7 +1557,10 @@ class AgentGraphBuilder:
         executed_via_registry = False
 
         # 创建执行上下文
-        context = {"workspace": workspace}
+        context = {
+            "workspace": workspace,
+            "allowed_tools": {getattr(tool, "name", "") for tool in self.tools},
+        }
 
         try:
             # 优先使用 ToolRegistry 执行（ToolRegistry 内部会记录日志）
